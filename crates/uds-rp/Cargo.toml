@@ -1,0 +1,18 @@
+[package]
+name = "uds-rp"
+description = "Fachada pública del framework de protocolo de escritorio remoto UDS"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+protocol.workspace = true
+transport.workspace = true
+crypt.workspace = true
+codec.workspace = true
+server.workspace = true
+client.workspace = true

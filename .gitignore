@@ -1,4 +1,5 @@
 /target
+# Los documentos de planificación viven solo en local (fuera de git)
 /doc/plan
 # Added by code-review-graph
 .code-review-graph/

@@ -1,6 +1,41 @@
-[package]
-name = "uds-remote-protocol"
+[workspace]
+resolver = "3"
+members = [
+    "crates/uds-rp",
+    "crates/protocol",
+    "crates/transport",
+    "crates/crypt",
+    "crates/codec",
+    "crates/server",
+    "crates/client",
+    "crates/testclient",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "BSD-3-Clause"
+authors = ["Virtual Cable S.L."]
+repository = "https://github.com/VirtualCable/uds-remote-protocol"
 
-[dependencies]
+[workspace.dependencies]
+# Dependencias internas
+protocol = { path = "crates/protocol" }
+transport = { path = "crates/transport" }
+crypt = { path = "crates/crypt" }
+codec = { path = "crates/codec" }
+server = { path = "crates/server" }
+client = { path = "crates/client" }
+
+# Dependencias externas comunes
+tokio = { version = "1", features = ["full"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

@@ -1,0 +1,12 @@
+[package]
+name = "crypt"
+description = "Cifrado del protocolo: AES-256-GCM, HKDF-SHA256, anti-replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
