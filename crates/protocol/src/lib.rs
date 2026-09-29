@@ -6,6 +6,7 @@
 
 pub mod channel;
 pub mod fragment;
+pub mod hex;
 mod control;
 mod error;
 mod hello;

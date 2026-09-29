@@ -12,6 +12,9 @@ pub enum ProtocolError {
     /// Buffer too short for the message.
     #[error("truncated message")]
     Truncated,
+    /// Malformed input that does not match the expected format.
+    #[error("malformed: {0}")]
+    Malformed(&'static str),
     /// Postcard serialization error.
     #[error("serialization error: {0}")]
     Serialization(#[from] postcard::Error),

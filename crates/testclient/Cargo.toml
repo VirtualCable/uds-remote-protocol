@@ -11,6 +11,11 @@ workspace = true
 
 [dependencies]
 client.workspace = true
+transport.workspace = true
+protocol.workspace = true
+codec.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
+minifb = "0.28"

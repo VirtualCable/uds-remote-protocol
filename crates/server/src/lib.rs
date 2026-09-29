@@ -7,3 +7,5 @@
 //! implementation is Windows (Desktop Duplication API + `SendInput`), behind
 //! the `windows-capture` feature; Linux/macOS may be added in the future
 //! without touching the core.
+
+pub mod synthetic;
