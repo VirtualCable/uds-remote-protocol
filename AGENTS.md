@@ -1,4 +1,19 @@
 <!-- code-review-graph MCP tools -->
+## Language and licensing
+
+**This is (going to be) an open-source project.** Rules:
+
+- **All code and code comments: English only.** Identifiers, doc comments,
+  inline comments, commit messages, PR descriptions.
+- **All distributable files: English only.** `README.md`, `AGENTS.md`,
+  `LICENSE`, in-repo docs, examples.
+- **Spanish is fine for the private stuff**: chat communication, private
+  plans (`doc/plan/`, which is git-ignored on purpose), internal notes,
+  "padawan" documents.
+- **License: BSD 3-Clause** (same as uds client). Every crate declares
+  `license = "BSD-3-Clause"` via the workspace; keep the `LICENSE` file at
+  the repo root in sync.
+
 ## MCP Tools: code-review-graph
 
 **This project has a knowledge graph. Start with the code-review-graph
