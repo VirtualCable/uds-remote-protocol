@@ -15,6 +15,10 @@ mod error;
 mod raw;
 mod video;
 
+/// BGRA → I420 color conversion (scalar Rust; libyuv SIMD later, behind a
+/// feature, with the same API).
+pub mod color;
+
 pub use error::{CodecError, Result};
 pub use raw::{RawDecoder, RawEncoder};
 pub use video::{
