@@ -1,5 +1,7 @@
 /target
 # Los documentos de planificación viven solo en local (fuera de git)
 /doc/plan
+# Notas de Gemini (local)
+GEMINI.md
 # Added by code-review-graph
 .code-review-graph/
