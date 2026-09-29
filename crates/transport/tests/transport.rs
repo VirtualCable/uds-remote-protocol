@@ -1,5 +1,5 @@
-//! Tests de integración del crate `transport`: echo E2E cifrado sobre TCP
-//! directo en loopback, con handshake Hello real.
+//! Integration tests of the `transport` crate: encrypted E2E echo over direct
+//! TCP on loopback, with a real Hello handshake.
 
 use protocol::{TICKET_LENGTH, channel};
 use transport::{
@@ -7,17 +7,17 @@ use transport::{
     TransportError,
 };
 
-/// Ticket fijo de test.
+/// Fixed test ticket.
 fn test_ticket() -> [u8; TICKET_LENGTH] {
     [0x42; TICKET_LENGTH]
 }
 
-/// Clave precompartida fija de test.
+/// Fixed test pre-shared key.
 fn test_key() -> [u8; crypt::consts::KEY_LENGTH] {
     [0x07; crypt::consts::KEY_LENGTH]
 }
 
-/// Conecta un cliente con handshake hecho contra `addr`.
+/// Connects a client with a completed handshake against `addr`.
 async fn connect(addr: std::net::SocketAddr) -> EncryptedStream<Box<dyn ReliableTransport>> {
     let connector = DirectConnector::new();
     let (raw, _) = connector
@@ -36,7 +36,7 @@ async fn echo_roundtrip_over_encrypted_tcp() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let mut stream = EncryptedStream::server_handshake(raw, &test_key()).await.unwrap();
+        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
         let mut buf = [0u8; 4096];
         let (ch, n) = stream.recv_into(&mut buf).await.unwrap();
         stream.send(ch, &buf[..n]).await.unwrap();
@@ -59,7 +59,7 @@ async fn multiple_frames_keep_order_and_channels() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let mut stream = EncryptedStream::server_handshake(raw, &test_key()).await.unwrap();
+        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
         let mut buf = [0u8; 4096];
         let mut received = Vec::new();
         for _ in 0..3 {
@@ -90,14 +90,14 @@ async fn large_payload_survives_tcp_fragmentation() {
     let listener = DirectListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
-    // 60_000 bytes: cabe en un registro (MAX_PLAINTEXT = 65517) pero TCP lo
-    // fragmentará en varias lecturas en loopback.
+    // 60_000 bytes: fits in one record (MAX_PLAINTEXT = 65517) but TCP will
+    // fragment it into several reads on loopback.
     let payload: Vec<u8> = (0..60_000u32).map(|i| (i % 251) as u8).collect();
     let expected = payload.clone();
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let mut stream = EncryptedStream::server_handshake(raw, &test_key()).await.unwrap();
+        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
         let mut buf = vec![0u8; 70_000];
         let (ch, n) = stream.recv_into(&mut buf).await.unwrap();
         assert_eq!(ch, channel::DISPLAY);
@@ -119,8 +119,8 @@ async fn payload_above_max_is_rejected() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let _stream = EncryptedStream::server_handshake(raw, &test_key()).await.unwrap();
-        // Se queda escuchando; el cliente fallará antes de enviar.
+        let _stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
+        // Keeps listening; the client will fail before sending.
     });
 
     let mut client = connect(addr).await;
@@ -140,11 +140,11 @@ async fn handshake_with_garbage_is_rejected() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        EncryptedStream::server_handshake(raw, &test_key()).await
+        EncryptedStream::server_handshake(raw, &test_key(), None).await
     });
 
-    // Cliente que habla basura (de la longitud exacta de un Hello) en vez de
-    // un Hello válido: la firma no cuadra y el servidor debe rechazarlo.
+    // Client that sends garbage (of the exact length of a Hello) instead of
+    // a valid Hello: the signature does not match and the server must reject it.
     let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
     socket
         .write_all(&[0xAB; protocol::Hello::ENCODED_LEN])
@@ -162,7 +162,7 @@ async fn server_sees_client_ticket() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let stream = EncryptedStream::server_handshake(raw, &test_key()).await.unwrap();
+        let stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
         stream.peer_hello().unwrap().ticket
     });
 
@@ -193,8 +193,8 @@ async fn reliable_transport_is_dyn_compatible() {
         .connect(&Target::new(addr, test_ticket(), test_key()))
         .await
         .unwrap();
-    // Debe poder convivir detrás de un trait object (requisito del diseño
-    // para el futuro TunnelConnector).
+    // Must be able to live behind a trait object (design requirement for the
+    // future TunnelConnector).
     let mut boxed: Box<dyn ReliableTransport> = Box::new(raw);
     boxed.send(b"ping").await.unwrap();
     boxed.close().await.unwrap();

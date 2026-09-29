@@ -1,6 +1,6 @@
 [package]
 name = "uds-rp"
-description = "Fachada pública del framework de protocolo de escritorio remoto UDS"
+description = "Public facade of the UDS remote desktop protocol framework"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

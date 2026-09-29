@@ -1,4 +1,4 @@
-//! Tests del crate `protocol`: handshake, mensajes de control y canales.
+//! Tests of the `protocol` crate: handshake, control messages and channels.
 
 use protocol::{
     Capability, ChannelId, Command, ControlMessage, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION,
@@ -97,6 +97,10 @@ fn control_message_variants_roundtrip() {
         },
         ControlMessage::ChannelOpenAck { id: channel::DISPLAY },
         ControlMessage::UnsupportedChannel { id: 0x0100 },
+        ControlMessage::UdpOffer {
+            port: 19790,
+            token: [0xA5; 16],
+        },
         ControlMessage::Keepalive,
     ];
     for msg in msgs {

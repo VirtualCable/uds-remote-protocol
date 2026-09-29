@@ -1,6 +1,6 @@
 [package]
 name = "protocol"
-description = "Framing, canales, handshake, negociación y errores del protocolo uds-rp"
+description = "Framing, channels, handshake, negotiation and errors of the uds-rp protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

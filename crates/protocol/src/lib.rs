@@ -1,15 +1,17 @@
 //! # protocol
 //!
-//! Núcleo del protocolo: handshake, mensajes del canal 0, definición de
-//! canales y tipos de error comunes. Crate **síncrono y puro**: no depende de
-//! red, criptografía ni runtime async (compilable a `wasm32-unknown-unknown`).
+//! Protocol core: handshake, channel 0 messages, channel definitions and
+//! common error types. **Synchronous and pure** crate: no dependency on
+//! networking, cryptography or async runtimes (compilable to `wasm32-unknown-unknown`).
 
 pub mod channel;
 mod control;
 mod error;
 mod hello;
+mod probe;
 
 pub use channel::ChannelId;
 pub use control::{Capability, ControlMessage};
 pub use error::ProtocolError;
 pub use hello::{Command, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION, TICKET_LENGTH};
+pub use probe::{Probe, ProbeAck, ProbeError, compute_rtt};

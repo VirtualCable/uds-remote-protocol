@@ -1,18 +1,18 @@
-//! Errores del crate `protocol`.
+//! Errors of the `protocol` crate.
 
-/// Errores de codificación/decodificación del protocolo.
+/// Protocol encoding/decoding errors.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProtocolError {
-    /// Firma del handshake no reconocida.
+    /// Handshake signature not recognized.
     #[error("bad handshake signature")]
     BadSignature,
-    /// Comando de handshake desconocido.
+    /// Unknown handshake command.
     #[error("unknown handshake command: {0:#04X}")]
     UnknownCommand(u8),
-    /// Buffer demasiado corto para el mensaje.
+    /// Buffer too short for the message.
     #[error("truncated message")]
     Truncated,
-    /// Error de serialización postcard.
+    /// Postcard serialization error.
     #[error("serialization error: {0}")]
     Serialization(#[from] postcard::Error),
 }

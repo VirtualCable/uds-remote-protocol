@@ -1,6 +1,6 @@
 [package]
 name = "codec"
-description = "Traits de codecs de vídeo/audio e implementaciones (VP9, Opus) detrás de features"
+description = "Video/audio codec traits and implementations (VP9, Opus) behind features"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

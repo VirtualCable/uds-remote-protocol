@@ -1,17 +1,17 @@
-//! Cifrado de stream (TCP): un paquete por mensaje, orden estricto.
+//! Stream encryption (TCP): one packet per message, strict ordering.
 //!
-//! Formato en wire (estudio §6.1):
+//! Wire format (design doc §6.1):
 //!
 //! ```text
-//! | seq (8B BE) | len (2B BE) | channel_id (2B, cifrado) | ciphertext | tag (16B) |
+//! | seq (8B BE) | len (2B BE) | channel_id (2B, encrypted) | ciphertext | tag (16B) |
 //! ```
 //!
-//! - `len` cubre todo lo que sigue a la cabecera: `channel_id + ciphertext + tag`.
-//! - Nonce: `seq` big-endian en los primeros 8B de 12 (resto ceros).
-//! - AAD: la cabecera completa en claro (`seq || len`, 10B), de modo que una
-//!   manipulación del framing se detecta antes de desincronizar el stream.
-//! - Anti-replay estricto: se rechaza cualquier `seq` menor que el siguiente
-//!   esperado. Claves unidireccionales (ver [`crate::keys`]).
+//! - `len` covers everything after the header: `channel_id + ciphertext + tag`.
+//! - Nonce: `seq` big-endian in the first 8B of 12 (rest zeros).
+//! - AAD: the full cleartext header (`seq || len`, 10B), so any tampering
+//!   with the framing is detected before the stream desynchronizes.
+//! - Strict anti-replay: any `seq` lower than the next expected one is
+//!   rejected. Unidirectional keys (see [`crate::keys`]).
 
 use aes_gcm::aead::{AeadInOut, KeyInit, consts::U12};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
@@ -29,30 +29,38 @@ fn cipher_from_key(key: &[u8; KEY_LENGTH]) -> Aes256Gcm {
     Aes256Gcm::new_from_slice(key).unwrap_or_else(|_| unreachable!("KEY_LENGTH = 32 = AES-256"))
 }
 
-/// Cifrador de stream en una dirección (emisor).
+/// Stream encryptor in one direction (sender).
 pub struct StreamCrypt {
     cipher: Aes256Gcm,
     seq: u64,
 }
 
 impl StreamCrypt {
-    /// Crea el cifrador con la clave de la dirección de envío.
+    /// Creates the encryptor with the sending-direction key.
     #[must_use]
     pub fn new(key: &[u8; KEY_LENGTH]) -> Self {
+        Self::with_seq(key, 0)
+    }
+
+    /// Creates the encryptor resuming from a known `seq` (recovery, §4.3).
+    /// Never pass a `seq` lower than one already used with this key: the
+    /// `(key, nonce)` pair must never repeat.
+    #[must_use]
+    pub fn with_seq(key: &[u8; KEY_LENGTH], seq: u64) -> Self {
         Self {
             cipher: cipher_from_key(key),
-            seq: 0,
+            seq,
         }
     }
 
-    /// `seq` del próximo paquete a cifrar.
+    /// `seq` of the next packet to encrypt.
     #[must_use]
     pub fn seq(&self) -> u64 {
         self.seq
     }
 
-    /// Cifra `plaintext` para `channel_id` y devuelve el paquete completo en
-    /// formato wire (cabecera en claro + channel_id cifrado + tag).
+    /// Encrypts `plaintext` for `channel_id` and returns the full packet in
+    /// wire format (cleartext header + encrypted channel_id + tag).
     pub fn encrypt(&mut self, channel_id: u16, plaintext: &[u8]) -> Result<Vec<u8>, CryptError> {
         if plaintext.len() > MAX_PLAINTEXT {
             return Err(CryptError::PacketTooLarge(plaintext.len()));
@@ -79,44 +87,50 @@ impl StreamCrypt {
     }
 }
 
-/// Descifrador de stream en una dirección (receptor).
+/// Stream decryptor in one direction (receiver).
 pub struct StreamDecrypt {
     cipher: Aes256Gcm,
     next_seq: u64,
 }
 
 impl StreamDecrypt {
-    /// Crea el descifrador con la clave de la dirección de recepción.
+    /// Creates the decryptor with the receiving-direction key.
     #[must_use]
     pub fn new(key: &[u8; KEY_LENGTH]) -> Self {
+        Self::with_seq(key, 0)
+    }
+
+    /// Creates the decryptor resuming from a known `next_seq` (recovery, §4.3).
+    #[must_use]
+    pub fn with_seq(key: &[u8; KEY_LENGTH], next_seq: u64) -> Self {
         Self {
             cipher: cipher_from_key(key),
-            next_seq: 0,
+            next_seq,
         }
     }
 
-    /// Próximo `seq` esperado.
+    /// Next expected `seq`.
     #[must_use]
     pub fn next_seq(&self) -> u64 {
         self.next_seq
     }
 
-    /// Verifica y descifra un paquete completo. Devuelve `(channel_id, plaintext)`.
+    /// Verifies and decrypts a full packet. Returns `(channel_id, plaintext)`.
     pub fn decrypt(&mut self, packet: &[u8]) -> Result<(u16, Vec<u8>), CryptError> {
         if packet.len() < STREAM_HEADER_SIZE + CHANNEL_ID_SIZE + TAG_LENGTH {
             return Err(CryptError::PacketTooShort(packet.len()));
         }
-        let seq = u64::from_be_bytes(packet[..8].try_into().expect("slice de 8 bytes"));
+        let seq = u64::from_be_bytes(packet[..8].try_into().expect("8-byte slice"));
         if seq < self.next_seq {
             return Err(CryptError::Replay {
                 got: seq,
                 expected: self.next_seq,
             });
         }
-        let declared = u16::from_be_bytes(packet[8..10].try_into().expect("slice de 2 bytes"));
+        let declared = u16::from_be_bytes(packet[8..10].try_into().expect("2-byte slice"));
         if packet.len() != STREAM_HEADER_SIZE + declared as usize {
-            // El framing no cuadra; el tag (que cubre `len`) fallaría igualmente,
-            // pero rechazar aquí evita leer de más en un stream TCP.
+            // The framing does not add up; the tag (which covers `len`) would fail
+            // anyway, but rejecting here avoids over-reading a TCP stream.
             return Err(CryptError::Aead);
         }
 
@@ -133,7 +147,7 @@ impl StreamDecrypt {
             .map_err(|_| CryptError::Aead)?;
 
         self.next_seq = seq + 1;
-        let channel_id = u16::from_be_bytes(buf[..2].try_into().expect("slice de 2 bytes"));
+        let channel_id = u16::from_be_bytes(buf[..2].try_into().expect("2-byte slice"));
         buf.drain(..CHANNEL_ID_SIZE);
         Ok((channel_id, buf))
     }

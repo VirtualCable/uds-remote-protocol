@@ -1,6 +1,6 @@
 [package]
 name = "client"
-description = "Lado cliente del protocolo: sesión, decodificación, render y captura de input local"
+description = "Client side of the protocol: session, decoding, rendering and local input capture"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

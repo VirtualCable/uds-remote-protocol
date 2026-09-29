@@ -1,69 +1,79 @@
-//! Mensajes del canal 0 (control), serializados con postcard.
+//! Channel 0 (control) messages, serialized with postcard.
 
 use serde::{Deserialize, Serialize};
 
 use crate::channel::ChannelId;
 use crate::error::ProtocolError;
 
-/// Capacidad anunciada en la negociación (`SERVER_CAPS` / `CLIENT_CAPS`).
+/// Capability announced during negotiation (`SERVER_CAPS` / `CLIENT_CAPS`).
 ///
-/// Lista extensible `(kind, version, params)`: un peer que no conoce un
-/// `kind` lo ignora, de modo que añadir canales o codecs no rompe peers
-/// antiguos.
+/// Extensible `(kind, version, params)` list: a peer that does not know a
+/// `kind` ignores it, so adding channels or codecs does not break old
+/// peers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capability {
-    /// Tipo de capacidad (canal, codec de vídeo, codec de audio, ...).
+    /// Capability type (channel, video codec, audio codec, ...).
     pub kind: u16,
-    /// Versión de la capacidad.
+    /// Capability version.
     pub version: u16,
-    /// Parámetros opacos específicos del tipo.
+    /// Opaque type-specific parameters.
     pub params: Vec<u8>,
 }
 
-/// Mensajes del canal de control.
+/// Control channel messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControlMessage {
-    /// Capacidades del servidor (canales, codecs, topes de política,
-    /// puerto/token UDP cuando exista).
+    /// Server capabilities (channels, codecs, policy limits,
+    /// UDP port/token when available).
     ServerCaps {
-        /// Lista de capacidades ofrecidas.
+        /// List of offered capabilities.
         caps: Vec<Capability>,
     },
-    /// Capacidades del cliente + selección.
+    /// Client capabilities + selection.
     ClientCaps {
-        /// Lista de capacidades solicitadas.
+        /// List of requested capabilities.
         caps: Vec<Capability>,
     },
-    /// Petición de apertura de canal.
+    /// Channel open request.
     ChannelOpen {
-        /// ID de canal solicitado.
+        /// Requested channel ID.
         id: ChannelId,
-        /// Tipo de canal.
+        /// Channel type.
         kind: u16,
-        /// Versión del canal.
+        /// Channel version.
         version: u16,
     },
-    /// Confirmación de apertura de canal.
+    /// Channel open confirmation.
     ChannelOpenAck {
-        /// ID de canal confirmado.
+        /// Confirmed channel ID.
         id: ChannelId,
     },
-    /// Canal no soportado por este peer; la sesión continúa sin él.
+    /// Channel not supported by this peer; the session continues without it.
     UnsupportedChannel {
-        /// ID de canal rechazado.
+        /// Rejected channel ID.
         id: ChannelId,
     },
-    /// Latido del canal de control.
+    /// UDP leg offer (§4.2): server-advertised port and session token.
+    /// The client answers with an encrypted `Probe` datagram; if no valid
+    /// traffic arrives, lossy channels stay on TCP.
+    UdpOffer {
+        /// Server UDP port.
+        port: u16,
+        /// Session token (derived from ticket+secret in direct mode;
+        /// relay-assigned in a future tunnel leg).
+        token: [u8; 16],
+    },
+    /// Control channel heartbeat.
     Keepalive,
 }
 
 impl ControlMessage {
-    /// Serializa el mensaje (postcard).
+    /// Serializes the message (postcard).
     pub fn encode(&self) -> Result<Vec<u8>, ProtocolError> {
         Ok(postcard::to_allocvec(self)?)
     }
 
-    /// Deserializa un mensaje; rechaza bytes sobrantes.
+    /// Deserializes a message; rejects trailing bytes.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         Ok(postcard::from_bytes(bytes)?)
     }

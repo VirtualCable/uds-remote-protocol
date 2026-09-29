@@ -1,31 +1,34 @@
-//! Errores del crate `transport`.
+//! Errors of the `transport` crate.
 
 use protocol::ProtocolError;
 
-/// Errores de transporte y de la capa de stream cifrado.
+/// Transport and encrypted stream layer errors.
 #[derive(Debug, thiserror::Error)]
 pub enum TransportError {
-    /// Error de E/S del socket subyacente.
-    #[error("error de E/S: {0}")]
+    /// I/O error of the underlying socket.
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    /// Error del protocolo (handshake Hello inválido, etc.).
-    #[error("error de protocolo: {0}")]
+    /// Protocol error (invalid Hello handshake, etc.).
+    #[error("protocol error: {0}")]
     Protocol(#[from] ProtocolError),
-    /// Error criptográfico (descifrado, anti-replay, etc.).
-    #[error("error de cifrado: {0}")]
+    /// Cryptographic error (decryption, anti-replay, etc.).
+    #[error("encryption error: {0}")]
     Crypt(#[from] crypt::CryptError),
-    /// El payload excede el máximo de un registro.
-    #[error("payload demasiado grande: {size} bytes (máximo {max})")]
+    /// The payload exceeds the maximum size of a record.
+    #[error("payload too large: {size} bytes (max {max})")]
     TooLarge {
-        /// Tamaño del payload intentado.
+        /// Attempted payload size.
         size: usize,
-        /// Máximo permitido.
+        /// Maximum allowed.
         max: usize,
     },
-    /// El peer cerró la conexión.
-    #[error("conexión cerrada por el peer")]
+    /// The peer closed the connection.
+    #[error("connection closed by peer")]
     Closed,
+    /// Received a valid but unexpected control message at this point.
+    #[error("unexpected control message: {0}")]
+    UnexpectedMessage(String),
 }
 
-/// Resultado estándar del crate.
+/// Standard result of the crate.
 pub type Result<T> = std::result::Result<T, TransportError>;

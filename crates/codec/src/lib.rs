@@ -1,10 +1,10 @@
 //! # codec
 //!
-//! Abstracción de codecs: el protocolo negocia codecs por capacidades y el
-//! core solo ve los traits [`VideoEncoder`]/[`VideoDecoder`] y
-//! [`AudioEncoder`]/[`AudioDecoder`].
+//! Codec abstraction: the protocol negotiates codecs via capabilities and
+//! the core only sees the [`VideoEncoder`]/[`VideoDecoder`] and
+//! [`AudioEncoder`]/[`AudioDecoder`] traits.
 //!
-//! Implementaciones detrás de features (ninguna por defecto):
-//! - `codec-vp9`: vídeo VP9 vía libvpx (royalty-free).
-//! - `codec-opus`: audio Opus (royalty-free), con límites por dirección
-//!   (bitrate, sample rate) negociados en el handshake.
+//! Implementations behind features (none by default):
+//! - `codec-vp9`: VP9 video via libvpx (royalty-free).
+//! - `codec-opus`: Opus audio (royalty-free), with per-direction limits
+//!   (bitrate, sample rate) negotiated during the handshake.

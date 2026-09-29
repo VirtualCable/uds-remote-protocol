@@ -1,7 +1,7 @@
-//! Contratos de transporte (estudio §4.4).
+//! Transport contracts (design doc §4.4).
 //!
-//! El core del protocolo solo conoce estos traits: no sabe si habla con
-//! sockets directos o con un túnel intermedio (tunnel-server UDS, fase 4).
+//! The protocol core only knows these traits: it does not know whether it is
+//! talking to direct sockets or to an intermediate tunnel (UDS tunnel-server, phase 4).
 
 use std::net::SocketAddr;
 
@@ -9,8 +9,8 @@ use async_trait::async_trait;
 
 use crate::error::Result;
 
-/// Destino de una conexión: dirección, ticket de sesión (48 bytes) y clave
-/// precompartida (32 bytes; PSK de la PoC, sustituida por ML-KEM después).
+/// Destination of a connection: address, session ticket (48 bytes) and
+/// pre-shared key (32 bytes; PoC PSK, later replaced by ML-KEM).
 #[derive(Debug, Clone)]
 pub struct Target {
     addr: SocketAddr,
@@ -19,7 +19,7 @@ pub struct Target {
 }
 
 impl Target {
-    /// Crea un destino directo.
+    /// Creates a direct destination.
     #[must_use]
     pub fn new(
         addr: SocketAddr,
@@ -29,57 +29,57 @@ impl Target {
         Self { addr, ticket, key }
     }
 
-    /// Dirección del destino.
+    /// Destination address.
     #[must_use]
     pub fn addr(&self) -> SocketAddr {
         self.addr
     }
 
-    /// Ticket de sesión.
+    /// Session ticket.
     #[must_use]
     pub fn ticket(&self) -> &[u8; protocol::TICKET_LENGTH] {
         &self.ticket
     }
 
-    /// Clave precompartida.
+    /// Pre-shared key.
     #[must_use]
     pub fn key(&self) -> &[u8; crypt::consts::KEY_LENGTH] {
         &self.key
     }
 }
 
-/// Stream fiable y ordenado de bytes crudos (equivalente TCP).
+/// Reliable, ordered stream of raw bytes (TCP equivalent).
 ///
-/// No aplica framing propio: eso es responsabilidad de la capa de protocolo
-/// ([`crate::EncryptedStream`]). Así mapea 1:1 con el stream opaco que
-/// ofrecerá el futuro adaptador a tunnel-server.
+/// It does not apply its own framing: that is the responsibility of the
+/// protocol layer ([`crate::EncryptedStream`]). This maps 1:1 to the opaque
+/// stream the future tunnel-server adapter will offer.
 #[async_trait]
 pub trait ReliableTransport: Send {
-    /// Envía los bytes indicados (escritura completa).
+    /// Sends the given bytes (full write).
     async fn send(&mut self, bytes: &[u8]) -> Result<()>;
-    /// Recibe bytes en `buf`, devolviendo cuántos se leyeron.
+    /// Receives bytes into `buf`, returning how many were read.
     async fn recv_into(&mut self, buf: &mut [u8]) -> Result<usize>;
-    /// Cierra el stream.
+    /// Closes the stream.
     async fn close(self: Box<Self>) -> Result<()>;
 }
 
-/// Transporte de datagramas no fiables (equivalente UDP). Opcional:
-/// si el conector no lo ofrece, todo va por el [`ReliableTransport`].
+/// Unreliable datagram transport (UDP equivalent). Optional:
+/// if the connector does not offer it, everything goes over the [`ReliableTransport`].
 ///
-/// Sin implementación en Fase 0 (llega en Fase 1).
+/// No implementation in Phase 0 (arrives in Phase 1).
 #[async_trait]
 pub trait DatagramTransport: Send {
-    /// Envía un datagrama completo.
+    /// Sends a full datagram.
     async fn send(&mut self, dgram: &[u8]) -> Result<()>;
-    /// Recibe un datagrama completo en `buf`, devolviendo su tamaño.
+    /// Receives a full datagram into `buf`, returning its size.
     async fn recv_into(&mut self, buf: &mut [u8]) -> Result<usize>;
 }
 
-/// Fábrica de conexiones (lado cliente).
+/// Connection factory (client side).
 #[async_trait]
 pub trait Connector: Send + Sync {
-    /// Conecta con `target`, devolviendo el stream fiable crudo y,
-    /// opcionalmente, un transporte de datagramas.
+    /// Connects to `target`, returning the raw reliable stream and,
+    /// optionally, a datagram transport.
     async fn connect(
         &self,
         target: &Target,

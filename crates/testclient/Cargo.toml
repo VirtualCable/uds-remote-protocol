@@ -1,6 +1,6 @@
 [package]
 name = "testclient"
-description = "Cliente de pruebas del protocolo uds-rp (binario de desarrollo)"
+description = "Test client for the uds-rp protocol (development binary)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

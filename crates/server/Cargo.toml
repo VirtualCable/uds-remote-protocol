@@ -1,6 +1,6 @@
 [package]
 name = "server"
-description = "Lado servidor del protocolo: sesión, captura de pantalla e inyección de input"
+description = "Server side of the protocol: session, screen capture and input injection"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-//! Tests del crate `crypt`: derivación de claves y cifrado de stream (TCP).
+//! Tests of the `crypt` crate: key derivation and stream (TCP) encryption.
 
 use crypt::{CryptError, SessionKeys, StreamCrypt, StreamDecrypt, derive_session_keys};
 
@@ -88,7 +88,7 @@ fn tampered_ciphertext_fails() {
 fn tampered_len_fails_before_desync() {
     let (mut enc, mut dec) = pair();
     let mut p = enc.encrypt(0, b"framing").unwrap();
-    // len esta en los bytes 8..10 de la cabecera en claro y forma parte del AAD
+    // len is in bytes 8..10 of the cleartext header and is part of the AAD
     p[9] ^= 0x01;
     assert!(dec.decrypt(&p).is_err());
 }
@@ -126,4 +126,35 @@ fn session_keys_debug_does_not_leak() {
     };
     let dbg = format!("{keys:?}");
     assert!(!dbg.contains('1'));
+}
+
+#[test]
+fn udp_token_is_derived_deterministically() {
+    let t1 = crypt::derive_udp_token(&ticket(), &secret()).unwrap();
+    let t2 = crypt::derive_udp_token(&ticket(), &secret()).unwrap();
+    let other = crypt::derive_udp_token(&[0x99; crypt::consts::TICKET_LENGTH], &secret()).unwrap();
+    assert_eq!(t1, t2);
+    assert_ne!(t1, other);
+    assert_eq!(t1.len(), crypt::consts::TOKEN_LENGTH);
+}
+
+#[test]
+fn stream_resumes_from_given_seq() {
+    // Recovery (§4.3): crypts rebuilt after a TCP drop must continue from
+    // the last known seq, never restart (nonce reuse is forbidden).
+    let keys = derive_session_keys(&ticket(), &secret()).unwrap();
+    let mut tx = crypt::StreamCrypt::with_seq(&keys.c2s, 7);
+    let mut rx = crypt::StreamDecrypt::with_seq(&keys.c2s, 7);
+    assert_eq!(tx.seq(), 7);
+    assert_eq!(rx.next_seq(), 7);
+    let packet = tx.encrypt(0, b"after recover").unwrap();
+    assert_eq!(rx.decrypt(&packet).unwrap().1, b"after recover");
+    // A packet encrypted with a seq below the resumed point is rejected.
+    let mut stale_tx = crypt::StreamCrypt::with_seq(&keys.c2s, 3);
+    let mut stale_rx = crypt::StreamDecrypt::with_seq(&keys.c2s, 7);
+    let stale = stale_tx.encrypt(0, b"old").unwrap();
+    assert!(matches!(
+        stale_rx.decrypt(&stale),
+        Err(CryptError::Replay { .. })
+    ));
 }

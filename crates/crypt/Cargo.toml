@@ -1,6 +1,6 @@
 [package]
 name = "crypt"
-description = "Cifrado del protocolo: AES-256-GCM, HKDF-SHA256, anti-replay"
+description = "Protocol encryption: AES-256-GCM, HKDF-SHA256, anti-replay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

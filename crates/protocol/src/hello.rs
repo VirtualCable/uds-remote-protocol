@@ -1,25 +1,25 @@
-//! Handshake inicial (pre-cifrado): firma + versión + comando + ticket.
+//! Initial handshake (pre-encryption): signature + version + command + ticket.
 
 use crate::error::ProtocolError;
 
-/// Firma al inicio del handshake ("UDSRP/01").
+/// Signature at the start of the handshake ("UDSRP/01").
 pub const HANDSHAKE_SIGNATURE: [u8; 8] = *b"UDSRP/01";
 
-/// Versión actual del protocolo.
+/// Current protocol version.
 pub const PROTOCOL_VERSION: u16 = 1;
 
-/// Longitud del ticket de sesión.
+/// Session ticket length.
 pub const TICKET_LENGTH: usize = 48;
 
-/// Comandos del handshake.
+/// Handshake commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Command {
-    /// Prueba de alcance/validez (sin abrir sesión).
+    /// Reachability/validity probe (without opening a session).
     Test = 0,
-    /// Apertura de sesión nueva.
+    /// New session open.
     Open = 1,
-    /// Recuperación de sesión tras un corte (mismo ticket y seqs).
+    /// Session recovery after a drop (same ticket and seqs).
     Recover = 2,
 }
 
@@ -34,22 +34,22 @@ impl Command {
     }
 }
 
-/// Mensaje HELLO del handshake (8B firma + 2B versión + 1B comando + 48B ticket).
+/// HELLO message of the handshake (8B signature + 2B version + 1B command + 48B ticket).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
-    /// Versión del protocolo del emisor.
+    /// Protocol version of the sender.
     pub version: u16,
-    /// Comando solicitado.
+    /// Requested command.
     pub command: Command,
-    /// Ticket de sesión emitido por el broker (o precompartido en la PoC).
+    /// Session ticket issued by the broker (or pre-shared in the PoC).
     pub ticket: [u8; TICKET_LENGTH],
 }
 
 impl Hello {
-    /// Tamaño en wire del mensaje codificado.
+    /// Wire size of the encoded message.
     pub const ENCODED_LEN: usize = 8 + 2 + 1 + TICKET_LENGTH;
 
-    /// Codifica el mensaje a su forma binaria.
+    /// Encodes the message to its binary form.
     #[must_use]
     pub fn encode(&self) -> [u8; Self::ENCODED_LEN] {
         let mut out = [0u8; Self::ENCODED_LEN];
@@ -60,7 +60,7 @@ impl Hello {
         out
     }
 
-    /// Decodifica y valida un mensaje HELLO.
+    /// Decodes and validates a HELLO message.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         if bytes.len() < Self::ENCODED_LEN {
             return Err(ProtocolError::Truncated);
@@ -69,11 +69,11 @@ impl Hello {
             return Err(ProtocolError::BadSignature);
         }
         Ok(Self {
-            version: u16::from_be_bytes(bytes[8..10].try_into().expect("slice de 2 bytes")),
+            version: u16::from_be_bytes(bytes[8..10].try_into().expect("2-byte slice")),
             command: Command::from_byte(bytes[10])?,
             ticket: bytes[11..11 + TICKET_LENGTH]
                 .try_into()
-                .expect("slice de 48 bytes"),
+                .expect("48-byte slice"),
         })
     }
 }

@@ -1,26 +1,37 @@
-//! Errores del crate `crypt`.
+//! Errors of the `crypt` crate.
 
-/// Errores de cifrado, descifrado y framing criptográfico.
+/// Encryption, decryption and cryptographic framing errors.
 #[derive(Debug, thiserror::Error)]
 pub enum CryptError {
-    /// Fallo de AEAD: tag inválido, AAD manipulado o clave incorrecta.
+    /// AEAD failure: invalid tag, tampered AAD or wrong key.
     #[error("AEAD verification failed")]
     Aead,
-    /// Paquete repetido o más viejo que el último `seq` procesado.
+    /// Repeated packet or older than the last processed `seq`.
     #[error("replay detected: got seq {got}, expected >= {expected}")]
     Replay {
-        /// `seq` recibido.
+        /// Received `seq`.
         got: u64,
-        /// Mínimo `seq` aceptable.
+        /// Minimum acceptable `seq`.
         expected: u64,
     },
-    /// Paquete demasiado corto para contener cabecera + tag.
+    /// Packet too short to contain header + tag.
     #[error("packet too short: {0} bytes")]
     PacketTooShort(usize),
-    /// Payload demasiado grande para el campo `len` de 16 bits.
+    /// Payload too large for the 16-bit `len` field.
     #[error("packet too large: {0} bytes of plaintext")]
     PacketTooLarge(usize),
-    /// HKDF no pudo expandir el material pedido.
+    /// HKDF could not expand the requested material.
     #[error("key derivation failed")]
     KeyDerivation,
+    /// The datagram session token does not match the expected one.
+    #[error("datagram token mismatch")]
+    BadToken,
+    /// Datagram older than the anti-replay window (no longer verifiable).
+    #[error("datagram too old: seq {seq}, window base {window_base}")]
+    TooOld {
+        /// Received `seq`.
+        seq: u64,
+        /// Current base of the sliding window.
+        window_base: u64,
+    },
 }

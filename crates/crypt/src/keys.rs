@@ -1,4 +1,4 @@
-//! Derivación de claves de sesión con HKDF-SHA256.
+//! Session key derivation with HKDF-SHA256.
 
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -6,18 +6,18 @@ use sha2::Sha256;
 use crate::consts::KEY_LENGTH;
 use crate::error::CryptError;
 
-/// Label de separación de dominio para el stream TCP.
+/// Domain separation label for the TCP stream.
 pub const STREAM_INFO: &[u8] = b"crypt";
-/// Label de separación de dominio para datagramas UDP.
+/// Domain separation label for UDP datagrams.
 pub const DATAGRAM_INFO: &[u8] = b"crypt-udp";
 
-/// Claves unidireccionales de sesión (cada dirección tiene clave y contador
-/// `seq` propios, de modo que jamás se repite el par `(clave, nonce)`).
+/// Unidirectional session keys (each direction has its own key and `seq`
+/// counter, so the `(key, nonce)` pair is never repeated).
 #[derive(Clone, PartialEq, Eq)]
 pub struct SessionKeys {
-    /// Clave cliente → servidor.
+    /// Client → server key.
     pub c2s: [u8; KEY_LENGTH],
-    /// Clave servidor → cliente.
+    /// Server → client key.
     pub s2c: [u8; KEY_LENGTH],
 }
 
@@ -39,7 +39,7 @@ impl std::fmt::Debug for SessionKeys {
     }
 }
 
-/// Deriva las claves de sesión para el stream TCP:
+/// Derives the session keys for the TCP stream:
 /// `HKDF-SHA256(salt = ticket, ikm = shared_secret, info = "crypt")`.
 pub fn derive_session_keys(
     ticket: &[u8; crate::consts::TICKET_LENGTH],
@@ -49,7 +49,7 @@ pub fn derive_session_keys(
     SessionKeys::expand(&hk, STREAM_INFO)
 }
 
-/// Deriva las claves de sesión para datagramas UDP (dominio separado).
+/// Derives the session keys for UDP datagrams (separate domain).
 pub fn derive_datagram_keys(
     ticket: &[u8; crate::consts::TICKET_LENGTH],
     shared_secret: &[u8; KEY_LENGTH],
@@ -58,12 +58,31 @@ pub fn derive_datagram_keys(
     SessionKeys::expand(&hk, DATAGRAM_INFO)
 }
 
-/// Avance simétrico de clave (ratchet) para el rekeying periódico:
-/// `HKDF-SHA256(salt = nil, ikm = clave_actual, info = "crypt-rekey")`.
+/// Symmetric key advance (ratchet) for periodic rekeying:
+/// `HKDF-SHA256(salt = nil, ikm = current_key, info = "crypt-rekey")`.
 pub fn ratchet_key(key: &[u8; KEY_LENGTH]) -> Result<[u8; KEY_LENGTH], CryptError> {
     let hk = Hkdf::<Sha256>::new(None, key);
     let mut next = [0u8; KEY_LENGTH];
     hk.expand(b"crypt-rekey", &mut next)
         .map_err(|_| CryptError::KeyDerivation)?;
     Ok(next)
+}
+
+/// Derives the UDP session token (§4.2/§6.2):
+/// `HKDF-SHA256(salt = ticket, ikm = shared_secret, info = "crypt-udp-token")`,
+/// first 16 bytes.
+///
+/// The token binds datagrams to a session. In direct mode both ends derive
+/// it, so it never travels over the control channel (the `UdpOffer` message
+/// still carries it explicitly for flexibility, e.g. a future tunnel leg
+/// where the token is assigned by the relay instead).
+pub fn derive_udp_token(
+    ticket: &[u8; crate::consts::TICKET_LENGTH],
+    shared_secret: &[u8; KEY_LENGTH],
+) -> Result<[u8; crate::consts::TOKEN_LENGTH], CryptError> {
+    let hk = Hkdf::<Sha256>::new(Some(ticket), shared_secret);
+    let mut token = [0u8; crate::consts::TOKEN_LENGTH];
+    hk.expand(b"crypt-udp-token", &mut token)
+        .map_err(|_| CryptError::KeyDerivation)?;
+    Ok(token)
 }

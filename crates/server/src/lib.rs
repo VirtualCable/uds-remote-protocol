@@ -1,9 +1,9 @@
 //! # server
 //!
-//! Lado servidor del protocolo de escritorio remoto.
+//! Server side of the remote desktop protocol.
 //!
-//! La captura de pantalla y la inyección de input van detrás de un trait de
-//! plataforma (`PlatformBackend`), de modo que el núcleo de sesión es
-//! portable. La implementación de referencia es Windows (Desktop Duplication
-//! API + `SendInput`), detrás de la feature `windows-capture`; Linux/macOS
-//! podrán añadirse en el futuro sin tocar el core.
+//! Screen capture and input injection live behind a platform trait
+//! (`PlatformBackend`), so the session core stays portable. The reference
+//! implementation is Windows (Desktop Duplication API + `SendInput`), behind
+//! the `windows-capture` feature; Linux/macOS may be added in the future
+//! without touching the core.

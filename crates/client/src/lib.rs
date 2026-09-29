@@ -1,6 +1,6 @@
 //! # client
 //!
-//! Lado cliente del protocolo de escritorio remoto: gestión de sesión,
-//! decodificación de vídeo/audio, envío de eventos de teclado/ratón y
-//! recuperación de conexión (Recover). No incluye GUI: el render lo aporta
-//! el consumidor (testclient en desarrollo, launcher UDS en producción).
+//! Client side of the remote desktop protocol: session management,
+//! video/audio decoding, keyboard/mouse event sending and connection
+//! recovery (Recover). No GUI included: rendering is provided by the
+//! consumer (testclient during development, UDS launcher in production).

@@ -19,7 +19,7 @@ authors = ["Virtual Cable S.L."]
 repository = "https://github.com/VirtualCable/uds-remote-protocol"
 
 [workspace.dependencies]
-# Dependencias internas
+# Internal dependencies
 protocol = { path = "crates/protocol" }
 transport = { path = "crates/transport" }
 crypt = { path = "crates/crypt" }
@@ -27,7 +27,7 @@ codec = { path = "crates/codec" }
 server = { path = "crates/server" }
 client = { path = "crates/client" }
 
-# Dependencias externas comunes
+# Common external dependencies
 tokio = { version = "1.53", features = ["full"] }
 async-trait = "0.1"
 thiserror = "2.0"
@@ -46,7 +46,7 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -2 }
 pedantic = { level = "warn", priority = -1 }
-# Estilo de docs que no aporta en un proyecto interno (docs en español).
+# Doc style lints that add no value in this project.
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 doc_markdown = "allow"

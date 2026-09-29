@@ -1,9 +1,9 @@
-//! Cliente de pruebas del protocolo uds-rp.
+//! Test client for the uds-rp protocol.
 //!
-//! Binario mínimo de desarrollo para ejercitar el framework extremo a
-//! extremo (conexión directa, sin gateway). El render será minifb en las
-//! primeras fases; el render real lo aportará el launcher UDS.
+//! Minimal development binary to exercise the framework end to end
+//! (direct connection, no gateway). Rendering will be minifb in the early
+//! phases; the real renderer will be provided by the UDS launcher.
 
 fn main() {
-    println!("uds-rp-testclient: esqueleto inicial (fase 0)");
+    println!("uds-rp-testclient: initial skeleton (phase 0)");
 }

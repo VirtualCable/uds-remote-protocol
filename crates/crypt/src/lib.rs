@@ -1,20 +1,22 @@
 //! # crypt
 //!
-//! Criptografía del protocolo, siguiendo el modelo de tunnel-server UDS:
+//! Protocol cryptography, following the UDS tunnel-server model:
 //!
-//! - AES-256-GCM por paquete (el tag de 16B hace de MAC; no hay HMAC aparte).
-//! - Nonce derivado de contador `seq` monotónico; anti-replay estricto en
-//!   stream y por ventana deslizante en datagramas.
-//! - Derivación de claves con HKDF-SHA256 (salt = ticket de 48B), con claves
-//!   unidireccionales (`c2s`/`s2c`) y dominio separado para UDP.
-//! - Rekeying periódico por ratchet HKDF (límite NIST de invocaciones AES-GCM).
-//! - ML-KEM-768 para el intercambio de secreto (fase posterior).
+//! - AES-256-GCM per packet (the 16B tag acts as MAC; no separate HMAC).
+//! - Nonce derived from a monotonic `seq` counter; strict anti-replay on the
+//!   stream and sliding-window anti-replay on datagrams.
+//! - Key derivation with HKDF-SHA256 (salt = 48B ticket), with
+//!   unidirectional keys (`c2s`/`s2c`) and a separate domain for UDP.
+//! - Periodic rekeying via HKDF ratchet (NIST AES-GCM invocation limit).
+//! - ML-KEM-768 for the secret exchange (later phase).
 
 pub mod consts;
+mod datagram;
 mod error;
 mod keys;
 mod stream;
 
+pub use datagram::{DatagramCrypt, DatagramDecrypt};
 pub use error::CryptError;
-pub use keys::{SessionKeys, derive_datagram_keys, derive_session_keys, ratchet_key};
+pub use keys::{SessionKeys, derive_datagram_keys, derive_session_keys, derive_udp_token, ratchet_key};
 pub use stream::{StreamCrypt, StreamDecrypt};

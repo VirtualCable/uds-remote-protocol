@@ -1,7 +1,7 @@
 //! # uds-rp
 //!
-//! Fachada pública del framework de protocolo de escritorio remoto UDS.
-//! Re-exporta los crates internos para consumo desde el launcher.
+//! Public facade of the UDS remote desktop protocol framework.
+//! Re-exports the internal crates for consumption by the launcher.
 
 pub use client;
 pub use codec;

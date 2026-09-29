@@ -1,4 +1,4 @@
-//! Transporte fiable sobre `TcpStream` y conector/escucha directos (PoC).
+//! Reliable transport over `TcpStream` and direct connector/listener (PoC).
 
 use std::net::SocketAddr;
 
@@ -10,13 +10,13 @@ use tracing::debug;
 use crate::error::{Result, TransportError};
 use crate::traits::{Connector, DatagramTransport, ReliableTransport, Target};
 
-/// [`ReliableTransport`] sobre un `TcpStream` real.
+/// [`ReliableTransport`] over a real `TcpStream`.
 pub struct TcpTransport {
     stream: TcpStream,
 }
 
 impl TcpTransport {
-    /// Envuelve un `TcpStream` ya conectado.
+    /// Wraps an already connected `TcpStream`.
     #[must_use]
     pub fn new(stream: TcpStream) -> Self {
         Self { stream }
@@ -60,13 +60,13 @@ impl<T: ReliableTransport + ?Sized> ReliableTransport for Box<T> {
     }
 }
 
-/// Conector directo TCP (fase PoC). El futuro `TunnelConnector` (fase 4)
-/// implementará el mismo trait [`Connector`] hablando con tunnel-server.
+/// Direct TCP connector (PoC phase). The future `TunnelConnector` (phase 4)
+/// will implement the same [`Connector`] trait talking to tunnel-server.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DirectConnector;
 
 impl DirectConnector {
-    /// Crea un conector directo.
+    /// Creates a direct connector.
     #[must_use]
     pub fn new() -> Self {
         Self
@@ -79,39 +79,39 @@ impl Connector for DirectConnector {
         &self,
         target: &Target,
     ) -> Result<(Box<dyn ReliableTransport>, Option<Box<dyn DatagramTransport>>)> {
-        debug!(addr = %target.addr(), "conectando TCP directo");
+        debug!(addr = %target.addr(), "connecting direct TCP");
         let stream = TcpStream::connect(target.addr()).await?;
-        // Sin datagramas en Fase 0 (UDP llega en Fase 1).
+        // No datagrams in Phase 0 (UDP arrives in Phase 1).
         Ok((Box::new(TcpTransport::new(stream)), None))
     }
 }
 
-/// Escucha directa TCP (lado servidor, fase PoC).
+/// Direct TCP listener (server side, PoC phase).
 pub struct DirectListener {
     listener: TcpListener,
 }
 
 impl DirectListener {
-    /// Abre un escucha TCP en `addr` (p.ej. `"0.0.0.0:19790"`).
+    /// Opens a TCP listener on `addr` (e.g. `"0.0.0.0:19790"`).
     pub async fn bind(addr: &str) -> Result<Self> {
         let listener = TcpListener::bind(addr).await?;
         Ok(Self { listener })
     }
 
-    /// Dirección local del escucha.
+    /// Local address of the listener.
     ///
     /// # Errors
-    /// Devuelve error de E/S si el socket ya no es válido.
+    /// Returns an I/O error if the socket is no longer valid.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.listener.local_addr()?)
     }
 
-    /// Acepta una conexión entrante, devolviendo el transporte crudo y la
-    /// dirección remota. El handshake Hello corre a cargo de
+    /// Accepts an incoming connection, returning the raw transport and the
+    /// remote address. The Hello handshake is handled by
     /// [`crate::EncryptedStream::server_handshake`].
     pub async fn accept(&self) -> Result<(Box<dyn ReliableTransport>, SocketAddr)> {
         let (stream, peer) = self.listener.accept().await?;
-        debug!(%peer, "conexión TCP aceptada");
+        debug!(%peer, "TCP connection accepted");
         Ok((Box::new(TcpTransport::new(stream)), peer))
     }
 }
