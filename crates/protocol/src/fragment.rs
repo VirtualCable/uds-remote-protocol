@@ -1,0 +1,185 @@
+//! Frame fragmentation and reassembly (design doc §6.2).
+//!
+//! A video frame may exceed the MTU, so it is split into self-contained
+//! datagrams, each carrying:
+//!
+//! ```text
+//! | display_id (1B) | frame_id (3B BE) | frag_idx (2B BE) | frag_count (2B BE) | chunk ... |
+//! ```
+//!
+//! - `display_id` is reserved for future multi-monitor (0 in phase 1).
+//! - `frame_id` is a 24-bit counter (wraps at 2^24).
+//! - If any fragment is missing, the whole frame is dropped: a half frame
+//!   never reaches the decoder.
+//! - Payload per fragment is capped so the full datagram stays within the
+//!   IPv6-safe MTU budget (see [`fragment_payload_max`]).
+
+use std::collections::HashMap;
+
+use crate::error::ProtocolError;
+
+/// Fragment header size in bytes.
+pub const HEADER_SIZE: usize = 8;
+
+/// Hard cap on datagram plaintext (must match `crypt::MAX_DATAGRAM_PAYLOAD`
+/// — kept as a literal so `protocol` does not depend on `crypt`).
+const MAX_DATAGRAM_PLAINTEXT: usize = 1180;
+
+/// Maximum payload (chunk) bytes per fragment.
+#[must_use]
+pub const fn fragment_payload_max() -> usize {
+    MAX_DATAGRAM_PLAINTEXT - HEADER_SIZE
+}
+
+/// Stateless element splitter.
+pub struct Fragmenter;
+
+impl Fragmenter {
+    /// Splits `element` (one encoded frame) into wire fragments for
+    /// `display_id`/`frame_id`. `frame_id` is truncated to 24 bits.
+    #[must_use]
+    pub fn split(display_id: u8, frame_id: u32, element: &[u8]) -> Vec<Vec<u8>> {
+        let chunk = fragment_payload_max();
+        let count = element.len().div_ceil(chunk).max(1);
+        let frame_id = frame_id & 0x00FF_FFFF;
+        let count16 = u16::try_from(count).expect("fragment count fits u16");
+
+        (0..count)
+            .map(|idx| {
+                let start = idx * chunk;
+                let end = (start + chunk).min(element.len());
+                let mut frag = Vec::with_capacity(HEADER_SIZE + (end - start));
+                frag.push(display_id);
+                frag.extend_from_slice(&frame_id.to_be_bytes()[1..]);
+                frag.extend_from_slice(&u16::try_from(idx).expect("idx < count ≤ u16").to_be_bytes());
+                frag.extend_from_slice(&count16.to_be_bytes());
+                frag.extend_from_slice(&element[start..end]);
+                frag
+            })
+            .collect()
+    }
+}
+
+/// A fully reassembled frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReassembledFrame {
+    /// Display the frame belongs to (0 in phase 1).
+    pub display_id: u8,
+    /// 24-bit frame counter.
+    pub frame_id: u32,
+    /// The complete element (encoded frame).
+    pub data: Vec<u8>,
+}
+
+struct Partial {
+    count: u16,
+    received: u16,
+    total_len: usize,
+    buf: Vec<u8>,
+    present: Vec<bool>,
+}
+
+/// Reassembles fragments into complete frames, dropping incomplete ones.
+///
+/// Tracks a sliding window of recent frame ids; stale partial frames are
+/// evicted when newer frames arrive (no clock needed, §6.2).
+pub struct Reassembler {
+    partials: HashMap<(u8, u32), Partial>,
+    /// Highest frame id seen so far (per display); drives eviction.
+    max_seen: HashMap<u8, u32>,
+}
+
+/// How far behind the newest frame a partial may lag before eviction.
+const TRACK_WINDOW: u32 = 64;
+
+impl Default for Reassembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Reassembler {
+    /// Creates an empty reassembler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            partials: HashMap::new(),
+            max_seen: HashMap::new(),
+        }
+    }
+
+    /// True if `frame_id` (display 0) has all its fragments.
+    #[must_use]
+    pub fn is_frame_complete(&self, frame_id: u32) -> bool {
+        self.partials
+            .get(&(0, frame_id))
+            .is_some_and(|p| p.received == p.count)
+    }
+
+    /// True if `frame_id` (display 0) is still being tracked.
+    #[must_use]
+    pub fn tracks_frame(&self, frame_id: u32) -> bool {
+        self.partials.contains_key(&(0, frame_id))
+    }
+
+    /// Feeds one wire fragment. Returns the complete frame when its last
+    /// missing fragment arrives; `None` while incomplete (or for duplicates).
+    pub fn push(&mut self, frag: &[u8]) -> Result<Option<ReassembledFrame>, ProtocolError> {
+        if frag.len() < HEADER_SIZE {
+            return Err(ProtocolError::Truncated);
+        }
+        let display_id = frag[0];
+        let frame_id = u32::from_be_bytes([0, frag[1], frag[2], frag[3]]);
+        let idx = u16::from_be_bytes(frag[4..6].try_into().expect("2-byte slice"));
+        let count = u16::from_be_bytes(frag[6..8].try_into().expect("2-byte slice"));
+        let chunk = &frag[HEADER_SIZE..];
+        if count == 0 || idx >= count || chunk.len() > fragment_payload_max() {
+            return Err(ProtocolError::Truncated);
+        }
+
+        // Evict partials left too far behind (their remaining fragments are
+        // assumed lost; a half frame is never delivered).
+        let newest = self.max_seen.entry(display_id).or_insert(frame_id);
+        if frame_id >= *newest {
+            *newest = frame_id;
+        }
+        let horizon = newest.saturating_sub(TRACK_WINDOW);
+        self.partials
+            .retain(|&(d, f), _| d != display_id || f >= horizon);
+
+        let key = (display_id, frame_id);
+        let entry = self.partials.entry(key).or_insert_with(|| Partial {
+            count,
+            received: 0,
+            total_len: 0,
+            buf: vec![0u8; fragment_payload_max() * count as usize],
+            present: vec![false; count as usize],
+        });
+        if entry.count != count {
+            // Inconsistent restatement of the same frame: drop it.
+            self.partials.remove(&key);
+            return Err(ProtocolError::Truncated);
+        }
+        if entry.present[idx as usize] {
+            return Ok(None); // duplicate fragment
+        }
+
+        let offset = idx as usize * fragment_payload_max();
+        entry.buf[offset..offset + chunk.len()].copy_from_slice(chunk);
+        entry.present[idx as usize] = true;
+        entry.received += 1;
+        entry.total_len += chunk.len();
+
+        if entry.received == entry.count {
+            let p = self.partials.remove(&key).expect("present above");
+            let mut data = p.buf;
+            data.truncate(p.total_len);
+            return Ok(Some(ReassembledFrame {
+                display_id,
+                frame_id,
+                data,
+            }));
+        }
+        Ok(None)
+    }
+}

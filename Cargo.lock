@@ -135,6 +135,9 @@ dependencies = [
 [[package]]
 name = "codec"
 version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "const-oid"
@@ -414,6 +417,7 @@ dependencies = [
 name = "protocol"
 version = "0.1.0"
 dependencies = [
+ "crypt",
  "postcard",
  "serde",
  "thiserror",

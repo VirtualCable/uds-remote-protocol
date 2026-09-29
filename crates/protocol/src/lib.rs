@@ -5,6 +5,7 @@
 //! networking, cryptography or async runtimes (compilable to `wasm32-unknown-unknown`).
 
 pub mod channel;
+pub mod fragment;
 mod control;
 mod error;
 mod hello;
