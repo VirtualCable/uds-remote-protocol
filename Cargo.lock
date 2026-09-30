@@ -1167,6 +1167,7 @@ dependencies = [
  "async-trait",
  "crypt",
  "protocol",
+ "socket2",
  "thiserror",
  "tokio",
  "tracing",

@@ -61,28 +61,55 @@ impl DatagramCrypt {
 
     /// Encrypts `plaintext` for `channel_id`, returning the complete wire
     /// datagram (cleartext header + encrypted channel_id + tag).
+    ///
+    /// Allocating convenience wrapper; the hot path uses
+    /// [`DatagramCrypt::encrypt_into`] with a reused buffer (§12.6).
     pub fn encrypt(&mut self, channel_id: u16, plaintext: &[u8]) -> Result<Vec<u8>, CryptError> {
+        let mut dgram =
+            vec![0u8; DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE + plaintext.len() + TAG_LENGTH];
+        let n = self.encrypt_into(channel_id, plaintext, &mut dgram)?;
+        debug_assert_eq!(n, dgram.len());
+        Ok(dgram)
+    }
+
+    /// Encrypts `plaintext` for `channel_id` into `out`, returning the wire
+    /// datagram length. No allocations: for the datagram hot path (§12.6).
+    pub fn encrypt_into(
+        &mut self,
+        channel_id: u16,
+        plaintext: &[u8],
+        out: &mut [u8],
+    ) -> Result<usize, CryptError> {
         if plaintext.len() > MAX_DATAGRAM_PAYLOAD {
             return Err(CryptError::PacketTooLarge(plaintext.len()));
         }
+        let total = DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE + plaintext.len() + TAG_LENGTH;
+        if out.len() < total {
+            return Err(CryptError::BufferTooSmall {
+                needed: total,
+                have: out.len(),
+            });
+        }
         let seq = self.seq;
+        let dgram = &mut out[..total];
+        dgram[..TOKEN_LENGTH].copy_from_slice(&self.token);
+        dgram[TOKEN_LENGTH..DATAGRAM_HEADER_SIZE].copy_from_slice(&seq.to_be_bytes());
+        dgram[DATAGRAM_HEADER_SIZE..DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE]
+            .copy_from_slice(&channel_id.to_be_bytes());
+        dgram[DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE..DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE + plaintext.len()]
+            .copy_from_slice(plaintext);
 
-        let mut dgram =
-            Vec::with_capacity(DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE + plaintext.len() + TAG_LENGTH);
-        dgram.extend_from_slice(&self.token);
-        dgram.extend_from_slice(&seq.to_be_bytes());
-        dgram.extend_from_slice(&channel_id.to_be_bytes());
-        dgram.extend_from_slice(plaintext);
-
-        let (head, body) = dgram.split_at_mut(DATAGRAM_HEADER_SIZE);
+        let (head, rest) = dgram.split_at_mut(DATAGRAM_HEADER_SIZE);
+        let body_len = rest.len() - TAG_LENGTH;
+        let (body, tag_slot) = rest.split_at_mut(body_len);
         let tag = self
             .cipher
             .encrypt_inout_detached(&nonce_from_seq(seq), head, body.into())
             .map_err(|_| CryptError::Aead)?;
-        dgram.extend_from_slice(&tag);
+        tag_slot.copy_from_slice(&tag);
 
         self.seq += 1;
-        Ok(dgram)
+        Ok(total)
     }
 }
 
@@ -113,12 +140,36 @@ impl DatagramDecrypt {
 
     /// Verifies and decrypts a complete datagram.
     /// Returns `(channel_id, plaintext)`.
+    ///
+    /// Allocating convenience wrapper; the hot path uses
+    /// [`DatagramDecrypt::decrypt_into`] with a reused buffer (§12.6).
     pub fn decrypt(&mut self, dgram: &[u8]) -> Result<(u16, Vec<u8>), CryptError> {
+        let mut out = vec![0u8; dgram.len()];
+        let (channel_id, n) = self.decrypt_into(dgram, &mut out)?;
+        out.truncate(n);
+        Ok((channel_id, out))
+    }
+
+    /// Verifies and decrypts a complete datagram into `out`, returning
+    /// `(channel_id, plaintext_len)` with the plaintext at `out[..n]`.
+    /// No allocations: for the datagram hot path (§12.6).
+    pub fn decrypt_into(
+        &mut self,
+        dgram: &[u8],
+        out: &mut [u8],
+    ) -> Result<(u16, usize), CryptError> {
         if dgram.len() < DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE + TAG_LENGTH {
             return Err(CryptError::PacketTooShort(dgram.len()));
         }
         if dgram[..TOKEN_LENGTH] != self.token {
             return Err(CryptError::BadToken);
+        }
+        let body_len = dgram.len() - DATAGRAM_HEADER_SIZE - TAG_LENGTH;
+        if out.len() < body_len {
+            return Err(CryptError::BufferTooSmall {
+                needed: body_len,
+                have: out.len(),
+            });
         }
         let seq = u64::from_be_bytes(
             dgram[TOKEN_LENGTH..DATAGRAM_HEADER_SIZE]
@@ -126,14 +177,15 @@ impl DatagramDecrypt {
                 .expect("8-byte slice"),
         );
 
-        let (body, tag) = dgram[DATAGRAM_HEADER_SIZE..].split_at(dgram.len() - DATAGRAM_HEADER_SIZE - TAG_LENGTH);
-        let mut buf = body.to_vec();
+        let (body, tag) = dgram[DATAGRAM_HEADER_SIZE..].split_at(body_len);
         let tag: &Tag = tag.try_into().map_err(|_| CryptError::Aead)?;
+        let plain = &mut out[..body_len];
+        plain.copy_from_slice(body);
         self.cipher
             .decrypt_inout_detached(
                 &nonce_from_seq(seq),
                 &dgram[..DATAGRAM_HEADER_SIZE],
-                buf.as_mut_slice().into(),
+                plain.into(),
                 tag,
             )
             .map_err(|_| CryptError::Aead)?;
@@ -142,9 +194,9 @@ impl DatagramDecrypt {
         // can never burn a replay slot.
         self.window.accept(seq)?;
 
-        let channel_id = u16::from_be_bytes(buf[..2].try_into().expect("2-byte slice"));
-        buf.drain(..CHANNEL_ID_SIZE);
-        Ok((channel_id, buf))
+        let channel_id = u16::from_be_bytes(plain[..2].try_into().expect("2-byte slice"));
+        plain.copy_within(CHANNEL_ID_SIZE.., 0);
+        Ok((channel_id, body_len - CHANNEL_ID_SIZE))
     }
 }
 

@@ -36,7 +36,7 @@ pub async fn udp_offer<T: ReliableTransport>(
     ticket: &[u8; consts::TICKET_LENGTH],
     secret: &[u8; consts::KEY_LENGTH],
 ) -> Result<(PendingUdpTransport, [u8; consts::TOKEN_LENGTH])> {
-    let pending = UdpTransport::accept_first(udp_bind).await?;
+    let pending = UdpTransport::accept_first(udp_bind)?;
     let token = derive_udp_token(ticket, secret)?;
     let offer = ControlMessage::UdpOffer {
         port: pending.local_addr()?.port(),

@@ -13,7 +13,7 @@ async fn connected_pair() -> (
     EncryptedDatagram<UdpTransport>,
     EncryptedDatagram<UdpTransport>,
 ) {
-    let server = UdpTransport::accept_first("127.0.0.1:0").await.unwrap();
+    let server = UdpTransport::accept_first("127.0.0.1:0").unwrap();
     let server_addr = server.local_addr().unwrap();
 
     let client_raw = UdpTransport::connect("127.0.0.1:0", server_addr).await.unwrap();

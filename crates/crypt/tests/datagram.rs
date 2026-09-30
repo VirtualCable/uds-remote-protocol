@@ -152,3 +152,67 @@ fn max_fragment_payload_fits_mtu_budget() {
     let d = tx.encrypt(2, &payload).unwrap();
     assert_eq!(rx.decrypt(&d).unwrap().1, payload);
 }
+
+// ---- Zero-allocation API (hot path, design doc §12.6) ----
+
+#[test]
+fn encrypt_into_matches_allocating_encrypt() {
+    let (mut tx_a, _rx) = pair();
+    let (mut tx_b, _rx) = pair();
+    let payload = b"zero alloc";
+    let dgram_a = tx_a.encrypt(5, payload).unwrap();
+    let mut out = [0u8; 2048];
+    let n = tx_b.encrypt_into(5, payload, &mut out).unwrap();
+    assert_eq!(&out[..n], &dgram_a[..]);
+}
+
+#[test]
+fn decrypt_into_matches_allocating_decrypt_and_reuses_buffer() {
+    let (mut tx, mut rx) = pair();
+    let mut out = [0u8; 2048];
+    for i in 0..10u8 {
+        let payload = [i; 100];
+        let dgram = tx.encrypt(9, &payload).unwrap();
+        let (channel, n) = rx.decrypt_into(&dgram, &mut out).unwrap();
+        assert_eq!(channel, 9);
+        assert_eq!(&out[..n], &payload);
+    }
+}
+
+#[test]
+fn encrypt_into_reports_small_buffer() {
+    let (mut tx, _rx) = pair();
+    let mut out = [0u8; 8];
+    assert!(matches!(
+        tx.encrypt_into(1, b"some payload", &mut out),
+        Err(CryptError::BufferTooSmall { .. })
+    ));
+}
+
+#[test]
+fn decrypt_into_reports_small_buffer() {
+    let (mut tx, mut rx) = pair();
+    let dgram = tx.encrypt(1, b"some payload").unwrap();
+    let mut out = [0u8; 4];
+    assert!(matches!(
+        rx.decrypt_into(&dgram, &mut out),
+        Err(CryptError::BufferTooSmall { .. })
+    ));
+}
+
+#[test]
+fn decrypt_into_still_enforces_security_checks() {
+    let (mut tx, mut rx) = pair();
+    let mut out = [0u8; 2048];
+    let dgram = tx.encrypt(1, b"guarded").unwrap();
+    // Tampered ciphertext fails AEAD even with a big enough buffer.
+    let mut bad = dgram.clone();
+    let last = bad.len() - 20;
+    bad[last] ^= 1;
+    assert!(matches!(
+        rx.decrypt_into(&bad, &mut out),
+        Err(CryptError::Aead)
+    ));
+    // And the good one still passes.
+    assert!(rx.decrypt_into(&dgram, &mut out).is_ok());
+}

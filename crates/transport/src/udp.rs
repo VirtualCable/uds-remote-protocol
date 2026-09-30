@@ -9,6 +9,26 @@ use tracing::debug;
 use crate::error::Result;
 use crate::traits::DatagramTransport;
 
+/// Kernel socket buffer target for UDP endpoints (§12.6): display frames
+/// arrive in bursts of thousands of datagrams per tick, and the default
+/// buffer (~200 KiB) drops them under load. The kernel may clamp this to
+/// `net.core.{r,w}mem_max`; on hosts for high-throughput video, raise those
+/// sysctls.
+const SOCKET_BUFFER_SIZE: usize = 4 << 20;
+
+/// Binds a non-blocking UDP socket with enlarged kernel buffers.
+fn bind_udp(bind: &str) -> Result<UdpSocket> {
+    let addr: SocketAddr = bind.parse().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("bad bind addr {bind}: {e}"))
+    })?;
+    let socket = socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::DGRAM, None)?;
+    socket.set_nonblocking(true)?;
+    socket.set_send_buffer_size(SOCKET_BUFFER_SIZE)?;
+    socket.set_recv_buffer_size(SOCKET_BUFFER_SIZE)?;
+    socket.bind(&addr.into())?;
+    Ok(UdpSocket::from_std(socket.into())?)
+}
+
 /// [`DatagramTransport`] over a connected `UdpSocket` (fixed peer).
 pub struct UdpTransport {
     socket: UdpSocket,
@@ -17,7 +37,7 @@ pub struct UdpTransport {
 impl UdpTransport {
     /// Binds locally and connects to `remote` (the peer address gets fixed).
     pub async fn connect(bind: &str, remote: SocketAddr) -> Result<Self> {
-        let socket = UdpSocket::bind(bind).await?;
+        let socket = bind_udp(bind)?;
         socket.connect(remote).await?;
         debug!(%remote, "UDP socket connected");
         Ok(Self { socket })
@@ -26,8 +46,8 @@ impl UdpTransport {
     /// Binds a server-side socket whose peer is not known yet; call
     /// [`PendingUdpTransport::wait_first`] to learn it from the first
     /// incoming datagram.
-    pub async fn accept_first(bind: &str) -> Result<PendingUdpTransport> {
-        let socket = UdpSocket::bind(bind).await?;
+    pub fn accept_first(bind: &str) -> Result<PendingUdpTransport> {
+        let socket = bind_udp(bind)?;
         Ok(PendingUdpTransport { socket })
     }
 

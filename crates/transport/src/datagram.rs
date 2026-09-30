@@ -19,6 +19,8 @@ pub struct EncryptedDatagram<T: DatagramTransport> {
     rx: DatagramDecrypt,
     // Reusable receive buffer (no allocs in the hot path, risks r2 §2.1).
     rx_buf: Vec<u8>,
+    // Reusable encryption scratch buffer (zero-alloc hot path, §12.6).
+    tx_buf: Vec<u8>,
 }
 
 impl<T: DatagramTransport> EncryptedDatagram<T> {
@@ -35,6 +37,13 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
             tx: DatagramCrypt::new(tx_key, token),
             rx: DatagramDecrypt::new(rx_key, token),
             rx_buf: vec![0u8; 2048],
+            tx_buf: vec![
+                0u8;
+                consts::DATAGRAM_HEADER_SIZE
+                    + consts::CHANNEL_ID_SIZE
+                    + consts::MAX_DATAGRAM_PAYLOAD
+                    + consts::TAG_LENGTH
+            ],
         }
     }
 
@@ -46,8 +55,8 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
                 max: consts::MAX_DATAGRAM_PAYLOAD,
             });
         }
-        let dgram = self.tx.encrypt(channel, payload)?;
-        self.inner.send(&dgram).await
+        let n = self.tx.encrypt_into(channel, payload, &mut self.tx_buf)?;
+        self.inner.send(&self.tx_buf[..n]).await
     }
 
     /// Receives the next valid datagram: channel id and plaintext length,
@@ -78,17 +87,12 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
         dgram: &[u8],
         buf: &mut [u8],
     ) -> Result<Option<(ChannelId, usize)>> {
-        match rx.decrypt(dgram) {
-            Ok((channel, plain)) => {
-                if plain.len() > buf.len() {
-                    return Err(TransportError::TooLarge {
-                        size: plain.len(),
-                        max: buf.len(),
-                    });
-                }
-                buf[..plain.len()].copy_from_slice(&plain);
-                Ok(Some((channel, plain.len())))
-            }
+        match rx.decrypt_into(dgram, buf) {
+            Ok((channel, n)) => Ok(Some((channel, n))),
+            Err(CryptError::BufferTooSmall { needed, .. }) => Err(TransportError::TooLarge {
+                size: needed,
+                max: buf.len(),
+            }),
             Err(
                 CryptError::BadToken
                 | CryptError::Aead

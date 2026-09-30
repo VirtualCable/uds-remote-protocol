@@ -20,6 +20,14 @@ pub enum CryptError {
     /// Payload too large for the 16-bit `len` field.
     #[error("packet too large: {0} bytes of plaintext")]
     PacketTooLarge(usize),
+    /// Caller-provided output buffer too small.
+    #[error("output buffer too small: need {needed} bytes, have {have}")]
+    BufferTooSmall {
+        /// Required capacity.
+        needed: usize,
+        /// Provided capacity.
+        have: usize,
+    },
     /// HKDF could not expand the requested material.
     #[error("key derivation failed")]
     KeyDerivation,
