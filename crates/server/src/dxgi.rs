@@ -15,13 +15,14 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
     D3D11_SDK_VERSION,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
     IDXGIResource, IDXGISurface, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
     DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_FRAME_INFO,
 };
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+use windows::core::Interface;
 
 use crate::capture::{copy_bgra_rows, CapturedFrame, FrameSource, Rect};
 
@@ -78,18 +79,20 @@ impl FrameSource for DxgiSource {
 
         // SAFETY: `info` and `resource` are valid out-params; the duplication
         // object is alive for the whole call.
-        let hr = unsafe {
+        let result = unsafe {
             self.duplication
                 .AcquireNextFrame(timeout_ms, &mut info, &mut resource)
         };
-        if hr == DXGI_ERROR_WAIT_TIMEOUT {
-            return Ok(None);
+        if let Err(e) = &result {
+            if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                return Ok(None);
+            }
+            if e.code() == DXGI_ERROR_ACCESS_LOST {
+                self.reinit()?;
+                return Ok(None);
+            }
         }
-        if hr == DXGI_ERROR_ACCESS_LOST {
-            self.reinit()?;
-            return Ok(None);
-        }
-        hr.ok().context("AcquireNextFrame failed")?;
+        result.context("AcquireNextFrame failed")?;
         let resource = resource.context("AcquireNextFrame returned no resource")?;
 
         // Every acquired frame MUST be released, even on error paths.
@@ -245,7 +248,7 @@ fn init_duplication(
             let output1: IDXGIOutput1 =
                 output.cast().context("output does not expose IDXGIOutput1")?;
             let desc = unsafe { output1.GetDesc1() }.context("GetDesc1 failed")?;
-            if desc.Rotation != windows::Win32::Graphics::Dxgi::DXGI_MODE_ROTATION_IDENTITY {
+            if desc.Rotation != DXGI_MODE_ROTATION_IDENTITY {
                 warn!(
                     rotation = ?desc.Rotation,
                     "output is rotated; capture assumes identity rotation (not yet supported)"
