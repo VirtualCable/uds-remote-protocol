@@ -36,8 +36,9 @@ pub struct DxgiSource {
     width: u32,
     height: u32,
     /// Staging texture for the GPU-only path (created lazily): some display
-    /// stacks (RDP indirect display, some hybrid GPUs) hand out desktop
-    /// images that cannot be mapped directly.
+    /// stacks (VM synthetic display adapters on the physical console, RDP
+    /// indirect display, hybrid GPUs) hand out desktop images that cannot
+    /// be mapped directly. On VMs this is the normal path, not a corner case.
     staging: Option<ID3D11Texture2D>,
     /// Reused buffer for `GetFrameDirtyRects` (avoids per-frame allocation).
     dirty_buf: Vec<u8>,
