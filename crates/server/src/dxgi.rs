@@ -147,7 +147,9 @@ impl DxgiSource {
                 copy_bgra_rows(src, pitch, width, height, &mut data)
             })();
             // SAFETY: the surface was mapped above and is unmapped exactly once.
-            unsafe { surface.Unmap() }.ok().context("surface Unmap failed")?;
+            if let Err(e) = unsafe { surface.Unmap() }.ok().context("surface Unmap failed") {
+                return Some(Err(e));
+            }
             Some(result)
         })();
 
