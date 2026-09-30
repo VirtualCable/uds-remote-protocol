@@ -12,8 +12,9 @@ use tracing::{info, warn};
 use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY};
 use windows::Win32::Graphics::Dxgi::{
@@ -29,9 +30,15 @@ use crate::capture::{copy_bgra_rows, CapturedFrame, FrameSource, Rect};
 /// Desktop Duplication source for a single output.
 pub struct DxgiSource {
     output_index: u32,
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
     width: u32,
     height: u32,
+    /// Staging texture for the GPU-only path (created lazily): some display
+    /// stacks (RDP indirect display, some hybrid GPUs) hand out desktop
+    /// images that cannot be mapped directly.
+    staging: Option<ID3D11Texture2D>,
     /// Reused buffer for `GetFrameDirtyRects` (avoids per-frame allocation).
     dirty_buf: Vec<u8>,
 }
@@ -39,12 +46,15 @@ pub struct DxgiSource {
 impl DxgiSource {
     /// Captures `output_index` (0 = first enumerated output, usually primary).
     pub fn new(output_index: u32) -> anyhow::Result<Self> {
-        let (duplication, width, height) = init_duplication(output_index)?;
+        let dup = init_duplication(output_index)?;
         Ok(Self {
             output_index,
-            duplication,
-            width,
-            height,
+            device: dup.device,
+            context: dup.context,
+            duplication: dup.duplication,
+            width: dup.width,
+            height: dup.height,
+            staging: None,
             dirty_buf: Vec::with_capacity(64 * size_of::<RECT>()),
         })
     }
@@ -52,17 +62,20 @@ impl DxgiSource {
     /// Re-creates the duplication after `DXGI_ERROR_ACCESS_LOST`.
     fn reinit(&mut self) -> anyhow::Result<()> {
         info!(output = self.output_index, "DXGI access lost, reinitializing");
-        let (duplication, width, height) = init_duplication(self.output_index)?;
-        if (width, height) != (self.width, self.height) {
+        let dup = init_duplication(self.output_index)?;
+        if (dup.width, dup.height) != (self.width, self.height) {
             info!(
                 old = ?(self.width, self.height),
-                new = ?(width, height),
+                new = ?(dup.width, dup.height),
                 "desktop resolution changed"
             );
         }
-        self.duplication = duplication;
-        self.width = width;
-        self.height = height;
+        self.device = dup.device;
+        self.context = dup.context;
+        self.duplication = dup.duplication;
+        self.width = dup.width;
+        self.height = dup.height;
+        self.staging = None;
         Ok(())
     }
 }
@@ -113,31 +126,35 @@ impl DxgiSource {
         resource: &IDXGIResource,
         info: &DXGI_OUTDUPL_FRAME_INFO,
     ) -> anyhow::Result<CapturedFrame> {
-        let surface: IDXGISurface = resource.cast().context("frame resource is not a surface")?;
-
-        let mut mapped = DXGI_MAPPED_RECT::default();
-        // SAFETY: `mapped` is a valid out-param; the surface is alive and the
-        // returned pointer is used only until `Unmap` below.
-        unsafe { surface.Map(&mut mapped, DXGI_MAP_READ) }
-            .ok()
-            .context("surface Map failed")?;
-
         let width = self.width;
         let height = self.height;
         let mut data = vec![0u8; width as usize * height as usize * 4];
-        let copy_result = (|| {
-            anyhow::ensure!(!mapped.pBits.is_null(), "mapped pointer is null");
-            let pitch = usize::try_from(mapped.Pitch).context("negative RowPitch")?;
-            // SAFETY: `pBits` points to `Pitch * height` readable bytes while
-            // the surface is mapped (per Desktop Duplication contract).
-            let src = unsafe {
-                std::slice::from_raw_parts(mapped.pBits, pitch * height as usize)
-            };
-            copy_bgra_rows(src, pitch, width, height, &mut data)
+
+        // Fast path: the desktop image is a CPU-mappable surface.
+        let surface_map = (|| {
+            let surface: IDXGISurface = resource.cast().ok()?;
+            let mut mapped = DXGI_MAPPED_RECT::default();
+            // SAFETY: `mapped` is a valid out-param; the surface is alive and
+            // the returned pointer is used only until `Unmap`.
+            unsafe { surface.Map(&mut mapped, DXGI_MAP_READ) }.ok()?;
+            let result = (|| {
+                anyhow::ensure!(!mapped.pBits.is_null(), "mapped pointer is null");
+                let pitch = usize::try_from(mapped.Pitch).context("negative RowPitch")?;
+                // SAFETY: `pBits` points to `Pitch * height` readable bytes
+                // while the surface is mapped.
+                let src =
+                    unsafe { std::slice::from_raw_parts(mapped.pBits, pitch * height as usize) };
+                copy_bgra_rows(src, pitch, width, height, &mut data)
+            })();
+            // SAFETY: the surface was mapped above and is unmapped exactly once.
+            unsafe { surface.Unmap() }.ok().context("surface Unmap failed")?;
+            Some(result)
         })();
-        // SAFETY: the surface was mapped above and is unmapped exactly once.
-        unsafe { surface.Unmap() }.ok().context("surface Unmap failed")?;
-        copy_result?;
+
+        match surface_map {
+            Some(result) => result?,
+            None => self.copy_via_staging(resource, &mut data)?,
+        }
 
         let dirty_rects = self.read_dirty_rects(info, width, height)?;
         Ok(CapturedFrame {
@@ -147,6 +164,68 @@ impl DxgiSource {
             data,
             dirty_rects,
         })
+    }
+
+    /// Slow-but-portable path: copies the desktop texture into a staging
+    /// texture and maps that (needed on display stacks whose desktop image
+    /// is GPU-only, e.g. the RDP indirect display driver).
+    fn copy_via_staging(
+        &mut self,
+        resource: &IDXGIResource,
+        data: &mut [u8],
+    ) -> anyhow::Result<()> {
+        let texture: ID3D11Texture2D = resource
+            .cast()
+            .context("frame resource is neither surface nor texture")?;
+
+        if self.staging.is_none() {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: self.width,
+                Height: self.height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                SampleDesc: windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
+                Usage: D3D11_USAGE_STAGING,
+                BindFlags: 0,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: 0,
+            };
+            let mut staging: Option<ID3D11Texture2D> = None;
+            // SAFETY: `desc` is fully initialized; `staging` is a valid out-param.
+            unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut staging)) }
+                .context("CreateTexture2D (staging) failed")?;
+            self.staging = staging;
+            info!("using staging-texture copy path (desktop image not mappable)");
+        }
+        let staging = self.staging.as_ref().expect("staging created above");
+
+        // SAFETY: both textures live for the whole call.
+        unsafe { self.context.CopyResource(staging, &texture) };
+
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        // SAFETY: `mapped` is a valid out-param; the staging texture is alive
+        // and the returned pointer is used only until `Unmap`.
+        unsafe {
+            self.context
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+        }
+        .context("staging Map failed")?;
+        let result = (|| {
+            anyhow::ensure!(!mapped.pData.is_null(), "mapped pointer is null");
+            let pitch = usize::try_from(mapped.RowPitch).context("negative RowPitch")?;
+            // SAFETY: `pData` points to `RowPitch * height` readable bytes
+            // while the staging texture is mapped.
+            let src =
+                unsafe { std::slice::from_raw_parts(mapped.pData.cast(), pitch * self.height as usize) };
+            copy_bgra_rows(src, pitch, self.width, self.height, data)
+        })();
+        // SAFETY: the staging texture was mapped above and is unmapped once.
+        unsafe { self.context.Unmap(staging, 0) };
+        result
     }
 
     /// Reads the frame's dirty rects into `self.dirty_buf` (reused).
@@ -210,10 +289,17 @@ impl DxgiSource {
     }
 }
 
+/// Result of [`init_duplication`]: everything the source needs to capture.
+struct Duplication {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    duplication: IDXGIOutputDuplication,
+    width: u32,
+    height: u32,
+}
+
 /// Creates a D3D11 device and duplicates `output_index`.
-fn init_duplication(
-    output_index: u32,
-) -> anyhow::Result<(IDXGIOutputDuplication, u32, u32)> {
+fn init_duplication(output_index: u32) -> anyhow::Result<Duplication> {
     let mut device: Option<ID3D11Device> = None;
     let mut context: Option<ID3D11DeviceContext> = None;
     let feature_levels = [D3D_FEATURE_LEVEL_11_0];
@@ -267,11 +353,13 @@ fn init_duplication(
                 height = dup_desc.ModeDesc.Height,
                 "DXGI duplication ready"
             );
-            return Ok((
+            return Ok(Duplication {
+                device: device.clone(),
+                context: context.clone().context("no D3D11 device context returned")?,
                 duplication,
-                dup_desc.ModeDesc.Width,
-                dup_desc.ModeDesc.Height,
-            ));
+                width: dup_desc.ModeDesc.Width,
+                height: dup_desc.ModeDesc.Height,
+            });
         }
         adapter_idx += 1;
     }
