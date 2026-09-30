@@ -5,9 +5,10 @@
 //! 2. Windows: vcpkg (`vcpkg install libvpx:x64-windows-static-md`).
 //! 3. Unix: pkg-config (`apt install libvpx-dev` / `brew install libvpx`).
 //!
-//! Bindings are pregenerated and committed (`src/bindings.rs`); bindgen is
-//! NOT required to build. To regenerate after a libvpx version bump, run
-//! `scripts/regen-vpx-bindings.sh` on a machine with bindgen + libclang.
+//! Bindings are pregenerated and committed per platform (`bindings_unix.rs`,
+//! `bindings_windows.rs`); bindgen is NOT required to build. To regenerate
+//! after a libvpx version bump, run `scripts/regen-vpx-bindings.sh` on a
+//! machine with bindgen + libclang.
 
 use std::env;
 

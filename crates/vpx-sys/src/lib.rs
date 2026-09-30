@@ -3,9 +3,12 @@
 //! Internal FFI bindings to libvpx (VP8/VP9 encoder + decoder).
 //!
 //! The bindings are **pregenerated** (bindgen 0.73 against libvpx 1.15
-//! headers, checked in as `bindings.rs`) so building this crate needs neither
-//! bindgen nor libclang. Regenerate with `scripts/regen-vpx-bindings.sh`
-//! when bumping the libvpx version.
+//! headers, checked in per platform as `bindings_unix.rs` /
+//! `bindings_windows.rs`) so building this crate needs neither bindgen nor
+//! libclang. Per-platform files are required: the libvpx build config (and
+//! even the header version, e.g. `VPX_EXT_RATECTRL_ABI_VERSION` 9→10 between
+//! 1.15.0 and 1.15.2) changes the ABI version constants the runtime checks.
+//! Regenerate with `scripts/regen-vpx-bindings.sh` when bumping libvpx.
 //!
 //! The crate is raw FFI: `unsafe`, C naming, no safety layer. The safe
 //! wrappers implementing `codec::VideoEncoder`/`VideoDecoder` live in the
@@ -15,6 +18,13 @@
 #![allow(clippy::all, clippy::pedantic)]
 
 #[allow(missing_docs)]
+#[cfg(not(windows))]
+#[path = "bindings_unix.rs"]
+mod bindings;
+
+#[allow(missing_docs)]
+#[cfg(windows)]
+#[path = "bindings_windows.rs"]
 mod bindings;
 
 pub use bindings::*;
