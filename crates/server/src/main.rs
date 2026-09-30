@@ -1,7 +1,8 @@
-//! Development server: serves a synthetic moving test pattern over the
-//! protocol (phases 0-2, before real screen capture lands).
+//! Development server: serves a synthetic moving test pattern or a real
+//! desktop capture (DXGI, Windows) over the protocol.
 //!
 //! Usage: `server --key <hex64> [--ticket <hex96>] [--bind host:port]
+//!                 [--source synthetic|dxgi] [--output N]
 //!                 [--width N] [--height N] [--fps N] [--max-frames N]`
 //!
 //! The session ticket is printed on startup when not given; pass it to the
@@ -27,6 +28,8 @@ struct Args {
     bind: SocketAddr,
     key: [u8; consts::KEY_LENGTH],
     ticket: Option<[u8; protocol::TICKET_LENGTH]>,
+    source: String,
+    output: u32,
     width: u32,
     height: u32,
     fps: u32,
@@ -38,6 +41,8 @@ fn parse_args() -> Result<Args> {
         bind: "127.0.0.1:19790".parse().expect("valid default"),
         key: [0; consts::KEY_LENGTH],
         ticket: None,
+        source: "synthetic".to_string(),
+        output: 0,
         width: 640,
         height: 480,
         fps: 30,
@@ -54,6 +59,8 @@ fn parse_args() -> Result<Args> {
                 key_seen = true;
             }
             "--ticket" => args.ticket = Some(protocol::hex::decode(&value)?),
+            "--source" => args.source = value,
+            "--output" => args.output = value.parse().context("bad --output")?,
             "--width" => args.width = value.parse().context("bad --width")?,
             "--height" => args.height = value.parse().context("bad --height")?,
             "--fps" => args.fps = value.parse().context("bad --fps")?,
@@ -162,14 +169,16 @@ async fn serve<T: ReliableTransport>(
     };
 
     let mut display = display;
-    let mut source = SyntheticSource::new(args.width, args.height);
+    let mut source = Source::new(args)?;
     let mut encoder = RawEncoder::new();
     let frame_time = Duration::from_secs_f64(1.0 / f64::from(args.fps.max(1)));
     let mut interval = tokio::time::interval(frame_time);
     let mut frame_id = 0u32;
     loop {
         interval.tick().await;
-        let frame = source.next_frame();
+        let Some(frame) = tokio::task::block_in_place(|| source.next_frame(frame_time))? else {
+            continue; // no desktop changes this tick
+        };
         let packet = encoder.encode(&frame)?;
         for frag in Fragmenter::split(0, frame_id, &packet.data) {
             display.send_fragment(&frag).await?;
@@ -178,6 +187,64 @@ async fn serve<T: ReliableTransport>(
         if args.max_frames.is_some_and(|max| frame_id >= max) {
             info!(frame_id, "max frames reached, closing session");
             return Ok(());
+        }
+    }
+}
+
+/// Frame producer selected by `--source`: the synthetic pattern everywhere,
+/// or the real desktop via DXGI on Windows (`windows-capture` feature).
+enum Source {
+    Synthetic(SyntheticSource),
+    #[cfg(all(windows, feature = "windows-capture"))]
+    Dxgi {
+        source: Box<server::dxgi::DxgiSource>,
+        /// Keeps the last captured frame alive so the encoder can borrow it.
+        last: Option<server::capture::CapturedFrame>,
+    },
+}
+
+impl Source {
+    fn new(args: &Args) -> Result<Self> {
+        match args.source.as_str() {
+            "synthetic" => Ok(Self::Synthetic(SyntheticSource::new(args.width, args.height))),
+            #[cfg(all(windows, feature = "windows-capture"))]
+            "dxgi" => Ok(Self::Dxgi {
+                source: Box::new(server::dxgi::DxgiSource::new(args.output)?),
+                last: None,
+            }),
+            other => bail!(
+                "unknown or unavailable source: {other} (dxgi requires Windows + windows-capture feature)"
+            ),
+        }
+    }
+
+    /// Next frame to encode, or `None` when nothing changed on the desktop.
+    ///
+    /// May block up to `timeout` (DXGI waits for desktop damage); callers on
+    /// an async runtime should use [`tokio::task::block_in_place`].
+    // Result is only fallible on the Windows DXGI arm; the synthetic arm never
+    // fails, hence the lint allowance for non-Windows builds.
+    #[allow(clippy::unnecessary_wraps)]
+    fn next_frame(&mut self, timeout: Duration) -> Result<Option<codec::VideoFrame<'_>>> {
+        match self {
+            Self::Synthetic(s) => {
+                let _ = timeout;
+                Ok(Some(s.next_frame()))
+            }
+            #[cfg(all(windows, feature = "windows-capture"))]
+            Self::Dxgi { source, last } => {
+                use server::capture::FrameSource as _;
+                *last = source.next_frame(timeout)?;
+                match last {
+                    Some(f) if !f.dirty_rects.is_empty() => Ok(Some(codec::VideoFrame {
+                        width: f.width,
+                        height: f.height,
+                        stride: f.stride,
+                        data: &f.data,
+                    })),
+                    _ => Ok(None),
+                }
+            }
         }
     }
 }
