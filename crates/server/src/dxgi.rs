@@ -247,7 +247,7 @@ fn init_duplication(
         if let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
             let output1: IDXGIOutput1 =
                 output.cast().context("output does not expose IDXGIOutput1")?;
-            let desc = unsafe { output1.GetDesc1() }.context("GetDesc1 failed")?;
+            let desc = unsafe { output1.GetDesc() }.context("GetDesc failed")?;
             if desc.Rotation != DXGI_MODE_ROTATION_IDENTITY {
                 warn!(
                     rotation = ?desc.Rotation,
