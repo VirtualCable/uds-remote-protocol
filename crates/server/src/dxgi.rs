@@ -277,3 +277,53 @@ fn init_duplication(
     }
     anyhow::bail!("output index {output_index} not found on any adapter")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    /// Manual capture benchmark: `cargo test -p server --features
+    /// windows-capture -- dxgi --ignored --nocapture` on a Windows machine
+    /// with an interactive desktop.
+    #[test]
+    #[ignore = "requires an interactive Windows desktop session"]
+    fn dxgi_capture_bench() {
+        let mut src = DxgiSource::new(0).expect("Desktop Duplication available");
+        let (w, h) = src.dimensions();
+        eprintln!("output 0: {w}x{h}");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut frames = 0u32;
+        let mut no_change = 0u32;
+        let mut acquire_total = Duration::ZERO;
+        let mut dirty_total = 0usize;
+        let mut full_dirty = 0u32;
+        while Instant::now() < deadline {
+            let t0 = Instant::now();
+            match src.next_frame(Duration::from_millis(100)) {
+                Ok(Some(f)) => {
+                    acquire_total += t0.elapsed();
+                    frames += 1;
+                    dirty_total += f.dirty_rects.len();
+                    let full = w as i64 * h as i64;
+                    if Rect::bounding(&f.dirty_rects)
+                        .is_some_and(|r| i64::from(r.right - r.left) * i64::from(r.bottom - r.top) >= full)
+                    {
+                        full_dirty += 1;
+                    }
+                }
+                Ok(None) => no_change += 1,
+                Err(e) => panic!("capture failed: {e:#}"),
+            }
+        }
+        eprintln!(
+            "5s: {frames} frames captured ({:.1} fps), {no_change} empty polls, \
+             avg acquire+copy {:.2} ms, avg dirty rects {:.1}, full-dirty {full_dirty}/{frames}",
+            f64::from(frames) / 5.0,
+            acquire_total.as_secs_f64() * 1000.0 / f64::from(frames.max(1)),
+            dirty_total as f64 / f64::from(frames.max(1)),
+        );
+        assert!(frames > 0, "no frames captured in 5s (idle desktop is fine, but zero frames + zero dirty means the duplication is not delivering)");
+    }
+}
