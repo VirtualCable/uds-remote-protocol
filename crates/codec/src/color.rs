@@ -111,3 +111,42 @@ pub fn bgra_to_i420(frame: &VideoFrame<'_>) -> Result<I420Frame> {
         v: v_plane,
     })
 }
+
+/// Converts an I420 frame back to tight BGRA (decode side; BT.601 limited
+/// range, chroma replicated 2x2 — no interpolation, matching the cheap
+/// subsampling of [`bgra_to_i420`]).
+pub fn i420_to_bgra(frame: &I420Frame) -> Result<crate::video::DecodedFrame> {
+    let (width, height) = (frame.width as usize, frame.height as usize);
+    if width == 0 || height == 0 || frame.y_stride < width {
+        return Err(CodecError::BadDimensions {
+            width: frame.width,
+            height: frame.height,
+            stride: frame.y_stride,
+            data_len: frame.y.len(),
+        });
+    }
+    let mut data = vec![0u8; width * height * 4];
+    let clamp = |v: i32| u8::try_from(v.clamp(0, 255)).expect("clamped to u8");
+    for py in 0..height {
+        for px in 0..width {
+            let luma = i32::from(frame.y[py * frame.y_stride + px]);
+            let cb = i32::from(frame.u[(py / 2) * frame.uv_stride + px / 2]) - 128;
+            let cr = i32::from(frame.v[(py / 2) * frame.uv_stride + px / 2]) - 128;
+            let c = luma - 16;
+            let r = (298 * c + 409 * cr + 128) >> 8;
+            let g = (298 * c - 100 * cb - 208 * cr + 128) >> 8;
+            let b = (298 * c + 516 * cb + 128) >> 8;
+            let off = (py * width + px) * 4;
+            data[off] = clamp(b);
+            data[off + 1] = clamp(g);
+            data[off + 2] = clamp(r);
+            data[off + 3] = 255;
+        }
+    }
+    Ok(crate::video::DecodedFrame {
+        width: frame.width,
+        height: frame.height,
+        stride: width * 4,
+        data,
+    })
+}

@@ -9,6 +9,7 @@ members = [
     "crates/server",
     "crates/client",
     "crates/testclient",
+    "crates/vpx-sys",
 ]
 
 [workspace.package]
@@ -24,6 +25,7 @@ protocol = { path = "crates/protocol" }
 transport = { path = "crates/transport" }
 crypt = { path = "crates/crypt" }
 codec = { path = "crates/codec" }
+vpx-sys = { path = "crates/vpx-sys" }
 server = { path = "crates/server" }
 client = { path = "crates/client" }
 

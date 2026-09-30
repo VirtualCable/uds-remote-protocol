@@ -11,8 +11,10 @@ workspace = true
 
 [features]
 default = []
-codec-vp9 = []
+codec-vp9 = ["dep:vpx-sys"]
+codec-vp8 = ["dep:vpx-sys"]
 codec-opus = []
 
 [dependencies]
 thiserror.workspace = true
+vpx-sys = { workspace = true, optional = true }

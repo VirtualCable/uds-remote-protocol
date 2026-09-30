@@ -1,6 +1,7 @@
 //! BGRA→I420 color conversion tests (BT.601 limited range, 2x2 box
 //! subsampling — the same layout libyuv's `ARGBToI420` produces, so the
 //! future SIMD swap is drop-in).
+#![allow(clippy::cast_possible_truncation)] // test pattern math
 
 use codec::color::{I420Frame, bgra_to_i420};
 use codec::{CodecError, VideoFrame};
@@ -159,4 +160,57 @@ fn bad_dimensions_are_rejected() {
         bgra_to_i420(&f),
         Err(CodecError::BadDimensions { .. })
     ));
+}
+
+// ---- I420 → BGRA (decode side) ----
+
+use codec::color::i420_to_bgra;
+
+#[test]
+fn i420_roundtrip_preserves_luma() {
+    // Grayscale ramp: survives the roundtrip nearly exactly (chroma of gray
+    // is constant, luma lossless-ish).
+    let data = frame(64, 32, 64 * 4, |x, y| {
+        let v = ((x + y) % 256) as u8;
+        [v, v, v, 255]
+    });
+    let src = VideoFrame {
+        width: 64,
+        height: 32,
+        stride: 64 * 4,
+        data: &data,
+    };
+    let i420 = bgra_to_i420(&src).expect("convert");
+    let back = i420_to_bgra(&i420).expect("back");
+    assert_eq!(back.width, 64);
+    assert_eq!(back.height, 32);
+    assert_eq!(back.stride, 64 * 4);
+    for (px, py) in [(0, 0), (17, 5), (63, 31)] {
+        let off = py * 64 * 4 + px * 4;
+        let orig = data[off];
+        let got = back.data[off];
+        assert!(
+            (i16::from(orig) - i16::from(got)).abs() <= 2,
+            "luma drift at ({px},{py}): {orig} vs {got}"
+        );
+        assert_eq!(back.data[off + 3], 255, "alpha opaque");
+    }
+}
+
+#[test]
+fn i420_to_bgra_known_values() {
+    // A flat mid-gray I420 frame must come back as that gray.
+    let i420 = I420Frame {
+        width: 4,
+        height: 4,
+        y_stride: 4,
+        uv_stride: 2,
+        y: vec![126; 16],
+        u: vec![128; 4],
+        v: vec![128; 4],
+    };
+    let back = i420_to_bgra(&i420).expect("back");
+    assert!(back.data.as_chunks::<4>().0.iter().all(|&[b, g, r, a]| {
+        b == g && g == r && (110..=142).contains(&r) && a == 255
+    }));
 }

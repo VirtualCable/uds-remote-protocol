@@ -14,6 +14,8 @@
 mod error;
 mod raw;
 mod video;
+#[cfg(any(feature = "codec-vp9", feature = "codec-vp8"))]
+mod vpx;
 
 /// BGRA → I420 color conversion (scalar Rust; libyuv SIMD later, behind a
 /// feature, with the same API).
@@ -24,3 +26,5 @@ pub use raw::{RawDecoder, RawEncoder};
 pub use video::{
     DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame,
 };
+#[cfg(feature = "codec-vp9")]
+pub use vpx::{Vp9Decoder, Vp9Encoder};
