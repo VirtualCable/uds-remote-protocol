@@ -106,12 +106,29 @@ fn psnr_vs_source(src: &[Vec<u8>], dec: &[codec::DecodedFrame]) -> f64 {
     }
 }
 
-/// Encode+decode sweep: speed, real emitted bitrate and quality (PSNR).
+/// Process CPU time (user+system) in milliseconds, Linux `/proc`.
+/// Benchmark-only: needed because ROW_MT makes libvpx multi-threaded, so
+/// wall time per frame underestimates real CPU cost.
+#[cfg(target_os = "linux")]
+fn process_cpu_ms() -> f64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").expect("proc stat");
+    let after_paren = stat.rsplit(')').next().expect("comm paren");
+    let fields: Vec<&str> = after_paren.split_whitespace().collect();
+    // Fields 14/15 overall => indices 11/12 after removing pid+comm.
+    let ticks: f64 = fields[11].parse::<f64>().unwrap_or(0.0)
+        + fields[12].parse::<f64>().unwrap_or(0.0);
+    ticks * 10.0 // clock ticks are 10 ms on Linux (USER_HZ=100)
+}
+
+/// Encode+decode sweep: speed, real emitted bitrate, quality (PSNR) and
+/// CPU cost (encode/decode ms per frame, and % of one core serving 30 fps).
 fn sweep(name: &str, preset: codec::CodecPreset, frames: &[Vec<u8>], w: u32, h: u32) {
     let mut enc = preset.build_encoder(w, h).expect("encoder");
     let mut dec = codec::build_decoder(preset.codec).expect("decoder");
     let mut total_bytes = 0usize;
     let mut decoded = Vec::with_capacity(frames.len());
+    let mut enc_cpu = 0.0;
+    let mut dec_cpu = 0.0;
     let start = Instant::now();
     for data in frames {
         let frame = VideoFrame {
@@ -120,17 +137,34 @@ fn sweep(name: &str, preset: codec::CodecPreset, frames: &[Vec<u8>], w: u32, h: 
             stride: (w * 4) as usize,
             data,
         };
+        #[cfg(target_os = "linux")]
+        let c0 = process_cpu_ms();
         let packet = enc.encode(&frame).expect("encode");
+        #[cfg(target_os = "linux")]
+        {
+            enc_cpu += process_cpu_ms() - c0;
+        }
         total_bytes += packet.data.len();
+        #[cfg(target_os = "linux")]
+        let c1 = process_cpu_ms();
         decoded.push(dec.decode(&packet).expect("decode"));
+        #[cfg(target_os = "linux")]
+        {
+            dec_cpu += process_cpu_ms() - c1;
+        }
     }
     let elapsed = start.elapsed().as_secs_f64();
     let fps = frames.len() as f64 / elapsed;
     // Real bitrate had this clip been served at 30 fps.
     let real_kbps = total_bytes as f64 * 8.0 / 1000.0 / (frames.len() as f64 / 30.0);
     let psnr = psnr_vs_source(frames, &decoded);
+    let n = frames.len() as f64;
+    let (enc_ms, dec_ms) = (enc_cpu / n, dec_cpu / n);
+    // % of one CPU core if the server streamed 30 fps with these costs.
+    let enc_pct = enc_ms * 30.0 / 10.0;
+    let dec_pct = dec_ms * 30.0 / 10.0;
     println!(
-        "{name:<28} target {:>5} kbps | encode {fps:>5.1} fps | real {real_kbps:>6.0} kbps @30fps | PSNR {psnr:>5.2} dB",
+        "{name:<22} {:>5}k | enc {enc_ms:>5.1} ms/f ({enc_pct:>4.0}%) | dec {dec_ms:>4.1} ms/f ({dec_pct:>3.0}%) | real {real_kbps:>5.0}k | {psnr:>5.2} dB | wall {fps:>4.1} fps",
         preset.params.bitrate_kbps,
     );
 }
@@ -140,13 +174,24 @@ fn sweep(name: &str, preset: codec::CodecPreset, frames: &[Vec<u8>], w: u32, h: 
 fn bitrate_sweep_1080p() {
     let (w, h, n) = (1920u32, 1080u32, 90u32);
     let frames: Vec<Vec<u8>> = (0..n).map(|t| frame_at(w, h, t)).collect();
-    println!("--- {n} frames {w}x{h}, bitrate sweep (balanced presets) ---");
+    println!("--- {n} frames {w}x{h}: default presets + bitrate sweep (CPU = % of one core @30fps) ---");
+    // Defaults as shipped in the catalog.
+    for name in [
+        "vp9-bandwidth-saver",
+        "vp9-balanced",
+        "vp9-low-latency",
+        "vp8-balanced",
+        "vp8-low-latency",
+        "vp8-quality",
+    ] {
+        let preset = codec::CodecPreset::by_name(name).expect("preset");
+        sweep(name, preset, &frames, w, h);
+    }
+    // VP9 quality-vs-bitrate reference at the balanced speed.
     for kbps in [500u32, 1000, 2000, 4000, 8000] {
-        for name in ["vp9-balanced", "vp8-balanced"] {
-            let preset = codec::CodecPreset::by_name(name)
-                .expect("preset")
-                .with_bitrate(kbps);
-            sweep(name, preset, &frames, w, h);
-        }
+        let preset = codec::CodecPreset::by_name("vp9-balanced")
+            .expect("preset")
+            .with_bitrate(kbps);
+        sweep("vp9-balanced", preset, &frames, w, h);
     }
 }

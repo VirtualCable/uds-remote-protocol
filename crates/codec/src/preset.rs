@@ -65,10 +65,13 @@ const fn with_kbps(mut preset: CodecPreset, kbps: u32) -> CodecPreset {
 /// niche is saving CPU, not bandwidth).
 pub const PRESETS: &[CodecPreset] = &[
     p("raw", VideoCodecType::Raw, None),
-    // VP9: cpu_used 0-8, higher = faster/lower ratio.
+    // VP9: cpu_used 0-8, higher = faster/lower ratio. NOTE: cpu_used is the
+    // CPU knob, NOT the bandwidth knob — cpu_used 4 costs 250% of a core at
+    // 1080p30 while cpu_used 6 costs ~108% (2026-09-30 sweep), so
+    // bandwidth-saver keeps cpu 6 and saves via the bitrate.
     with_kbps(p("vp9-low-latency", VideoCodecType::Vp9, Some(8)), 2500),
     p("vp9-balanced", VideoCodecType::Vp9, Some(6)),
-    with_kbps(p("vp9-bandwidth-saver", VideoCodecType::Vp9, Some(4)), 1000),
+    with_kbps(p("vp9-bandwidth-saver", VideoCodecType::Vp9, Some(6)), 1000),
     // VP8: cpu_used -16..16, lower = slower/better quality.
     with_kbps(p("vp8-low-latency", VideoCodecType::Vp8, Some(-6)), 2500),
     with_kbps(p("vp8-balanced", VideoCodecType::Vp8, Some(-10)), 2500),
