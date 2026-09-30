@@ -33,8 +33,12 @@ pub struct CodecPreset {
     pub params: CodecParams,
 }
 
-/// Default target bitrate when a preset does not say otherwise (4 Mbps).
-pub const DEFAULT_BITRATE_KBPS: u32 = 4000;
+/// Default target bitrate when a preset does not say otherwise (2 Mbps).
+///
+/// Bitrate sweep at 1080p (2026-09-30, `bitrate_sweep_1080p`): VP9 reaches
+/// ~44 dB PSNR at 2 Mbps and ~42 dB at 1 Mbps on the synthetic pattern, so
+/// 4 Mbps is overkill for VDI (bandwidth is a *server* resource there).
+pub const DEFAULT_BITRATE_KBPS: u32 = 2000;
 
 const fn p(name: &'static str, codec: VideoCodecType, cpu_used: Option<i32>) -> CodecPreset {
     CodecPreset {
@@ -47,18 +51,28 @@ const fn p(name: &'static str, codec: VideoCodecType, cpu_used: Option<i32>) -> 
     }
 }
 
+const fn with_kbps(mut preset: CodecPreset, kbps: u32) -> CodecPreset {
+    preset.params.bitrate_kbps = kbps;
+    preset
+}
+
 /// The preset catalog. Selection is by name (CLI/config); the wire only
 /// carries the [`VideoCodecType`] wire ID.
+///
+/// Bitrate defaults come from the 1080p sweep (see `DEFAULT_BITRATE_KBPS`):
+/// VP9 tracks its target; VP8 has a ~1.7 Mbps floor and a ~2.3 Mbps ceiling
+/// in realtime mode at 1080p, so VP8 presets never go below 2 Mbps (its
+/// niche is saving CPU, not bandwidth).
 pub const PRESETS: &[CodecPreset] = &[
     p("raw", VideoCodecType::Raw, None),
     // VP9: cpu_used 0-8, higher = faster/lower ratio.
-    p("vp9-low-latency", VideoCodecType::Vp9, Some(8)),
+    with_kbps(p("vp9-low-latency", VideoCodecType::Vp9, Some(8)), 2500),
     p("vp9-balanced", VideoCodecType::Vp9, Some(6)),
-    p("vp9-bandwidth-saver", VideoCodecType::Vp9, Some(4)),
+    with_kbps(p("vp9-bandwidth-saver", VideoCodecType::Vp9, Some(4)), 1000),
     // VP8: cpu_used -16..16, lower = slower/better quality.
-    p("vp8-low-latency", VideoCodecType::Vp8, Some(-6)),
-    p("vp8-balanced", VideoCodecType::Vp8, Some(-10)),
-    p("vp8-quality", VideoCodecType::Vp8, Some(-14)),
+    with_kbps(p("vp8-low-latency", VideoCodecType::Vp8, Some(-6)), 2500),
+    with_kbps(p("vp8-balanced", VideoCodecType::Vp8, Some(-10)), 2500),
+    with_kbps(p("vp8-quality", VideoCodecType::Vp8, Some(-14)), 4000),
 ];
 
 impl CodecPreset {
