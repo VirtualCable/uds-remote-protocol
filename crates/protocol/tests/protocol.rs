@@ -101,6 +101,12 @@ fn control_message_variants_roundtrip() {
             port: 19790,
             token: [0xA5; 16],
         },
+        ControlMessage::DisplayInfo {
+            display_id: 2,
+            width: 3840,
+            height: 2160,
+            codec: 2,
+        },
         ControlMessage::Keepalive,
     ];
     for msg in msgs {

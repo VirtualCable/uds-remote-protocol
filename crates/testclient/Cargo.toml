@@ -9,6 +9,11 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+vp9 = ["codec/codec-vp9"]
+vp8 = ["codec/codec-vp8"]
+
 [dependencies]
 client.workspace = true
 transport.workspace = true

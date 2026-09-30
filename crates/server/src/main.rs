@@ -3,7 +3,13 @@
 //!
 //! Usage: `server --key <hex64> [--ticket <hex96>] [--bind host:port]
 //!                 [--source synthetic|dxgi] [--output N]
+//!                 [--preset NAME] [--bitrate KBPS]
 //!                 [--width N] [--height N] [--fps N] [--max-frames N]`
+//!
+//! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`,
+//! `vp8-low-latency`); VP8/VP9 presets require the crate features
+//! `vp9`/`vp8`. The chosen codec/geometry is announced on the control
+//! channel (`DisplayInfo`) before the first frame.
 //!
 //! The session ticket is printed on startup when not given; pass it to the
 //! test client with `--ticket`.
@@ -13,7 +19,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use codec::{RawEncoder, VideoEncoder};
+use codec::CodecPreset;
 use crypt::consts;
 use protocol::fragment::Fragmenter;
 use protocol::{self, Probe, ProbeAck, channel};
@@ -30,6 +36,8 @@ struct Args {
     ticket: Option<[u8; protocol::TICKET_LENGTH]>,
     source: String,
     output: u32,
+    preset: String,
+    bitrate: Option<u32>,
     width: u32,
     height: u32,
     fps: u32,
@@ -43,6 +51,8 @@ fn parse_args() -> Result<Args> {
         ticket: None,
         source: "synthetic".to_string(),
         output: 0,
+        preset: "raw".to_string(),
+        bitrate: None,
         width: 640,
         height: 480,
         fps: 30,
@@ -61,6 +71,8 @@ fn parse_args() -> Result<Args> {
             "--ticket" => args.ticket = Some(protocol::hex::decode(&value)?),
             "--source" => args.source = value,
             "--output" => args.output = value.parse().context("bad --output")?,
+            "--preset" => args.preset = value,
+            "--bitrate" => args.bitrate = Some(value.parse().context("bad --bitrate")?),
             "--width" => args.width = value.parse().context("bad --width")?,
             "--height" => args.height = value.parse().context("bad --height")?,
             "--fps" => args.fps = value.parse().context("bad --fps")?,
@@ -86,6 +98,13 @@ impl<T: ReliableTransport> Display<T> {
         match self {
             Self::Udp(d) => d.send(channel::DISPLAY, frag).await,
             Self::Tcp(s) => s.send(channel::DISPLAY, frag).await,
+        }
+    }
+
+    async fn send_control(&mut self, msg: &[u8]) -> transport::Result<()> {
+        match self {
+            Self::Udp(d) => d.send(channel::CONTROL, msg).await,
+            Self::Tcp(s) => s.send(channel::CONTROL, msg).await,
         }
     }
 }
@@ -170,7 +189,25 @@ async fn serve<T: ReliableTransport>(
 
     let mut display = display;
     let mut source = Source::new(args)?;
-    let mut encoder = RawEncoder::new();
+    let (width, height) = source.dimensions();
+    let preset = CodecPreset::by_name(&args.preset)
+        .with_context(|| format!("unknown preset: {}", args.preset))?;
+    let preset = match args.bitrate {
+        Some(kbps) => preset.with_bitrate(kbps),
+        None => preset,
+    };
+    let mut encoder = preset.build_encoder(width, height)?;
+    info!(preset = preset.name, codec = ?preset.codec, width, height, "display encoder ready");
+
+    // Announce the display codec/geometry before the first frame (§8.3/§8.4).
+    let info = protocol::ControlMessage::DisplayInfo {
+        display_id: 0,
+        width,
+        height,
+        codec: preset.codec.wire_id(),
+    };
+    display.send_control(&info.encode()?).await?;
+
     let frame_time = Duration::from_secs_f64(1.0 / f64::from(args.fps.max(1)));
     let mut interval = tokio::time::interval(frame_time);
     let mut frame_id = 0u32;
@@ -215,6 +252,18 @@ impl Source {
             other => bail!(
                 "unknown or unavailable source: {other} (dxgi requires Windows + windows-capture feature)"
             ),
+        }
+    }
+
+    /// Frame geometry `(width, height)` of this source.
+    fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Synthetic(s) => s.dimensions(),
+            #[cfg(all(windows, feature = "windows-capture"))]
+            Self::Dxgi { source, .. } => {
+                use server::capture::FrameSource as _;
+                source.dimensions()
+            }
         }
     }
 

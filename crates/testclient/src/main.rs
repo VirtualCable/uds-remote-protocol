@@ -7,14 +7,15 @@
 //! Usage: `testclient --key <hex64> --ticket <hex96> [--addr host:port]
 //!                     [--headless] [--max-frames N]`
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use codec::{RawDecoder, VideoDecoder};
+use codec::{VideoCodecType, VideoDecoder};
 use protocol::fragment::Reassembler;
-use protocol::{self, channel};
+use protocol::{self, ControlMessage, channel};
 use tracing::{info, warn};
 use transport::{Connector, DirectConnector, EncryptedStream, ReliableTransport, Target, udp_detect};
 
@@ -166,38 +167,90 @@ async fn run() -> Result<()> {
 
     let mut sink = Sink::new(args.headless);
     let mut reasm = Reassembler::new();
-    let mut decoder = RawDecoder::new();
+    // One decoder per display (§8.3); created from DisplayInfo announcements,
+    // or Raw on first frame for servers that do not announce (§8.4 compat).
+    let mut decoders: HashMap<u8, Box<dyn VideoDecoder>> = HashMap::new();
     let mut buf = vec![0u8; 2048];
-
-    macro_rules! handle {
-        ($ch:expr, $n:expr, $lost:expr) => {
-            if $ch == channel::DISPLAY
-                && let Some(complete) = reasm.push(&buf[..$n])?
-            {
-                let frame = decoder.decode(&codec::EncodedPacket {
-                    data: complete.data,
-                    keyframe: true,
-                })?;
-                if !sink.push(&frame)? {
-                    info!("window closed");
-                    return Ok(());
-                }
-                if args.max_frames.is_some_and(|max| sink.frames >= max) {
-                    info!(frames = sink.frames, lost = $lost, "done");
-                    return Ok(());
-                }
-            }
-        };
-    }
 
     match leg {
         Some(mut leg) => loop {
             let (ch, n) = leg.dgram.recv_into(&mut buf).await?;
-            handle!(ch, n, leg.dgram.lost_estimate());
+            let lost = leg.dgram.lost_estimate();
+            if !handle_packet(ch, &buf[..n], lost, &args, &mut reasm, &mut decoders, &mut sink)? {
+                return Ok(());
+            }
         },
         None => loop {
             let (ch, n) = stream.recv_into(&mut buf).await?;
-            handle!(ch, n, 0);
+            if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink)? {
+                return Ok(());
+            }
         },
     }
+}
+
+/// Handles one received packet; returns `false` when the session should end.
+fn handle_packet(
+    ch: u16,
+    packet: &[u8],
+    lost: u64,
+    args: &Args,
+    reasm: &mut Reassembler,
+    decoders: &mut HashMap<u8, Box<dyn VideoDecoder>>,
+    sink: &mut Sink,
+) -> Result<bool> {
+    if ch == channel::CONTROL
+        && let Ok(ControlMessage::DisplayInfo {
+            display_id,
+            width,
+            height,
+            codec,
+        }) = ControlMessage::decode(packet)
+    {
+        match VideoCodecType::from_wire_id(codec)
+            .map(codec::build_decoder)
+            .transpose()
+        {
+            Ok(Some(dec)) => {
+                info!(display_id, width, height, codec, "display announced");
+                decoders.insert(display_id, dec);
+            }
+            Ok(None) => warn!(codec, "unknown codec id; frames will be dropped"),
+            Err(e) => warn!(codec, "cannot build decoder: {e}"),
+        }
+    }
+    if ch == channel::DISPLAY
+        && let Some(complete) = reasm.push(packet)?
+    {
+        let decoder = match decoders.entry(complete.display_id) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                if complete.display_id == 0 {
+                    warn!("no DisplayInfo received; assuming raw codec");
+                    e.insert(codec::build_decoder(VideoCodecType::Raw)?)
+                } else {
+                    warn!(
+                        display_id = complete.display_id,
+                        "frame for unknown display; dropped"
+                    );
+                    return Ok(true);
+                }
+            }
+        };
+        let frame = decoder.decode(&codec::EncodedPacket {
+            data: complete.data,
+            keyframe: true,
+        })?;
+        // Only display 0 is rendered (multi-monitor arrives later, §8.3);
+        // other displays are still decoded to exercise the pipeline.
+        if complete.display_id == 0 && !sink.push(&frame)? {
+            info!("window closed");
+            return Ok(false);
+        }
+        if args.max_frames.is_some_and(|max| sink.frames >= max) {
+            info!(frames = sink.frames, lost, "done");
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }

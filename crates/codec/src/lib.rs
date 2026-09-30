@@ -12,6 +12,7 @@
 //!   implementation for tests and channel-level E2E).
 
 mod error;
+mod preset;
 mod raw;
 mod video;
 #[cfg(any(feature = "codec-vp9", feature = "codec-vp8"))]
@@ -22,6 +23,7 @@ mod vpx;
 pub mod color;
 
 pub use error::{CodecError, Result};
+pub use preset::{CodecParams, CodecPreset, PRESETS, build_decoder};
 pub use raw::{RawDecoder, RawEncoder};
 pub use video::{
     DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame,

@@ -63,6 +63,20 @@ pub enum ControlMessage {
         /// relay-assigned in a future tunnel leg).
         token: [u8; 16],
     },
+    /// Display stream announcement (§8.3/§8.4): codec and geometry of one
+    /// display, sent before its first frame and whenever they change.
+    /// `codec` is a `VideoCodecType` wire ID (codec crate); unknown IDs must
+    /// be ignored (frames for that display are then dropped with a log).
+    DisplayInfo {
+        /// Display identifier (0 = primary).
+        display_id: u8,
+        /// Frame width in physical pixels.
+        width: u32,
+        /// Frame height in physical pixels.
+        height: u32,
+        /// `VideoCodecType` wire ID.
+        codec: u16,
+    },
     /// Control channel heartbeat.
     Keepalive,
 }
