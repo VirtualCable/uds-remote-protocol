@@ -120,6 +120,36 @@ fn process_cpu_ms() -> f64 {
     ticks * 10.0 // clock ticks are 10 ms on Linux (USER_HZ=100)
 }
 
+/// Process CPU time (user+kernel) in milliseconds, Windows `GetProcessTimes`.
+#[cfg(windows)]
+fn process_cpu_ms() -> f64 {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: all out-params point to valid FILETIME locals.
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    }
+    .expect("GetProcessTimes");
+    let ticks = |ft: FILETIME| (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime);
+    // FILETIME ticks are 100 ns.
+    (ticks(kernel) + ticks(user)) as f64 / 10_000.0
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn cpu_since(c0: f64) -> f64 {
+    process_cpu_ms() - c0
+}
+
 /// Encode+decode sweep: speed, real emitted bitrate, quality (PSNR) and
 /// CPU cost (encode/decode ms per frame, and % of one core serving 30 fps).
 fn sweep(name: &str, preset: codec::CodecPreset, frames: &[Vec<u8>], w: u32, h: u32) {
@@ -137,20 +167,20 @@ fn sweep(name: &str, preset: codec::CodecPreset, frames: &[Vec<u8>], w: u32, h: 
             stride: (w * 4) as usize,
             data,
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let c0 = process_cpu_ms();
         let packet = enc.encode(&frame).expect("encode");
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
-            enc_cpu += process_cpu_ms() - c0;
+            enc_cpu += cpu_since(c0);
         }
         total_bytes += packet.data.len();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         let c1 = process_cpu_ms();
         decoded.push(dec.decode(&packet).expect("decode"));
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         {
-            dec_cpu += process_cpu_ms() - c1;
+            dec_cpu += cpu_since(c1);
         }
     }
     let elapsed = start.elapsed().as_secs_f64();
