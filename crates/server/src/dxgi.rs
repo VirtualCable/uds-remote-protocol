@@ -247,16 +247,15 @@ fn init_duplication(
         if let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
             let output1: IDXGIOutput1 =
                 output.cast().context("output does not expose IDXGIOutput1")?;
-            let desc = unsafe { output1.GetDesc() }.context("GetDesc failed")?;
-            if desc.Rotation != DXGI_MODE_ROTATION_IDENTITY {
-                warn!(
-                    rotation = ?desc.Rotation,
-                    "output is rotated; capture assumes identity rotation (not yet supported)"
-                );
-            }
             let duplication = unsafe { output1.DuplicateOutput(&device) }
                 .context("DuplicateOutput failed (needs an interactive desktop session)")?;
             let dup_desc = unsafe { duplication.GetDesc() };
+            if dup_desc.Rotation != DXGI_MODE_ROTATION_IDENTITY {
+                warn!(
+                    rotation = ?dup_desc.Rotation,
+                    "output is rotated; capture assumes identity rotation (not yet supported)"
+                );
+            }
             anyhow::ensure!(
                 dup_desc.ModeDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
                 "unexpected desktop format {:?}",
