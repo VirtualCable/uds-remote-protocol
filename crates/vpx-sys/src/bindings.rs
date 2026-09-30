@@ -814,6 +814,19 @@ unsafe extern "C" {
         cb_priv: *mut ::std::os::raw::c_void,
     ) -> vpx_codec_err_t;
 }
+pub const vp8_com_control_id_VP8_SET_REFERENCE: vp8_com_control_id = 1;
+pub const vp8_com_control_id_VP8_COPY_REFERENCE: vp8_com_control_id = 2;
+pub const vp8_com_control_id_VP8_SET_POSTPROC: vp8_com_control_id = 3;
+pub const vp8_com_control_id_VP9_GET_REFERENCE: vp8_com_control_id = 128;
+pub const vp8_com_control_id_VP8_COMMON_CTRL_ID_MAX: vp8_com_control_id = 129;
+pub const vp8_com_control_id_VP8_DECODER_CTRL_ID_START: vp8_com_control_id = 256;
+pub type vp8_com_control_id = ::std::os::raw::c_uint;
+pub const vp8_postproc_level_VP8_NOFILTERING: vp8_postproc_level = 0;
+pub const vp8_postproc_level_VP8_DEBLOCK: vp8_postproc_level = 1;
+pub const vp8_postproc_level_VP8_DEMACROBLOCK: vp8_postproc_level = 2;
+pub const vp8_postproc_level_VP8_ADDNOISE: vp8_postproc_level = 4;
+pub const vp8_postproc_level_VP8_MFQE: vp8_postproc_level = 8;
+pub type vp8_postproc_level = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vp8_postproc_cfg {
@@ -847,12 +860,88 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn vpx_codec_vp9_cx() -> *const vpx_codec_iface;
 }
+pub const vp8e_enc_control_id_VP8E_SET_ROI_MAP: vp8e_enc_control_id = 8;
+pub const vp8e_enc_control_id_VP8E_SET_ACTIVEMAP: vp8e_enc_control_id = 9;
+pub const vp8e_enc_control_id_VP8E_SET_SCALEMODE: vp8e_enc_control_id = 11;
+pub const vp8e_enc_control_id_VP8E_SET_CPUUSED: vp8e_enc_control_id = 13;
+pub const vp8e_enc_control_id_VP8E_SET_ENABLEAUTOALTREF: vp8e_enc_control_id = 14;
+pub const vp8e_enc_control_id_VP8E_SET_NOISE_SENSITIVITY: vp8e_enc_control_id = 15;
+pub const vp8e_enc_control_id_VP8E_SET_SHARPNESS: vp8e_enc_control_id = 16;
+pub const vp8e_enc_control_id_VP8E_SET_STATIC_THRESHOLD: vp8e_enc_control_id = 17;
+pub const vp8e_enc_control_id_VP8E_SET_TOKEN_PARTITIONS: vp8e_enc_control_id = 18;
+pub const vp8e_enc_control_id_VP8E_GET_LAST_QUANTIZER: vp8e_enc_control_id = 19;
+pub const vp8e_enc_control_id_VP8E_GET_LAST_QUANTIZER_64: vp8e_enc_control_id = 20;
+pub const vp8e_enc_control_id_VP8E_SET_ARNR_MAXFRAMES: vp8e_enc_control_id = 21;
+pub const vp8e_enc_control_id_VP8E_SET_ARNR_STRENGTH: vp8e_enc_control_id = 22;
+pub const vp8e_enc_control_id_VP8E_SET_ARNR_TYPE: vp8e_enc_control_id = 23;
+pub const vp8e_enc_control_id_VP8E_SET_TUNING: vp8e_enc_control_id = 24;
+pub const vp8e_enc_control_id_VP8E_SET_CQ_LEVEL: vp8e_enc_control_id = 25;
+pub const vp8e_enc_control_id_VP8E_SET_MAX_INTRA_BITRATE_PCT: vp8e_enc_control_id = 26;
+pub const vp8e_enc_control_id_VP8E_SET_FRAME_FLAGS: vp8e_enc_control_id = 27;
+pub const vp8e_enc_control_id_VP9E_SET_MAX_INTER_BITRATE_PCT: vp8e_enc_control_id = 28;
+pub const vp8e_enc_control_id_VP9E_SET_GF_CBR_BOOST_PCT: vp8e_enc_control_id = 29;
+pub const vp8e_enc_control_id_VP8E_SET_TEMPORAL_LAYER_ID: vp8e_enc_control_id = 30;
+pub const vp8e_enc_control_id_VP8E_SET_SCREEN_CONTENT_MODE: vp8e_enc_control_id = 31;
+pub const vp8e_enc_control_id_VP9E_SET_LOSSLESS: vp8e_enc_control_id = 32;
+pub const vp8e_enc_control_id_VP9E_SET_TILE_COLUMNS: vp8e_enc_control_id = 33;
+pub const vp8e_enc_control_id_VP9E_SET_TILE_ROWS: vp8e_enc_control_id = 34;
+pub const vp8e_enc_control_id_VP9E_SET_FRAME_PARALLEL_DECODING: vp8e_enc_control_id = 35;
+pub const vp8e_enc_control_id_VP9E_SET_AQ_MODE: vp8e_enc_control_id = 36;
+pub const vp8e_enc_control_id_VP9E_SET_FRAME_PERIODIC_BOOST: vp8e_enc_control_id = 37;
+pub const vp8e_enc_control_id_VP9E_SET_NOISE_SENSITIVITY: vp8e_enc_control_id = 38;
+pub const vp8e_enc_control_id_VP9E_SET_SVC: vp8e_enc_control_id = 39;
+pub const vp8e_enc_control_id_VP9E_SET_ROI_MAP: vp8e_enc_control_id = 40;
+pub const vp8e_enc_control_id_VP9E_SET_SVC_PARAMETERS: vp8e_enc_control_id = 41;
+pub const vp8e_enc_control_id_VP9E_SET_SVC_LAYER_ID: vp8e_enc_control_id = 42;
+pub const vp8e_enc_control_id_VP9E_SET_TUNE_CONTENT: vp8e_enc_control_id = 43;
+pub const vp8e_enc_control_id_VP9E_GET_SVC_LAYER_ID: vp8e_enc_control_id = 44;
+pub const vp8e_enc_control_id_VP9E_REGISTER_CX_CALLBACK: vp8e_enc_control_id = 45;
+pub const vp8e_enc_control_id_VP9E_SET_COLOR_SPACE: vp8e_enc_control_id = 46;
+pub const vp8e_enc_control_id_VP9E_SET_MIN_GF_INTERVAL: vp8e_enc_control_id = 48;
+pub const vp8e_enc_control_id_VP9E_SET_MAX_GF_INTERVAL: vp8e_enc_control_id = 49;
+pub const vp8e_enc_control_id_VP9E_GET_ACTIVEMAP: vp8e_enc_control_id = 50;
+pub const vp8e_enc_control_id_VP9E_SET_COLOR_RANGE: vp8e_enc_control_id = 51;
+pub const vp8e_enc_control_id_VP9E_SET_SVC_REF_FRAME_CONFIG: vp8e_enc_control_id = 52;
+pub const vp8e_enc_control_id_VP9E_SET_RENDER_SIZE: vp8e_enc_control_id = 53;
+pub const vp8e_enc_control_id_VP9E_SET_TARGET_LEVEL: vp8e_enc_control_id = 54;
+pub const vp8e_enc_control_id_VP9E_SET_ROW_MT: vp8e_enc_control_id = 55;
+pub const vp8e_enc_control_id_VP9E_GET_LEVEL: vp8e_enc_control_id = 56;
+pub const vp8e_enc_control_id_VP9E_SET_ALT_REF_AQ: vp8e_enc_control_id = 57;
+pub const vp8e_enc_control_id_VP8E_SET_GF_CBR_BOOST_PCT: vp8e_enc_control_id = 58;
+pub const vp8e_enc_control_id_VP9E_ENABLE_MOTION_VECTOR_UNIT_TEST: vp8e_enc_control_id = 59;
+pub const vp8e_enc_control_id_VP9E_SET_SVC_INTER_LAYER_PRED: vp8e_enc_control_id = 60;
+pub const vp8e_enc_control_id_VP9E_SET_SVC_FRAME_DROP_LAYER: vp8e_enc_control_id = 61;
+pub const vp8e_enc_control_id_VP9E_GET_SVC_REF_FRAME_CONFIG: vp8e_enc_control_id = 62;
+pub const vp8e_enc_control_id_VP9E_SET_SVC_GF_TEMPORAL_REF: vp8e_enc_control_id = 63;
+pub const vp8e_enc_control_id_VP9E_SET_SVC_SPATIAL_LAYER_SYNC: vp8e_enc_control_id = 64;
+pub const vp8e_enc_control_id_VP9E_SET_TPL: vp8e_enc_control_id = 65;
+pub const vp8e_enc_control_id_VP9E_SET_KEY_FRAME_FILTERING: vp8e_enc_control_id = 66;
+pub const vp8e_enc_control_id_VP9E_SET_POSTENCODE_DROP: vp8e_enc_control_id = 67;
+pub const vp8e_enc_control_id_VP9E_SET_DELTA_Q_UV: vp8e_enc_control_id = 68;
+pub const vp8e_enc_control_id_VP9E_SET_DISABLE_OVERSHOOT_MAXQ_CBR: vp8e_enc_control_id = 69;
+pub const vp8e_enc_control_id_VP9E_SET_DISABLE_LOOPFILTER: vp8e_enc_control_id = 70;
+pub const vp8e_enc_control_id_VP9E_SET_EXTERNAL_RATE_CONTROL: vp8e_enc_control_id = 71;
+pub const vp8e_enc_control_id_VP9E_SET_RTC_EXTERNAL_RATECTRL: vp8e_enc_control_id = 72;
+pub const vp8e_enc_control_id_VP9E_GET_LOOPFILTER_LEVEL: vp8e_enc_control_id = 73;
+pub const vp8e_enc_control_id_VP9E_GET_LAST_QUANTIZER_SVC_LAYERS: vp8e_enc_control_id = 74;
+pub const vp8e_enc_control_id_VP8E_SET_RTC_EXTERNAL_RATECTRL: vp8e_enc_control_id = 75;
+pub const vp8e_enc_control_id_VP9E_SET_QUANTIZER_ONE_PASS: vp8e_enc_control_id = 76;
+pub type vp8e_enc_control_id = ::std::os::raw::c_uint;
 pub const vpx_scaling_mode_1d_VP8E_NORMAL: vpx_scaling_mode_1d = 0;
 pub const vpx_scaling_mode_1d_VP8E_FOURFIVE: vpx_scaling_mode_1d = 1;
 pub const vpx_scaling_mode_1d_VP8E_THREEFIVE: vpx_scaling_mode_1d = 2;
 pub const vpx_scaling_mode_1d_VP8E_ONETWO: vpx_scaling_mode_1d = 3;
 pub type vpx_scaling_mode_1d = ::std::os::raw::c_uint;
 pub use self::vpx_scaling_mode_1d as VPX_SCALING_MODE;
+pub const vp9e_temporal_layering_mode_VP9E_TEMPORAL_LAYERING_MODE_NOLAYERING:
+    vp9e_temporal_layering_mode = 0;
+pub const vp9e_temporal_layering_mode_VP9E_TEMPORAL_LAYERING_MODE_BYPASS:
+    vp9e_temporal_layering_mode = 1;
+pub const vp9e_temporal_layering_mode_VP9E_TEMPORAL_LAYERING_MODE_0101:
+    vp9e_temporal_layering_mode = 2;
+pub const vp9e_temporal_layering_mode_VP9E_TEMPORAL_LAYERING_MODE_0212:
+    vp9e_temporal_layering_mode = 3;
+pub type vp9e_temporal_layering_mode = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vpx_roi_map {
@@ -882,6 +971,19 @@ pub struct vpx_scaling_mode {
     pub v_scaling_mode: VPX_SCALING_MODE,
 }
 pub type vpx_scaling_mode_t = vpx_scaling_mode;
+pub const vp8e_token_partitions_VP8_ONE_TOKENPARTITION: vp8e_token_partitions = 0;
+pub const vp8e_token_partitions_VP8_TWO_TOKENPARTITION: vp8e_token_partitions = 1;
+pub const vp8e_token_partitions_VP8_FOUR_TOKENPARTITION: vp8e_token_partitions = 2;
+pub const vp8e_token_partitions_VP8_EIGHT_TOKENPARTITION: vp8e_token_partitions = 3;
+pub type vp8e_token_partitions = ::std::os::raw::c_uint;
+pub const vp9e_tune_content_VP9E_CONTENT_DEFAULT: vp9e_tune_content = 0;
+pub const vp9e_tune_content_VP9E_CONTENT_SCREEN: vp9e_tune_content = 1;
+pub const vp9e_tune_content_VP9E_CONTENT_FILM: vp9e_tune_content = 2;
+pub const vp9e_tune_content_VP9E_CONTENT_INVALID: vp9e_tune_content = 3;
+pub type vp9e_tune_content = ::std::os::raw::c_uint;
+pub const vp8e_tuning_VP8_TUNE_PSNR: vp8e_tuning = 0;
+pub const vp8e_tuning_VP8_TUNE_SSIM: vp8e_tuning = 1;
+pub type vp8e_tuning = ::std::os::raw::c_uint;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct vpx_svc_layer_id {
@@ -932,6 +1034,23 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn vpx_codec_vp9_dx() -> *const vpx_codec_iface;
 }
+pub const vp8_dec_control_id_VP8D_GET_LAST_REF_UPDATES: vp8_dec_control_id = 256;
+pub const vp8_dec_control_id_VP8D_GET_FRAME_CORRUPTED: vp8_dec_control_id = 257;
+pub const vp8_dec_control_id_VP8D_GET_LAST_REF_USED: vp8_dec_control_id = 258;
+pub const vp8_dec_control_id_VPXD_SET_DECRYPTOR: vp8_dec_control_id = 259;
+pub const vp8_dec_control_id_VP8D_SET_DECRYPTOR: vp8_dec_control_id = 259;
+pub const vp8_dec_control_id_VP9D_GET_FRAME_SIZE: vp8_dec_control_id = 260;
+pub const vp8_dec_control_id_VP9D_GET_DISPLAY_SIZE: vp8_dec_control_id = 261;
+pub const vp8_dec_control_id_VP9D_GET_BIT_DEPTH: vp8_dec_control_id = 262;
+pub const vp8_dec_control_id_VP9_SET_BYTE_ALIGNMENT: vp8_dec_control_id = 263;
+pub const vp8_dec_control_id_VP9_INVERT_TILE_DECODE_ORDER: vp8_dec_control_id = 264;
+pub const vp8_dec_control_id_VP9_SET_SKIP_LOOP_FILTER: vp8_dec_control_id = 265;
+pub const vp8_dec_control_id_VP9_DECODE_SVC_SPATIAL_LAYER: vp8_dec_control_id = 266;
+pub const vp8_dec_control_id_VPXD_GET_LAST_QUANTIZER: vp8_dec_control_id = 267;
+pub const vp8_dec_control_id_VP9D_SET_ROW_MT: vp8_dec_control_id = 268;
+pub const vp8_dec_control_id_VP9D_SET_LOOP_FILTER_OPT: vp8_dec_control_id = 269;
+pub const vp8_dec_control_id_VP8_DECODER_CTRL_ID_MAX: vp8_dec_control_id = 270;
+pub type vp8_dec_control_id = ::std::os::raw::c_uint;
 pub type vpx_decrypt_cb = ::std::option::Option<
     unsafe extern "C" fn(
         decrypt_state: *mut ::std::os::raw::c_void,

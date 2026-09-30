@@ -28,3 +28,5 @@ pub use video::{
 };
 #[cfg(feature = "codec-vp9")]
 pub use vpx::{Vp9Decoder, Vp9Encoder};
+#[cfg(feature = "codec-vp8")]
+pub use vpx::{Vp8Decoder, Vp8Encoder};

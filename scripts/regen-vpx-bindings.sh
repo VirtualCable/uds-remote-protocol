@@ -17,7 +17,7 @@ EOF
 
 bindgen /tmp/vpx_wrapper.h -o crates/vpx-sys/src/bindings.rs \
   --allowlist-function 'vpx_.*' \
-  --allowlist-type 'vpx_.*' \
+  --allowlist-type 'vpx_.*|vp8e_.*|vp9e_.*|vp8_.*|vp9_.*' \
   --allowlist-var 'VPX_.*|VP8E_.*|VP9E_.*' \
   --no-layout-tests \
   --generate-inline-functions false
