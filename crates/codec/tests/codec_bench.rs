@@ -195,3 +195,34 @@ fn bitrate_sweep_1080p() {
         sweep("vp9-balanced", preset, &frames, w, h);
     }
 }
+
+/// VP8 across its whole cpu_used range (-16..16): is there a point where
+/// the CPU cost collapses while quality stays acceptable? That would be
+/// VP8's only remaining niche (ultra-low CPU); at quality settings it is
+/// dominated by vp9-low-latency on both axes (2026-09-30 data).
+#[test]
+#[ignore = "benchmark: run explicitly in release"]
+fn vp8_cpu_sweep_1080p() {
+    let (w, h, n) = (1920u32, 1080u32, 90u32);
+    let frames: Vec<Vec<u8>> = (0..n).map(|t| frame_at(w, h, t)).collect();
+    println!("--- {n} frames {w}x{h}: VP8 cpu_used sweep @2.5M vs VP9 cpu 8 ---");
+    // Reference point.
+    sweep(
+        "vp9-low-latency(ref)",
+        codec::CodecPreset::by_name("vp9-low-latency").expect("preset"),
+        &frames,
+        w,
+        h,
+    );
+    for cpu in [-14, -10, -6, 0, 4, 8, 12, 16] {
+        let preset = codec::CodecPreset {
+            name: "vp8-sweep",
+            codec: codec::VideoCodecType::Vp8,
+            params: codec::CodecParams {
+                bitrate_kbps: 2500,
+                cpu_used: Some(cpu),
+            },
+        };
+        sweep("vp8", preset, &frames, w, h);
+    }
+}
