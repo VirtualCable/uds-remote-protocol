@@ -16,6 +16,8 @@
 mod error;
 #[cfg(feature = "codec-jpeg")]
 mod jpeg_rects;
+#[cfg(feature = "codec-ladder")]
+mod ladder_encoder;
 mod preset;
 mod raw;
 mod video;
@@ -25,13 +27,18 @@ mod vpx;
 /// BGRA → I420 color conversion (scalar Rust; libyuv SIMD later, behind a
 /// feature, with the same API).
 pub mod color;
+/// Codec ladder state machine: decides when to switch codec regime (§8.5).
+pub mod ladder;
 /// Dirty-region detection and rect merging for rect-oriented codecs (§8.5).
 pub mod rects;
 
 pub use error::{CodecError, Result};
+pub use ladder::{Ladder, LadderPolicy, Level, Switch};
+#[cfg(feature = "codec-ladder")]
+pub use ladder_encoder::LadderEncoder;
 #[cfg(feature = "codec-jpeg")]
 pub use jpeg_rects::{JpegRectsDecoder, JpegRectsEncoder};
-pub use preset::{CodecParams, CodecPreset, PRESETS, build_decoder};
+pub use preset::{CodecParams, CodecPreset, DEFAULT_BITRATE_KBPS, PRESETS, build_decoder};
 pub use raw::{RawDecoder, RawEncoder};
 pub use video::{
     DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame,

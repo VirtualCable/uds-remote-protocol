@@ -190,21 +190,14 @@ async fn serve<T: ReliableTransport>(
     let mut display = display;
     let mut source = Source::new(args)?;
     let (width, height) = source.dimensions();
-    let preset = CodecPreset::by_name(&args.preset)
-        .with_context(|| format!("unknown preset: {}", args.preset))?;
-    let preset = match args.bitrate {
-        Some(kbps) => preset.with_bitrate(kbps),
-        None => preset,
-    };
-    let mut encoder = preset.build_encoder(width, height)?;
-    info!(preset = preset.name, codec = ?preset.codec, width, height, "display encoder ready");
+    let mut encoder = build_encoder(args, width, height)?;
 
     // Announce the display codec/geometry before the first frame (§8.3/§8.4).
     let info = protocol::ControlMessage::DisplayInfo {
         display_id: 0,
         width,
         height,
-        codec: preset.codec.wire_id(),
+        codec: encoder.codec_type().wire_id(),
     };
     display.send_control(&info.encode()?).await?;
 
@@ -217,6 +210,18 @@ async fn serve<T: ReliableTransport>(
             continue; // no desktop changes this tick
         };
         let packet = encoder.encode(&frame)?;
+        if let Some(codec) = encoder.take_codec_change() {
+            // Codec ladder switched regime: re-announce before the fragments
+            // so the peer rebuilds its decoder (§8.5).
+            info!(codec = codec.wire_id(), "codec ladder switched");
+            let info = protocol::ControlMessage::DisplayInfo {
+                display_id: 0,
+                width,
+                height,
+                codec: codec.wire_id(),
+            };
+            display.send_control(&info.encode()?).await?;
+        }
         if packet.data.is_empty() {
             continue; // rect codecs: nothing changed on this frame
         }
@@ -229,6 +234,34 @@ async fn serve<T: ReliableTransport>(
             return Ok(());
         }
     }
+}
+
+/// Builds the display encoder from `--preset`: a named preset, or the codec
+/// ladder (`--preset ladder`, feature `ladder`) which starts in rects-JPEG
+/// and switches to VP9 on sustained video-like change (§8.5).
+fn build_encoder(args: &Args, width: u32, height: u32) -> Result<Box<dyn codec::VideoEncoder>> {
+    #[cfg(feature = "ladder")]
+    if args.preset == "ladder" {
+        let kbps = args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS);
+        let encoder = codec::LadderEncoder::new(
+            width,
+            height,
+            codec::LadderPolicy::balanced(),
+            kbps,
+            80,
+        )?;
+        info!(width, height, kbps, "codec ladder ready (rects-jpeg <-> vp9)");
+        return Ok(Box::new(encoder));
+    }
+    let preset = CodecPreset::by_name(&args.preset)
+        .with_context(|| format!("unknown preset: {}", args.preset))?;
+    let preset = match args.bitrate {
+        Some(kbps) => preset.with_bitrate(kbps),
+        None => preset,
+    };
+    let encoder = preset.build_encoder(width, height)?;
+    info!(preset = preset.name, codec = ?preset.codec, width, height, "display encoder ready");
+    Ok(encoder)
 }
 
 /// Frame producer selected by `--source`: the synthetic pattern everywhere,

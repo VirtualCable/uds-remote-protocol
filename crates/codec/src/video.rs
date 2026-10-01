@@ -107,6 +107,15 @@ pub trait VideoEncoder {
 
     /// Codec implemented by this encoder.
     fn codec_type(&self) -> VideoCodecType;
+
+    /// Takes a pending codec change, if any. Composite encoders (the codec
+    /// ladder, §8.5) switch their inner codec at runtime; the server polls
+    /// this after each `encode` and, when `Some`, re-announces `DisplayInfo`
+    /// with the new codec id before sending the frame's fragments. Simple
+    /// encoders never change and use the default.
+    fn take_codec_change(&mut self) -> Option<VideoCodecType> {
+        None
+    }
 }
 
 /// Video decoder: bitstream packet in → BGRA frame out.

@@ -62,6 +62,69 @@ impl JpegRectsEncoder {
             force_full: false,
         })
     }
+
+    /// Encodes `frame` against a caller-computed dirty-rect set (used by the
+    /// codec ladder, which needs the rects itself for the changed-area
+    /// metric). An empty set yields an empty packet ("no changes"). Updates
+    /// the internal previous-frame copy so later [`VideoEncoder::encode`]
+    /// calls stay consistent.
+    pub fn encode_with_dirty(&mut self, frame: &VideoFrame<'_>, dirty: &[Rect]) -> Result<EncodedPacket> {
+        let prev = frame.data.to_vec();
+
+        if dirty.is_empty() {
+            self.prev = Some(prev);
+            return Ok(EncodedPacket {
+                data: Vec::new(),
+                keyframe: false,
+            });
+        }
+
+        let mut compressor =
+            turbojpeg::Compressor::new().map_err(|e| CodecError::Backend(e.to_string()))?;
+        compressor
+            .set_quality(self.quality)
+            .map_err(|e| CodecError::Backend(e.to_string()))?;
+
+        let full = dirty.len() == 1
+            && dirty[0].left == 0
+            && dirty[0].top == 0
+            && dirty[0].right == self.width as i32
+            && dirty[0].bottom == self.height as i32;
+
+        let mut out = Vec::with_capacity(HEADER_LEN + dirty.len() * RECT_HEADER_LEN);
+        out.extend_from_slice(&self.width.to_le_bytes());
+        out.extend_from_slice(&self.height.to_le_bytes());
+        #[allow(clippy::cast_possible_truncation)] // merge() caps at MAX_RECTS
+        out.extend_from_slice(&(dirty.len() as u16).to_le_bytes());
+        for r in dirty {
+            let Some((pixels, w, h)) = crop(frame, r) else {
+                continue;
+            };
+            let jpeg = compressor
+                .compress_to_owned(turbojpeg::Image {
+                    pixels: &pixels,
+                    width: w,
+                    pitch: w * 4,
+                    height: h,
+                    format: turbojpeg::PixelFormat::BGRA,
+                })
+                .map_err(|e| CodecError::Backend(e.to_string()))?;
+            #[allow(clippy::cast_possible_truncation)] // screen dims and jpeg sizes fit
+            {
+                out.extend_from_slice(&(r.left.max(0) as u16).to_le_bytes());
+                out.extend_from_slice(&(r.top.max(0) as u16).to_le_bytes());
+                out.extend_from_slice(&(w as u16).to_le_bytes());
+                out.extend_from_slice(&(h as u16).to_le_bytes());
+                out.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
+            }
+            out.extend_from_slice(&jpeg);
+        }
+        self.prev = Some(prev);
+        Ok(EncodedPacket {
+            data: out,
+            keyframe: full,
+        })
+    }
 }
 
 /// Crops a tight BGRA copy of `rect` out of `frame`.
@@ -103,60 +166,7 @@ impl VideoEncoder for JpegRectsEncoder {
         } else {
             rects::dirty_rects(self.prev.as_deref(), frame.data, self.width, self.height, frame.stride)
         };
-        let prev = frame.data.to_vec();
-
-        if dirty.is_empty() {
-            return Ok(EncodedPacket {
-                data: Vec::new(),
-                keyframe: false,
-            });
-        }
-
-        let mut compressor =
-            turbojpeg::Compressor::new().map_err(|e| CodecError::Backend(e.to_string()))?;
-        compressor
-            .set_quality(self.quality)
-            .map_err(|e| CodecError::Backend(e.to_string()))?;
-
-        let full = dirty.len() == 1
-            && dirty[0].left == 0
-            && dirty[0].top == 0
-            && dirty[0].right == self.width as i32
-            && dirty[0].bottom == self.height as i32;
-
-        let mut out = Vec::with_capacity(HEADER_LEN + dirty.len() * RECT_HEADER_LEN);
-        out.extend_from_slice(&self.width.to_le_bytes());
-        out.extend_from_slice(&self.height.to_le_bytes());
-        #[allow(clippy::cast_possible_truncation)] // merge() caps at MAX_RECTS
-        out.extend_from_slice(&(dirty.len() as u16).to_le_bytes());
-        for r in &dirty {
-            let Some((pixels, w, h)) = crop(frame, r) else {
-                continue;
-            };
-            let jpeg = compressor
-                .compress_to_owned(turbojpeg::Image {
-                    pixels: &pixels,
-                    width: w,
-                    pitch: w * 4,
-                    height: h,
-                    format: turbojpeg::PixelFormat::BGRA,
-                })
-                .map_err(|e| CodecError::Backend(e.to_string()))?;
-            #[allow(clippy::cast_possible_truncation)] // screen dims and jpeg sizes fit
-            {
-                out.extend_from_slice(&(r.left.max(0) as u16).to_le_bytes());
-                out.extend_from_slice(&(r.top.max(0) as u16).to_le_bytes());
-                out.extend_from_slice(&(w as u16).to_le_bytes());
-                out.extend_from_slice(&(h as u16).to_le_bytes());
-                out.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
-            }
-            out.extend_from_slice(&jpeg);
-        }
-        self.prev = Some(prev);
-        Ok(EncodedPacket {
-            data: out,
-            keyframe: full,
-        })
+        self.encode_with_dirty(frame, &dirty)
     }
 
     fn request_keyframe(&mut self) {
