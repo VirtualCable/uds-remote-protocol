@@ -251,6 +251,7 @@ fn vp8_cpu_sweep_1080p() {
             params: codec::CodecParams {
                 bitrate_kbps: 2500,
                 cpu_used: Some(cpu),
+                quality: None,
             },
         };
         sweep("vp8", preset, &frames, w, h);

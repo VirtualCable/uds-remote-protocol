@@ -13,6 +13,7 @@ workspace = true
 default = []
 vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
+jpeg = ["codec/codec-jpeg"]
 
 [dependencies]
 client.workspace = true

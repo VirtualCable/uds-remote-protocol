@@ -217,6 +217,9 @@ async fn serve<T: ReliableTransport>(
             continue; // no desktop changes this tick
         };
         let packet = encoder.encode(&frame)?;
+        if packet.data.is_empty() {
+            continue; // rect codecs: nothing changed on this frame
+        }
         for frag in Fragmenter::split(0, frame_id, &packet.data) {
             display.send_fragment(&frag).await?;
         }

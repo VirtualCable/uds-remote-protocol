@@ -13,11 +13,13 @@ workspace = true
 default = []
 codec-vp9 = ["dep:vpx-sys"]
 codec-vp8 = ["dep:vpx-sys"]
+codec-jpeg = ["dep:turbojpeg"]
 codec-opus = []
 
 [dependencies]
 thiserror.workspace = true
 vpx-sys = { workspace = true, optional = true }
+turbojpeg = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = ["Win32_System_Threading"] }

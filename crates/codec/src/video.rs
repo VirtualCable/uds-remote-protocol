@@ -19,6 +19,9 @@ pub enum VideoCodecType {
     H264,
     /// AV1 (future).
     Av1,
+    /// JPEG over dirty rects (libjpeg-turbo; base regime of the codec
+    /// ladder, §8.5).
+    JpegRects,
 }
 
 impl VideoCodecType {
@@ -31,6 +34,7 @@ impl VideoCodecType {
             Self::Vp9 => 2,
             Self::H264 => 3,
             Self::Av1 => 4,
+            Self::JpegRects => 5,
         }
     }
 
@@ -43,6 +47,7 @@ impl VideoCodecType {
             2 => Some(Self::Vp9),
             3 => Some(Self::H264),
             4 => Some(Self::Av1),
+            5 => Some(Self::JpegRects),
             _ => None,
         }
     }
