@@ -28,3 +28,8 @@ getrandom.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, optional = true }
+
+[dev-dependencies]
+codec = { workspace = true, features = ["codec-vp9"] }
+turbojpeg = "1.5"
+webp = "0.3"
