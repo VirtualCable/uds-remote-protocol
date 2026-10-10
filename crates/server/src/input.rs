@@ -90,15 +90,22 @@ pub use win::SendInputInjector;
 #[cfg(all(windows, feature = "windows-capture"))]
 mod win {
     use super::{InputInjector, PointerButton};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE,
-        MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-        MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-        MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
-        MOUSE_EVENT_FLAGS, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-        SM_YVIRTUALSCREEN, XBUTTON1, XBUTTON2,
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
+        KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+        MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+        MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+        SendInput, VIRTUAL_KEY,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+
+    /// `XBUTTON1`/`XBUTTON2` values for `MOUSEINPUT.mouseData` (winuser.h).
+    const XBUTTON1: u32 = 0x0001;
+    const XBUTTON2: u32 = 0x0002;
 
     /// Sends input events to the session the process runs in (§10).
     pub struct SendInputInjector {
@@ -106,6 +113,12 @@ mod win {
         origin: (i32, i32),
         /// Virtual-desktop size for absolute-coordinate normalization.
         size: (i32, i32),
+    }
+
+    impl Default for SendInputInjector {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl SendInputInjector {
@@ -127,11 +140,11 @@ mod win {
         fn send(inputs: &[INPUT]) {
             // SAFETY: `inputs` is a valid slice; SendInput copies from it.
             unsafe {
-                let _ = SendInput(inputs, std::mem::size_of::<INPUT>() as i32);
+                let _ = SendInput(inputs, i32::try_from(std::mem::size_of::<INPUT>()).unwrap_or(0));
             }
         }
 
-        fn mouse(flags: MOUSE_EVENT_FLAGS, data: i32, x: i32, y: i32) -> INPUT {
+        fn mouse(flags: MOUSE_EVENT_FLAGS, data: u32, x: i32, y: i32) -> INPUT {
             INPUT {
                 r#type: INPUT_MOUSE,
                 Anonymous: INPUT_0 {
@@ -161,7 +174,7 @@ mod win {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {
                     ki: KEYBDINPUT {
-                        wVk: windows::Win32::UI::Input::KeyboardAndMouse::VIRTUAL_KEY(0),
+                        wVk: VIRTUAL_KEY(0),
                         wScan: scancode,
                         dwFlags: flags,
                         time: 0,
@@ -178,8 +191,10 @@ mod win {
             // (EnumDisplayMonitors) arrives with multi-display support (§8.3).
             let (vx, vy) = (x - self.origin.0, y - self.origin.1);
             // Normalize to 0..65535 over the virtual desktop.
-            let nx = (i64::from(vx) * 65_535 / i64::from(self.size.0)) as i32;
-            let ny = (i64::from(vy) * 65_535 / i64::from(self.size.1)) as i32;
+            let nx = i32::try_from((i64::from(vx) * 65_535 / i64::from(self.size.0)).clamp(0, 65_535))
+                .unwrap_or(0);
+            let ny = i32::try_from((i64::from(vy) * 65_535 / i64::from(self.size.1)).clamp(0, 65_535))
+                .unwrap_or(0);
             Self::send(&[Self::mouse(
                 MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                 0,
@@ -189,17 +204,17 @@ mod win {
         }
 
         fn pointer_button(&mut self, button: PointerButton, down: bool) {
-            let (flags, data) = match (button, down) {
+            let (flags, data): (MOUSE_EVENT_FLAGS, u32) = match (button, down) {
                 (PointerButton::Left, true) => (MOUSEEVENTF_LEFTDOWN, 0),
                 (PointerButton::Left, false) => (MOUSEEVENTF_LEFTUP, 0),
                 (PointerButton::Right, true) => (MOUSEEVENTF_RIGHTDOWN, 0),
                 (PointerButton::Right, false) => (MOUSEEVENTF_RIGHTUP, 0),
                 (PointerButton::Middle, true) => (MOUSEEVENTF_MIDDLEDOWN, 0),
                 (PointerButton::Middle, false) => (MOUSEEVENTF_MIDDLEUP, 0),
-                (PointerButton::X1, true) => (MOUSEEVENTF_XDOWN, XBUTTON1.0 as i32),
-                (PointerButton::X1, false) => (MOUSEEVENTF_XUP, XBUTTON1.0 as i32),
-                (PointerButton::X2, true) => (MOUSEEVENTF_XDOWN, XBUTTON2.0 as i32),
-                (PointerButton::X2, false) => (MOUSEEVENTF_XUP, XBUTTON2.0 as i32),
+                (PointerButton::X1, true) => (MOUSEEVENTF_XDOWN, XBUTTON1),
+                (PointerButton::X1, false) => (MOUSEEVENTF_XUP, XBUTTON1),
+                (PointerButton::X2, true) => (MOUSEEVENTF_XDOWN, XBUTTON2),
+                (PointerButton::X2, false) => (MOUSEEVENTF_XUP, XBUTTON2),
             };
             Self::send(&[Self::mouse(flags, data, 0, 0)]);
         }
@@ -207,10 +222,10 @@ mod win {
         fn pointer_wheel(&mut self, delta: i16, hdelta: i16) {
             let mut batch = Vec::with_capacity(2);
             if delta != 0 {
-                batch.push(Self::mouse(MOUSEEVENTF_WHEEL, i32::from(delta) * 120, 0, 0));
+                batch.push(Self::mouse(MOUSEEVENTF_WHEEL, (i32::from(delta) * 120).cast_unsigned(), 0, 0));
             }
             if hdelta != 0 {
-                batch.push(Self::mouse(MOUSEEVENTF_HWHEEL, i32::from(hdelta) * 120, 0, 0));
+                batch.push(Self::mouse(MOUSEEVENTF_HWHEEL, (i32::from(hdelta) * 120).cast_unsigned(), 0, 0));
             }
             Self::send(&batch);
         }

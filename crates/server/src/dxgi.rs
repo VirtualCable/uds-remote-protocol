@@ -5,6 +5,10 @@
 //! changes (resolution switch, lock, UAC) by reinitializing on
 //! `DXGI_ERROR_ACCESS_LOST` without breaking the session.
 
+// The `windows` crate FFI methods take raw pointers; implicit borrows are
+// the idiomatic call style for that API.
+#![allow(clippy::borrow_as_ptr)]
+
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -41,7 +45,7 @@ pub struct DxgiSource {
     /// be mapped directly. On VMs this is the normal path, not a corner case.
     staging: Option<ID3D11Texture2D>,
     /// Reused buffer for `GetFrameDirtyRects` (avoids per-frame allocation).
-    dirty_buf: Vec<u8>,
+    dirty_buf: Vec<RECT>,
 }
 
 impl DxgiSource {
@@ -56,7 +60,7 @@ impl DxgiSource {
             width: dup.width,
             height: dup.height,
             staging: None,
-            dirty_buf: Vec::with_capacity(64 * size_of::<RECT>()),
+            dirty_buf: Vec::with_capacity(64),
         })
     }
 
@@ -244,15 +248,16 @@ impl DxgiSource {
         if info.TotalMetadataBufferSize == 0 {
             return Ok(Vec::new());
         }
-        self.dirty_buf
-            .resize(info.TotalMetadataBufferSize as usize, 0);
+        let count = info.TotalMetadataBufferSize as usize / size_of::<RECT>();
+        self.dirty_buf.resize(count, RECT::default());
         let mut needed = 0u32;
-        // SAFETY: `dirty_buf` is `TotalMetadataBufferSize` bytes long, as the
-        // API requires; `needed` is a valid out-param.
+        // SAFETY: `dirty_buf` holds `TotalMetadataBufferSize` bytes worth of
+        // properly aligned `RECT`s, as the API requires; `needed` is a valid
+        // out-param.
         unsafe {
             self.duplication.GetFrameDirtyRects(
                 info.TotalMetadataBufferSize,
-                self.dirty_buf.as_mut_ptr().cast::<RECT>(),
+                self.dirty_buf.as_mut_ptr(),
                 &mut needed,
             )
         }
@@ -261,19 +266,13 @@ impl DxgiSource {
 
         let rects: Vec<Rect> = self
             .dirty_buf
-            .as_chunks::<{ size_of::<RECT>() }>()
-            .0
             .iter()
-            .take((needed as usize) / size_of::<RECT>())
-            .map(|chunk| {
-                // SAFETY: `chunk` is exactly one `RECT` written by the API.
-                let r = unsafe { &*chunk.as_ptr().cast::<RECT>() };
-                Rect {
-                    left: r.left,
-                    top: r.top,
-                    right: r.right,
-                    bottom: r.bottom,
-                }
+            .take(needed as usize / size_of::<RECT>())
+            .map(|r| Rect {
+                left: r.left,
+                top: r.top,
+                right: r.right,
+                bottom: r.bottom,
             })
             .filter(|r| !r.is_empty())
             .collect();
@@ -283,8 +282,8 @@ impl DxgiSource {
             Ok(vec![Rect {
                 left: 0,
                 top: 0,
-                right: width as i32,
-                bottom: height as i32,
+                right: i32::try_from(width).unwrap_or(i32::MAX),
+                bottom: i32::try_from(height).unwrap_or(i32::MAX),
             }])
         } else {
             Ok(rects)
@@ -293,7 +292,7 @@ impl DxgiSource {
 }
 
 /// Result of [`init_duplication`]: everything the source needs to capture.
-struct Duplication {
+struct DupInit {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
@@ -302,7 +301,7 @@ struct Duplication {
 }
 
 /// Creates a D3D11 device and duplicates `output_index`.
-fn init_duplication(output_index: u32) -> anyhow::Result<Duplication> {
+fn init_duplication(output_index: u32) -> anyhow::Result<DupInit> {
     let mut device: Option<ID3D11Device> = None;
     let mut context: Option<ID3D11DeviceContext> = None;
     let feature_levels = [D3D_FEATURE_LEVEL_11_0];
@@ -356,7 +355,7 @@ fn init_duplication(output_index: u32) -> anyhow::Result<Duplication> {
                 height = dup_desc.ModeDesc.Height,
                 "DXGI duplication ready"
             );
-            return Ok(Duplication {
+            return Ok(DupInit {
                 device: device.clone(),
                 context: context.clone().context("no D3D11 device context returned")?,
                 duplication,
