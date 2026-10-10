@@ -331,6 +331,18 @@ async fn handle_frame<T: ReliableTransport>(
     Ok(frame_id.wrapping_add(1))
 }
 
+/// Real injection on Windows (`SendInput`), logging elsewhere (§10).
+#[cfg(all(windows, feature = "windows-capture"))]
+fn new_injector() -> Box<dyn server::input::InputInjector> {
+    Box::new(server::input::SendInputInjector::new())
+}
+
+/// Development injector: logs input events without a Windows session.
+#[cfg(not(all(windows, feature = "windows-capture")))]
+fn new_injector() -> Box<dyn server::input::InputInjector> {
+    Box::new(server::input::LogInjector::default())
+}
+
 async fn serve<T: ReliableTransport>(
     raw: T,
     ticket: &[u8; protocol::TICKET_LENGTH],
@@ -378,13 +390,13 @@ async fn serve<T: ReliableTransport>(
 
     // Link-quality state (§12): created on the first MetricsReport, with the
     // first reported RTT as the baseline.
-    let mut quality: Option<protocol::QualityController> = None;
-    // True while congestion is forcing the codec ladder into its video regime.
-    let mut forced_video = false;
-    // Keyframe requests are also rate-limited server-side (max 1 per 500 ms,
-    // riesgos §2.1): a client bug must not turn into an encoder DoS.
-    let mut last_keyframe_req: Option<Instant> = None;
-    let video_ceiling_kbps = args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS);
+    let mut ctl = ControlState {
+        quality: None,
+        forced_video: false,
+        last_keyframe_req: None,
+        injector: new_injector(),
+        video_ceiling_kbps: args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS),
+    };
 
     let mut udp_buf = vec![0u8; 2048];
     let mut ctrl_buf = vec![0u8; 2048];
@@ -416,38 +428,69 @@ async fn serve<T: ReliableTransport>(
             }
             res = legs.stream.recv_into(&mut ctrl_buf) => {
                 let (ch, n) = res?;
-                if ch != channel::CONTROL {
-                    continue;
-                }
-                match ControlMessage::decode(&ctrl_buf[..n]) {
-                    Ok(ControlMessage::MetricsReport {
-                        rtt_micros,
-                        jitter_micros,
-                        loss_permille,
-                    }) => handle_metrics(
-                        &mut quality,
-                        &mut forced_video,
-                        &mut encoder,
-                        &fps_shared,
-                        video_ceiling_kbps,
-                        rtt_micros,
-                        jitter_micros,
-                        loss_permille,
-                    ),
-                    Ok(ControlMessage::RequestKeyframe { display_id }) => {
-                        if last_keyframe_req
-                            .is_none_or(|t| t.elapsed() >= Duration::from_millis(500))
-                        {
-                            info!(display_id, "keyframe requested by client (frame loss)");
-                            encoder.request_keyframe();
-                            last_keyframe_req = Some(Instant::now());
-                        }
-                    }
-                    Ok(_) => {} // other control messages: not handled here yet
-                    Err(e) => warn!("undecodable control message: {e}"),
-                }
+                handle_stream_packet(&mut ctl, &mut encoder, &fps_shared, ch, &ctrl_buf[..n]);
             }
         }
+    }
+}
+
+/// Mutable session state for control/input handling (§10/§12).
+struct ControlState {
+    /// Quality controller; created on the first MetricsReport.
+    quality: Option<protocol::QualityController>,
+    /// True while congestion forces the codec ladder into its video regime.
+    forced_video: bool,
+    /// Keyframe requests are rate-limited server-side too (riesgos §2.1).
+    last_keyframe_req: Option<Instant>,
+    /// Platform input injector (SendInput on Windows, log elsewhere).
+    injector: Box<dyn server::input::InputInjector>,
+    /// Negotiated video bitrate ceiling for quality targets.
+    video_ceiling_kbps: u32,
+}
+
+/// Handles one packet from the reliable stream: input events (§10) and
+/// control messages (§12).
+fn handle_stream_packet(
+    ctl: &mut ControlState,
+    encoder: &mut ServerEncoder,
+    fps_shared: &AtomicU32,
+    ch: u16,
+    buf: &[u8],
+) {
+    if ch == channel::INPUT {
+        // Input channel (§10): fixed wire format, injected via SendInput on
+        // Windows (logged elsewhere).
+        match protocol::InputMessage::decode(buf) {
+            Ok(msg) => server::input::dispatch(&mut *ctl.injector, &msg),
+            Err(e) => warn!("bad input message: {e}"),
+        }
+        return;
+    }
+    if ch != channel::CONTROL {
+        return;
+    }
+    match ControlMessage::decode(buf) {
+        Ok(ControlMessage::MetricsReport { rtt_micros, jitter_micros, loss_permille }) => {
+            handle_metrics(
+                &mut ctl.quality,
+                &mut ctl.forced_video,
+                encoder,
+                fps_shared,
+                ctl.video_ceiling_kbps,
+                rtt_micros,
+                jitter_micros,
+                loss_permille,
+            );
+        }
+        Ok(ControlMessage::RequestKeyframe { display_id }) => {
+            if ctl.last_keyframe_req.is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {
+                info!(display_id, "keyframe requested by client (frame loss)");
+                encoder.request_keyframe();
+                ctl.last_keyframe_req = Some(Instant::now());
+            }
+        }
+        Ok(_) => {} // other control messages: not handled here yet
+        Err(e) => warn!("undecodable control message: {e}"),
     }
 }
 

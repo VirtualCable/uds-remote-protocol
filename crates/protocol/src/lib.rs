@@ -10,6 +10,7 @@ pub mod hex;
 mod control;
 mod error;
 mod hello;
+mod input;
 mod probe;
 mod quality;
 
@@ -17,6 +18,7 @@ pub use channel::ChannelId;
 pub use control::{Capability, ControlMessage};
 pub use error::ProtocolError;
 pub use hello::{Command, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION, TICKET_LENGTH};
+pub use input::{InputError, InputMessage, PointerButton};
 pub use probe::{Probe, ProbeAck, ProbeError, compute_rtt};
 pub use quality::{
     LEVEL_DEGRADED, LEVEL_FULL, QualityController, QualityEvent, QualityLevel, QualityPolicy,

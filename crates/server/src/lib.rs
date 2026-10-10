@@ -11,4 +11,5 @@
 pub mod capture;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod dxgi;
+pub mod input;
 pub mod synthetic;

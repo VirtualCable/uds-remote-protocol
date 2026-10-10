@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use codec::{VideoCodecType, VideoDecoder};
 use protocol::fragment::Reassembler;
-use protocol::{self, ControlMessage, channel};
+use protocol::{self, ControlMessage, InputMessage, PointerButton, channel};
 use tracing::{info, warn};
 use transport::{Connector, DirectConnector, EncryptedStream, ReliableTransport, Target, udp_detect};
 
@@ -76,6 +76,8 @@ struct Sink {
     start: Instant,
     headless: bool,
     pixels: Vec<u32>,
+    /// Size of the last decoded frame (for window→display coord mapping).
+    frame_size: (u32, u32),
 }
 
 impl Sink {
@@ -86,11 +88,13 @@ impl Sink {
             start: Instant::now(),
             headless,
             pixels: Vec::new(),
+            frame_size: (0, 0),
         }
     }
 
     fn push(&mut self, frame: &codec::DecodedFrame) -> Result<bool> {
         self.frames += 1;
+        self.frame_size = (frame.width, frame.height);
         if self.frames % 30 == 1 {
             let elapsed = self.start.elapsed().as_secs_f64();
             #[allow(clippy::cast_precision_loss)] // frame counts are tiny
@@ -177,10 +181,22 @@ async fn run() -> Result<()> {
     let mut decoders: HashMap<u8, Box<dyn VideoDecoder>> = HashMap::new();
     let mut buf = vec![0u8; 2048];
     let mut recovery = DecodeRecovery::default();
+    let mut input = InputPoll::new();
+    let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
-        let (ch, n) = stream.recv_into(&mut buf).await?;
-        if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery)? {
-            return Ok(());
+        tokio::select! {
+            res = stream.recv_into(&mut buf) => {
+                let (ch, n) = res?;
+                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery)? {
+                    return Ok(());
+                }
+            }
+            _ = input_tick.tick() => {
+                for msg in input.poll(&sink) {
+                    let (buf, n) = msg.encode();
+                    stream.send(channel::INPUT, &buf[..n]).await?;
+                }
+            }
         }
     }
 }
@@ -217,6 +233,8 @@ async fn udp_session(
     let mut prev_dropped = 0u64;
     let mut last_key_req: Option<Instant> = None;
     let mut recovery = DecodeRecovery::default();
+    let mut input = InputPoll::new();
+    let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
         tokio::select! {
             res = leg.dgram.recv_into(&mut buf) => {
@@ -278,6 +296,14 @@ async fn udp_session(
                 };
                 stream.send(channel::CONTROL, &report.encode()?).await?;
             }
+            _ = input_tick.tick() => {
+                // Input channel (§10): poll the window, send the diffs on
+                // the reliable stream.
+                for msg in input.poll(&sink) {
+                    let (buf, n) = msg.encode();
+                    stream.send(channel::INPUT, &buf[..n]).await?;
+                }
+            }
         }
     }
 }
@@ -290,6 +316,195 @@ async fn udp_session(
 struct DecodeRecovery {
     /// True while the stream is known-broken and a keyframe is awaited.
     awaiting: bool,
+}
+
+/// Input event capture over the minifb window (§10): polls at ~125 Hz and
+/// emits protocol messages for the diffs (moves, buttons, keys).
+struct InputPoll {
+    last_pos: Option<(i32, i32)>,
+    buttons: [bool; 3],
+    keys: Vec<minifb::Key>,
+}
+
+impl InputPoll {
+    fn new() -> Self {
+        Self { last_pos: None, buttons: [false; 3], keys: Vec::new() }
+    }
+
+    /// Collects the input events since the last poll.
+    fn poll(&mut self, sink: &Sink) -> Vec<InputMessage> {
+        let mut out = Vec::new();
+        let Some(window) = &sink.window else { return out };
+        let (fw, fh) = sink.frame_size;
+        if fw == 0 || fh == 0 {
+            return out;
+        }
+        // Pointer position, mapped from window to display-local pixels.
+        if let Some((mx, my)) = window.get_mouse_pos(minifb::MouseMode::Clamp) {
+            let (ww, wh) = window.get_size();
+            // Screen sizes are tiny; f32 precision is more than enough here.
+            #[allow(clippy::cast_precision_loss)]
+            let (fwf, wwf, fhf, whf) = (fw as f32, ww.max(1) as f32, fh as f32, wh.max(1) as f32);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let pos = ((mx * fwf / wwf) as i32, (my * fhf / whf) as i32);
+            if self.last_pos != Some(pos) {
+                self.last_pos = Some(pos);
+                out.push(InputMessage::PointerMove { display_id: 0, x: pos.0, y: pos.1 });
+            }
+        }
+        // Buttons (minifb exposes left/right/middle only).
+        for (i, btn) in [
+            minifb::MouseButton::Left,
+            minifb::MouseButton::Right,
+            minifb::MouseButton::Middle,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let down = window.get_mouse_down(*btn);
+            if down != self.buttons[i] {
+                self.buttons[i] = down;
+                let button = match i {
+                    0 => PointerButton::Left,
+                    1 => PointerButton::Right,
+                    _ => PointerButton::Middle,
+                };
+                out.push(InputMessage::PointerButton { button, down });
+            }
+        }
+        // Keys: press/release diffs of the currently-pressed set.
+        let pressed = window.get_keys();
+        for key in &pressed {
+            if !self.keys.contains(key)
+                && let Some((scancode, extended)) = set1_scancode(*key)
+            {
+                out.push(InputMessage::Key { down: true, scancode, extended });
+            }
+        }
+        for key in &self.keys {
+            if !pressed.contains(key)
+                && let Some((scancode, extended)) = set1_scancode(*key)
+            {
+                out.push(InputMessage::Key { down: false, scancode, extended });
+            }
+        }
+        self.keys = pressed;
+        out
+    }
+}
+
+/// Maps a minifb key to a Set 1 scancode + extended (`0xE0`) flag (§10).
+/// Unknown/unmapped keys return `None` (ignored by the PoC client).
+// A flat key table is the readable form; the line count is the table.
+#[allow(clippy::too_many_lines)]
+fn set1_scancode(key: minifb::Key) -> Option<(u16, bool)> {
+    use minifb::Key;
+    let (code, ext) = match key {
+        Key::Escape => (0x01, false),
+        Key::Key1 => (0x02, false),
+        Key::Key2 => (0x03, false),
+        Key::Key3 => (0x04, false),
+        Key::Key4 => (0x05, false),
+        Key::Key5 => (0x06, false),
+        Key::Key6 => (0x07, false),
+        Key::Key7 => (0x08, false),
+        Key::Key8 => (0x09, false),
+        Key::Key9 => (0x0A, false),
+        Key::Key0 => (0x0B, false),
+        Key::Minus => (0x0C, false),
+        Key::Equal => (0x0D, false),
+        Key::Backspace => (0x0E, false),
+        Key::Tab => (0x0F, false),
+        Key::Q => (0x10, false),
+        Key::W => (0x11, false),
+        Key::E => (0x12, false),
+        Key::R => (0x13, false),
+        Key::T => (0x14, false),
+        Key::Y => (0x15, false),
+        Key::U => (0x16, false),
+        Key::I => (0x17, false),
+        Key::O => (0x18, false),
+        Key::P => (0x19, false),
+        Key::LeftBracket => (0x1A, false),
+        Key::RightBracket => (0x1B, false),
+        Key::Enter => (0x1C, false),
+        Key::LeftCtrl => (0x1D, false),
+        Key::A => (0x1E, false),
+        Key::S => (0x1F, false),
+        Key::D => (0x20, false),
+        Key::F => (0x21, false),
+        Key::G => (0x22, false),
+        Key::H => (0x23, false),
+        Key::J => (0x24, false),
+        Key::K => (0x25, false),
+        Key::L => (0x26, false),
+        Key::Semicolon => (0x27, false),
+        Key::Apostrophe => (0x28, false),
+        Key::Backquote => (0x29, false),
+        Key::LeftShift => (0x2A, false),
+        Key::Backslash => (0x2B, false),
+        Key::Z => (0x2C, false),
+        Key::X => (0x2D, false),
+        Key::C => (0x2E, false),
+        Key::V => (0x2F, false),
+        Key::B => (0x30, false),
+        Key::N => (0x31, false),
+        Key::M => (0x32, false),
+        Key::Comma => (0x33, false),
+        Key::Period => (0x34, false),
+        Key::Slash => (0x35, false),
+        Key::RightShift => (0x36, false),
+        Key::NumPadAsterisk => (0x37, false),
+        Key::LeftAlt => (0x38, false),
+        Key::Space => (0x39, false),
+        Key::CapsLock => (0x3A, false),
+        Key::F1 => (0x3B, false),
+        Key::F2 => (0x3C, false),
+        Key::F3 => (0x3D, false),
+        Key::F4 => (0x3E, false),
+        Key::F5 => (0x3F, false),
+        Key::F6 => (0x40, false),
+        Key::F7 => (0x41, false),
+        Key::F8 => (0x42, false),
+        Key::F9 => (0x43, false),
+        Key::F10 => (0x44, false),
+        Key::NumLock => (0x45, false),
+        Key::ScrollLock => (0x46, false),
+        Key::NumPad7 => (0x47, false),
+        Key::NumPad8 => (0x48, false),
+        Key::NumPad9 => (0x49, false),
+        Key::NumPadMinus => (0x4A, false),
+        Key::NumPad4 => (0x4B, false),
+        Key::NumPad5 => (0x4C, false),
+        Key::NumPad6 => (0x4D, false),
+        Key::NumPadPlus => (0x4E, false),
+        Key::NumPad1 => (0x4F, false),
+        Key::NumPad2 => (0x50, false),
+        Key::NumPad3 => (0x51, false),
+        Key::NumPad0 => (0x52, false),
+        Key::NumPadDot => (0x53, false),
+        Key::F11 => (0x57, false),
+        Key::F12 => (0x58, false),
+        // Extended keys (0xE0 prefix).
+        Key::NumPadEnter => (0x1C, true),
+        Key::RightCtrl => (0x1D, true),
+        Key::NumPadSlash => (0x35, true),
+        Key::RightAlt => (0x38, true),
+        Key::Home => (0x47, true),
+        Key::Up => (0x48, true),
+        Key::PageUp => (0x49, true),
+        Key::Left => (0x4B, true),
+        Key::Right => (0x4D, true),
+        Key::End => (0x4F, true),
+        Key::Down => (0x50, true),
+        Key::PageDown => (0x51, true),
+        Key::Insert => (0x52, true),
+        Key::Delete => (0x53, true),
+        Key::LeftSuper => (0x5B, true),
+        Key::RightSuper => (0x5C, true),
+        _ => return None,
+    };
+    Some((code, ext))
 }
 
 /// Handles one received packet; returns `false` when the session should end.
