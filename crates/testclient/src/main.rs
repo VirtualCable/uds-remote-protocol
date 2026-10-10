@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use codec::{VideoCodecType, VideoDecoder};
 use protocol::fragment::Reassembler;
-use protocol::{self, ControlMessage, InputMessage, PointerButton, channel};
+use protocol::{self, ControlMessage, CursorMessage, InputMessage, PointerButton, channel};
 use tracing::{info, warn};
 use transport::{Connector, DirectConnector, EncryptedStream, ReliableTransport, Target, udp_detect};
 
@@ -68,6 +68,97 @@ fn micros_since(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
+/// Last cursor state received from the server (§11): the client paints the
+/// cursor locally at the pointer position it injects.
+struct ClientCursor {
+    visible: bool,
+    shape: Option<CursorShape>,
+}
+
+/// One cursor shape in RGBA (as decoded from the wire).
+struct CursorShape {
+    width: u16,
+    height: u16,
+    hot_x: u16,
+    hot_y: u16,
+    rgba: Vec<u8>,
+}
+
+impl ClientCursor {
+    fn new() -> Self {
+        Self { visible: true, shape: None }
+    }
+
+    /// Applies one cursor message from the wire.
+    fn apply(&mut self, msg: CursorMessage) {
+        match msg {
+            CursorMessage::Visibility { visible } => {
+                self.visible = visible;
+                info!(visible, "cursor visibility");
+            }
+            CursorMessage::Shape { width, height, hot_x, hot_y, pixels } => {
+                info!(width, height, "cursor shape");
+                self.shape = Some(CursorShape {
+                    width,
+                    height,
+                    hot_x,
+                    hot_y,
+                    rgba: pixels,
+                });
+            }
+        }
+    }
+}
+
+/// Alpha-blends the cursor shape over `pixels` (`0x00RRGGBB`, minifb format)
+/// with its top-left at `(x, y)` in frame coordinates (hotspot already
+/// subtracted by the caller). Pure: unit-tested without a window.
+// Bitmap blits mix signed cursor coords with unsigned frame indices; cursor
+// dims are ≤ MAX_CURSOR_DIM and frames ≤ 2^31 px, so the casts cannot lose
+// information. Short names follow the x/y pixel-loop convention.
+#[allow(
+    clippy::many_single_char_names,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss // dy/dx are bounds-checked before indexing
+)]
+fn overlay_cursor(
+    pixels: &mut [u32],
+    frame_w: usize,
+    frame_h: usize,
+    shape: &CursorShape,
+    x: i32,
+    y: i32,
+) {
+    let (sw, sh) = (usize::from(shape.width), usize::from(shape.height));
+    for sy in 0..sh {
+        let dy = y + sy as i32;
+        if dy < 0 || dy >= frame_h as i32 {
+            continue;
+        }
+        for sx in 0..sw {
+            let dx = x + sx as i32;
+            if dx < 0 || dx >= frame_w as i32 {
+                continue;
+            }
+            let p = (sy * sw + sx) * 4;
+            let (r, g, b, a) = (
+                u32::from(shape.rgba[p]),
+                u32::from(shape.rgba[p + 1]),
+                u32::from(shape.rgba[p + 2]),
+                u32::from(shape.rgba[p + 3]),
+            );
+            if a == 0 {
+                continue;
+            }
+            let dst = &mut pixels[dy as usize * frame_w + dx as usize];
+            let (dr, dg, db) = ((*dst >> 16) & 0xFF, (*dst >> 8) & 0xFF, *dst & 0xFF);
+            let blend = |s: u32, d: u32| (s * a + d * (255 - a)) / 255;
+            *dst = (blend(r, dr) << 16) | (blend(g, dg) << 8) | blend(b, db);
+        }
+    }
+}
+
 /// Renders decoded frames, either to a minifb window or to the log
 /// (headless).
 struct Sink {
@@ -92,7 +183,7 @@ impl Sink {
         }
     }
 
-    fn push(&mut self, frame: &codec::DecodedFrame) -> Result<bool> {
+    fn push(&mut self, frame: &codec::DecodedFrame, cursor: &ClientCursor) -> Result<bool> {
         self.frames += 1;
         self.frame_size = (frame.width, frame.height);
         if self.frames % 30 == 1 {
@@ -125,6 +216,24 @@ impl Sink {
                 .iter()
                 .map(|&[b, g, r, _]| u32::from_le_bytes([b, g, r, 0])),
         );
+        // Local cursor rendering (§11): painted at the local pointer
+        // position, which is what we inject into the remote session.
+        if cursor.visible
+            && let Some(shape) = &cursor.shape
+            && let Some((mx, my)) = window.get_mouse_pos(minifb::MouseMode::Clamp)
+        {
+            let (ww, wh) = window.get_size();
+            if ww > 0 && wh > 0 {
+                #[allow(clippy::cast_precision_loss)] // pixel dims fit in f32
+                let (wf, hf, wwf, whf) = (w as f32, h as f32, ww as f32, wh as f32);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let (fx, fy) = (
+                    (mx * wf / wwf) as i32 - i32::from(shape.hot_x),
+                    (my * hf / whf) as i32 - i32::from(shape.hot_y),
+                );
+                overlay_cursor(&mut self.pixels, w, h, shape, fx, fy);
+            }
+        }
         window.update_with_buffer(&self.pixels, w, h).context("render")?;
         Ok(window.is_open() && !window.is_key_down(minifb::Key::Escape))
     }
@@ -181,13 +290,14 @@ async fn run() -> Result<()> {
     let mut decoders: HashMap<u8, Box<dyn VideoDecoder>> = HashMap::new();
     let mut buf = vec![0u8; 2048];
     let mut recovery = DecodeRecovery::default();
+    let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
         tokio::select! {
             res = stream.recv_into(&mut buf) => {
                 let (ch, n) = res?;
-                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery)? {
+                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor)? {
                     return Ok(());
                 }
             }
@@ -233,6 +343,7 @@ async fn udp_session(
     let mut prev_dropped = 0u64;
     let mut last_key_req: Option<Instant> = None;
     let mut recovery = DecodeRecovery::default();
+    let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
@@ -255,7 +366,7 @@ async fn udp_session(
                     continue;
                 }
                 let lost = leg.dgram.lost_estimate();
-                if !handle_packet(ch, &buf[..n], lost, args, &mut reasm, &mut decoders, &mut sink, &mut recovery)? {
+                if !handle_packet(ch, &buf[..n], lost, args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor)? {
                     return Ok(());
                 }
                 // Ask for a keyframe when the stream is broken (decode
@@ -518,7 +629,15 @@ fn handle_packet(
     decoders: &mut HashMap<u8, Box<dyn VideoDecoder>>,
     sink: &mut Sink,
     recovery: &mut DecodeRecovery,
+    cursor: &mut ClientCursor,
 ) -> Result<bool> {
+    if ch == channel::CURSOR {
+        match CursorMessage::decode(packet) {
+            Ok(msg) => cursor.apply(msg),
+            Err(e) => warn!("bad cursor message: {e}"),
+        }
+        return Ok(true);
+    }
     if ch == channel::CONTROL
         && let Ok(ControlMessage::DisplayInfo {
             display_id,
@@ -566,7 +685,7 @@ fn handle_packet(
                 // Only display 0 is rendered (multi-monitor arrives later,
                 // §8.3); other displays are still decoded to exercise the
                 // pipeline.
-                if complete.display_id == 0 && !sink.push(&frame)? {
+                if complete.display_id == 0 && !sink.push(&frame, cursor)? {
                     info!("window closed");
                     return Ok(false);
                 }
@@ -586,4 +705,42 @@ fn handle_packet(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape_1px(r: u8, g: u8, b: u8, a: u8) -> CursorShape {
+        CursorShape { width: 1, height: 1, hot_x: 0, hot_y: 0, rgba: vec![r, g, b, a] }
+    }
+
+    #[test]
+    fn overlay_blends_over_background() {
+        let mut px = vec![0x0000_0000u32]; // black 1x1
+        overlay_cursor(&mut px, 1, 1, &shape_1px(255, 0, 0, 128), 0, 0);
+        // ~50% red over black
+        assert_eq!(px[0], (128 << 16) | 0);
+    }
+
+    #[test]
+    fn overlay_opaque_replaces() {
+        let mut px = vec![0x0012_3456u32];
+        overlay_cursor(&mut px, 1, 1, &shape_1px(255, 255, 255, 255), 0, 0);
+        assert_eq!(px[0], 0x00FF_FFFF);
+    }
+
+    #[test]
+    fn overlay_transparent_keeps() {
+        let mut px = vec![0x0012_3456u32];
+        overlay_cursor(&mut px, 1, 1, &shape_1px(255, 255, 255, 0), 0, 0);
+        assert_eq!(px[0], 0x0012_3456);
+    }
+
+    #[test]
+    fn overlay_clips_outside_frame() {
+        let mut px = vec![0u32; 4]; // 2x2
+        overlay_cursor(&mut px, 2, 2, &shape_1px(255, 255, 255, 255), -1, 5);
+        assert_eq!(px, vec![0u32; 4]);
+    }
 }

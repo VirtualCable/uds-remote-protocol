@@ -24,7 +24,7 @@ use anyhow::{Context, Result, bail};
 use codec::{CodecPreset, VideoEncoder as _};
 use crypt::consts;
 use protocol::fragment::Fragmenter;
-use protocol::{self, ControlMessage, Probe, ProbeAck, channel};
+use protocol::{self, ControlMessage, CursorMessage, Probe, ProbeAck, channel};
 use server::synthetic::SyntheticSource;
 use tokio::sync::mpsc;
 use transport::{
@@ -111,6 +111,12 @@ impl<T: ReliableTransport> Legs<T> {
             None => self.stream.send(channel::CONTROL, msg).await,
         }
     }
+
+    /// Cursor updates always take the reliable stream: the client keeps the
+    /// last shape as state, so losing one would leave a stale cursor (§11).
+    async fn send_cursor(&mut self, msg: &[u8]) -> transport::Result<()> {
+        self.stream.send(channel::CURSOR, msg).await
+    }
 }
 
 /// Receives the next UDP datagram; pends forever when the session has no
@@ -132,6 +138,8 @@ enum CaptureMsg {
     Ready(Result<(u32, u32)>),
     /// One captured frame (owned, so the encoder can borrow from it).
     Frame(OwnedFrame),
+    /// Cursor shape/visibility change observed while capturing (§11).
+    Cursor(server::capture::CursorUpdate),
 }
 
 /// Owned frame data crossing the capture-thread boundary.
@@ -186,6 +194,11 @@ fn spawn_capture(args: &Args, fps_shared: Arc<AtomicU32>) -> mpsc::Receiver<Capt
                     warn!("capture failed: {e:#}");
                     return;
                 }
+            }
+            if let Some(update) = source.take_cursor_update()
+                && tx.blocking_send(CaptureMsg::Cursor(update)).is_err()
+            {
+                return; // session over
             }
             if sleeps {
                 std::thread::sleep(frame_time);
@@ -404,14 +417,19 @@ async fn serve<T: ReliableTransport>(
     loop {
         tokio::select! {
             msg = frame_rx.recv() => {
-                let Some(CaptureMsg::Frame(frame)) = msg else {
-                    bail!("capture thread ended");
-                };
-                frame_id =
-                    handle_frame(&frame, &mut legs, &mut encoder, frame_id, width, height).await?;
-                if args.max_frames.is_some_and(|max| frame_id >= max) {
-                    info!(frame_id, "max frames reached, closing session");
-                    return Ok(());
+                match msg {
+                    Some(CaptureMsg::Frame(frame)) => {
+                        frame_id =
+                            handle_frame(&frame, &mut legs, &mut encoder, frame_id, width, height).await?;
+                        if args.max_frames.is_some_and(|max| frame_id >= max) {
+                            info!(frame_id, "max frames reached, closing session");
+                            return Ok(());
+                        }
+                    }
+                    Some(CaptureMsg::Cursor(update)) => {
+                        send_cursor_update(&mut legs, &update).await?;
+                    }
+                    other => bail!("capture thread ended ({other:?})"),
                 }
             }
             res = recv_udp(&mut legs.udp, &mut udp_buf) => {
@@ -432,6 +450,32 @@ async fn serve<T: ReliableTransport>(
             }
         }
     }
+}
+
+/// Encodes and sends one cursor update (visibility and/or shape) on the
+/// reliable stream (§11).
+async fn send_cursor_update<T: ReliableTransport>(
+    legs: &mut Legs<T>,
+    update: &server::capture::CursorUpdate,
+) -> transport::Result<()> {
+    if let Some(visible) = update.visible {
+        legs.send_cursor(&CursorMessage::Visibility { visible }.encode())
+            .await?;
+    }
+    if let Some(shape) = &update.shape {
+        legs.send_cursor(
+            &CursorMessage::Shape {
+                width: shape.width,
+                height: shape.height,
+                hot_x: shape.hot_x,
+                hot_y: shape.hot_y,
+                pixels: shape.rgba.clone(),
+            }
+            .encode(),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Mutable session state for control/input handling (§10/§12).
@@ -670,6 +714,19 @@ impl Source {
                     })),
                     _ => Ok(None),
                 }
+            }
+        }
+    }
+
+    /// Cursor updates observed since the last call (DXGI only; the synthetic
+    /// source has no cursor).
+    fn take_cursor_update(&mut self) -> Option<server::capture::CursorUpdate> {
+        match self {
+            Self::Synthetic(_) => None,
+            #[cfg(all(windows, feature = "windows-capture"))]
+            Self::Dxgi { source, .. } => {
+                use server::capture::FrameSource as _;
+                source.take_cursor_update()
             }
         }
     }

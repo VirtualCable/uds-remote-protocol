@@ -24,12 +24,17 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MO
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
     IDXGIResource, IDXGISurface, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
-    DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::core::Interface;
 
-use crate::capture::{copy_bgra_rows, CapturedFrame, FrameSource, Rect};
+use crate::capture::{
+    copy_bgra_rows, mask_shape_to_rgba, CapturedFrame, CursorUpdate, FrameSource, MaskShapeKind,
+    Rect,
+};
 
 /// Desktop Duplication source for a single output.
 pub struct DxgiSource {
@@ -46,6 +51,12 @@ pub struct DxgiSource {
     staging: Option<ID3D11Texture2D>,
     /// Reused buffer for `GetFrameDirtyRects` (avoids per-frame allocation).
     dirty_buf: Vec<RECT>,
+    /// Reused buffer for `GetFramePointerShape`.
+    shape_buf: Vec<u8>,
+    /// Cursor update accumulated since the last `take_cursor_update`.
+    pending_cursor: CursorUpdate,
+    /// Last cursor visibility reported by DXGI (for change detection).
+    cursor_visible: bool,
 }
 
 impl DxgiSource {
@@ -61,6 +72,9 @@ impl DxgiSource {
             height: dup.height,
             staging: None,
             dirty_buf: Vec::with_capacity(64),
+            shape_buf: Vec::new(),
+            pending_cursor: CursorUpdate::default(),
+            cursor_visible: true,
         })
     }
 
@@ -115,15 +129,86 @@ impl FrameSource for DxgiSource {
 
         // Every acquired frame MUST be released, even on error paths.
         let result = self.extract(&resource, &info);
+        self.read_cursor(&info);
         // SAFETY: `resource` was acquired above and is released exactly once.
         unsafe { self.duplication.ReleaseFrame() }
             .ok()
             .context("ReleaseFrame failed")?;
         result.map(Some)
     }
+
+    fn take_cursor_update(&mut self) -> Option<CursorUpdate> {
+        let update = std::mem::take(&mut self.pending_cursor);
+        (update.visible.is_some() || update.shape.is_some()).then_some(update)
+    }
 }
 
 impl DxgiSource {
+    /// Reads cursor visibility and (when present) the new pointer shape from
+    /// the acquired frame. Must run before `ReleaseFrame`: the shape buffer
+    /// is owned by the frame. Errors are logged, not propagated — a cursor
+    /// failure must never break video.
+    fn read_cursor(&mut self, info: &DXGI_OUTDUPL_FRAME_INFO) {
+        // A non-zero LastMouseUpdateTime means PointerPosition is valid.
+        if info.LastMouseUpdateTime != 0 {
+            let visible = info.PointerPosition.Visible.as_bool();
+            if visible != self.cursor_visible {
+                self.cursor_visible = visible;
+                self.pending_cursor.visible = Some(visible);
+            }
+        }
+        if info.PointerShapeBufferSize == 0 {
+            return;
+        }
+        self.shape_buf.resize(info.PointerShapeBufferSize as usize, 0);
+        let mut shape_info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
+        let mut needed = 0u32;
+        // SAFETY: `shape_buf` is `PointerShapeBufferSize` bytes long and the
+        // out-params are valid; the frame is still acquired.
+        if let Err(e) = unsafe {
+            self.duplication.GetFramePointerShape(
+                info.PointerShapeBufferSize,
+                self.shape_buf.as_mut_ptr().cast(),
+                &mut needed,
+                &mut shape_info,
+            )
+        } {
+            warn!(error = %e, "GetFramePointerShape failed");
+            return;
+        }
+        let kind = match shape_info.Type {
+            t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0.cast_unsigned() => {
+                MaskShapeKind::Monochrome
+            }
+            t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0.cast_unsigned() => MaskShapeKind::Color,
+            t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0.cast_unsigned() => {
+                MaskShapeKind::MaskedColor
+            }
+            other => {
+                warn!(r#type = other, "unknown pointer shape type");
+                return;
+            }
+        };
+        let shape = mask_shape_to_rgba(
+            kind,
+            u16::try_from(shape_info.Width).unwrap_or(u16::MAX),
+            u16::try_from(shape_info.Height).unwrap_or(u16::MAX),
+            shape_info.Pitch as usize,
+            u16::try_from(shape_info.HotSpot.x).unwrap_or(0),
+            u16::try_from(shape_info.HotSpot.y).unwrap_or(0),
+            &self.shape_buf,
+        );
+        if let Some(shape) = shape {
+            info!(
+                width = shape.width,
+                height = shape.height,
+                "cursor shape changed"
+            );
+            self.pending_cursor.shape = Some(shape);
+        } else {
+            warn!("pointer shape buffer rejected by conversion");
+        }
+    }
     /// Copies the desktop image out of the acquired `resource` and reads the
     /// dirty rects described by `info`.
     fn extract(

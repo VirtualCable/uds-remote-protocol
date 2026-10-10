@@ -8,6 +8,7 @@ pub mod channel;
 pub mod fragment;
 pub mod hex;
 mod control;
+mod cursor;
 mod error;
 mod hello;
 mod input;
@@ -16,6 +17,7 @@ mod quality;
 
 pub use channel::ChannelId;
 pub use control::{Capability, ControlMessage};
+pub use cursor::{CursorError, CursorMessage, MAX_CURSOR_DIM};
 pub use error::ProtocolError;
 pub use hello::{Command, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION, TICKET_LENGTH};
 pub use input::{InputError, InputMessage, PointerButton};
