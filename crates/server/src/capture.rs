@@ -99,14 +99,15 @@ pub enum MaskShapeKind {
 
 /// Converts a DXGI pointer-shape buffer to tightly packed RGBA8.
 ///
-/// `height`/`pitch` describe the raw buffer (for [`MaskShapeKind::Monochrome`]
-/// the buffer holds both masks, so its height is twice the logical one).
-/// XOR-inverted pixels (monochrome `and=1, xor=1`) are approximated with a
+/// For [`MaskShapeKind::Monochrome`], `height` is the **logical** cursor
+/// height: the buffer holds the AND mask in rows `0..height` and the XOR
+/// mask in rows `height..2*height` (DXGI stores both stacked).
+/// XOR-inverted pixels (`and=1, xor=1`) are approximated with a
 /// semi-transparent gray — a PoC simplification, real inversion needs the
 /// pixel under the cursor which the client may not have yet (§10).
 ///
-/// Returns `None` for degenerate geometry (zero size, odd monochrome
-/// height, or a buffer too small for the declared layout).
+/// Returns `None` for degenerate geometry (zero size or a buffer too small
+/// for the declared layout).
 #[must_use]
 pub fn mask_shape_to_rgba(
     kind: MaskShapeKind,
@@ -123,11 +124,10 @@ pub fn mask_shape_to_rgba(
     }
     let (logical_h, rgba) = match kind {
         MaskShapeKind::Monochrome => {
-            if !height.is_multiple_of(2) {
-                return None;
-            }
-            let rows = usize::from(height) / 2;
-            if pitch * usize::from(height) > buf.len() || pitch * 8 < w_px {
+            let rows = usize::from(height);
+            // Both masks stacked: the buffer must hold 2*height rows and one
+            // row must hold all the pixels of a row.
+            if pitch * rows * 2 > buf.len() || pitch * 8 < w_px {
                 return None;
             }
             let bit = |row: &[u8], col: usize| (row[col / 8] >> (7 - (col % 8))) & 1 == 1;
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn monochrome_shape_converts() {
-        // 4x1 logical cursor: and mask top row, xor mask bottom row.
+        // 4x1 logical cursor: AND mask in row 0, XOR mask in row 1.
         // Pixels: (and,xor) = (0,0) black, (0,1) white, (1,0) transparent,
         // (1,1) inverted → semi-gray.
         let buf = [
@@ -316,7 +316,7 @@ mod tests {
             0b0101_0000, // XOR row
         ];
         let cur =
-            mask_shape_to_rgba(MaskShapeKind::Monochrome, 4, 2, 1, 0, 0, &buf).unwrap();
+            mask_shape_to_rgba(MaskShapeKind::Monochrome, 4, 1, 1, 0, 0, &buf).unwrap();
         assert_eq!((cur.width, cur.height), (4, 1));
         assert_eq!(
             cur.rgba,
@@ -330,8 +330,20 @@ mod tests {
     }
 
     #[test]
-    fn monochrome_shape_rejects_odd_height() {
-        assert!(mask_shape_to_rgba(MaskShapeKind::Monochrome, 4, 3, 1, 0, 0, &[0; 3]).is_none());
+    fn monochrome_shape_allows_odd_height() {
+        // DXGI reports the logical height (odd for e.g. 41x39 arrows); the
+        // buffer holds 2*height rows.
+        let buf = vec![0xFFu8; 2 * 3]; // pitch 1, 3 AND rows + 3 XOR rows
+        let cur = mask_shape_to_rgba(MaskShapeKind::Monochrome, 8, 3, 1, 0, 0, &buf).unwrap();
+        assert_eq!((cur.width, cur.height), (8, 3));
+        // and=1, xor=1 everywhere → all inverted-gray.
+        assert!(cur.rgba.as_chunks::<4>().0.iter().all(|&p| p == [128, 128, 128, 128]));
+    }
+
+    #[test]
+    fn monochrome_shape_rejects_short_buffer() {
+        // Needs 2*pitch*height bytes; one mask missing.
+        assert!(mask_shape_to_rgba(MaskShapeKind::Monochrome, 4, 2, 1, 0, 0, &[0; 2]).is_none());
     }
 
     #[test]
