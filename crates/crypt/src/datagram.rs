@@ -138,6 +138,14 @@ impl DatagramDecrypt {
         self.window.lost
     }
 
+    /// Valid datagrams accepted so far; combined with
+    /// [`DatagramDecrypt::lost_estimate`] it gives a loss *rate*
+    /// (`lost / (lost + received)`) over any window (§12.2).
+    #[must_use]
+    pub fn received(&self) -> u64 {
+        self.window.accepted
+    }
+
     /// Verifies and decrypts a complete datagram.
     /// Returns `(channel_id, plaintext)`.
     ///
@@ -208,6 +216,7 @@ struct ReplayWindow {
     highest: Option<u64>,
     bitmap: u64,
     lost: u64,
+    accepted: u64,
 }
 
 impl ReplayWindow {
@@ -248,6 +257,7 @@ impl ReplayWindow {
                 self.lost = self.lost.saturating_sub(1);
             }
         }
+        self.accepted += 1;
         Ok(())
     }
 }

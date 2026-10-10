@@ -109,6 +109,13 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
     pub fn lost_estimate(&self) -> u64 {
         self.rx.lost_estimate()
     }
+
+    /// Valid datagrams received so far; with [`Self::lost_estimate`] it gives
+    /// a loss rate over any window (§12.2).
+    #[must_use]
+    pub fn received(&self) -> u64 {
+        self.rx.received()
+    }
 }
 
 impl EncryptedDatagram<crate::UdpTransport> {

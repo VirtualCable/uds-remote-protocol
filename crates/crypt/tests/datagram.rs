@@ -100,6 +100,24 @@ fn lost_estimate_counts_gaps() {
         }
     }
     assert_eq!(rx.lost_estimate(), 2);
+    assert_eq!(rx.received(), 8);
+}
+
+#[test]
+fn received_counts_only_accepted_datagrams() {
+    let (mut tx, mut rx) = pair();
+    let d0 = tx.encrypt(1, b"a").unwrap();
+    let d1 = tx.encrypt(1, b"b").unwrap();
+    rx.decrypt(&d0).unwrap();
+    rx.decrypt(&d1).unwrap();
+    // Replay does not count as received.
+    assert!(rx.decrypt(&d1).is_err());
+    // Foreign tokens do not count either.
+    let keys = derive_datagram_keys(&TICKET, &SECRET).unwrap();
+    let mut foreign = DatagramCrypt::new(&keys.c2s, &[0x5A; consts::TOKEN_LENGTH]);
+    let f = foreign.encrypt(1, b"foreign").unwrap();
+    assert!(rx.decrypt(&f).is_err());
+    assert_eq!(rx.received(), 2);
 }
 
 #[test]

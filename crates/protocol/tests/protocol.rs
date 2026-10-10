@@ -107,6 +107,11 @@ fn control_message_variants_roundtrip() {
             height: 2160,
             codec: 2,
         },
+        ControlMessage::MetricsReport {
+            rtt_micros: 12_345,
+            jitter_micros: 678,
+            loss_permille: 25,
+        },
         ControlMessage::Keepalive,
     ];
     for msg in msgs {

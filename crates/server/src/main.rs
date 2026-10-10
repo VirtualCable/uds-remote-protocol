@@ -16,14 +16,17 @@
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use codec::CodecPreset;
+use codec::{CodecPreset, VideoEncoder as _};
 use crypt::consts;
 use protocol::fragment::Fragmenter;
-use protocol::{self, Probe, ProbeAck, channel};
+use protocol::{self, ControlMessage, Probe, ProbeAck, channel};
 use server::synthetic::SyntheticSource;
+use tokio::sync::mpsc;
 use transport::{
     DirectListener, EncryptedDatagram, EncryptedStream, ReliableTransport, UdpTransport,
     udp_offer,
@@ -86,31 +89,174 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-/// Display leg chosen after UDP detection: the lossy UDP channel, or the
-/// reliable encrypted stream as fallback (§4.2).
-enum Display<T: ReliableTransport> {
-    Udp(Box<EncryptedDatagram<UdpTransport>>),
-    Tcp(Box<EncryptedStream<T>>),
+/// Session legs after UDP detection (§4.2): the reliable control stream is
+/// always alive; display traffic goes over the lossy UDP leg when present,
+/// or over the stream as fallback.
+struct Legs<T: ReliableTransport> {
+    udp: Option<Box<EncryptedDatagram<UdpTransport>>>,
+    stream: Box<EncryptedStream<T>>,
 }
 
-impl<T: ReliableTransport> Display<T> {
+impl<T: ReliableTransport> Legs<T> {
     async fn send_fragment(&mut self, frag: &[u8]) -> transport::Result<()> {
-        match self {
-            Self::Udp(d) => d.send(channel::DISPLAY, frag).await,
-            Self::Tcp(s) => s.send(channel::DISPLAY, frag).await,
+        match &mut self.udp {
+            Some(d) => d.send(channel::DISPLAY, frag).await,
+            None => self.stream.send(channel::DISPLAY, frag).await,
         }
     }
 
     async fn send_control(&mut self, msg: &[u8]) -> transport::Result<()> {
-        match self {
-            Self::Udp(d) => d.send(channel::CONTROL, msg).await,
-            Self::Tcp(s) => s.send(channel::CONTROL, msg).await,
+        match &mut self.udp {
+            Some(d) => d.send(channel::CONTROL, msg).await,
+            None => self.stream.send(channel::CONTROL, msg).await,
         }
     }
 }
 
+/// Receives the next UDP datagram; pends forever when the session has no
+/// UDP leg (TCP fallback), so it can sit in a `select!` branch.
+async fn recv_udp(
+    udp: &mut Option<Box<EncryptedDatagram<UdpTransport>>>,
+    buf: &mut [u8],
+) -> transport::Result<(channel::ChannelId, usize)> {
+    match udp {
+        Some(d) => d.recv_into(buf).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Capture thread → main loop messages.
+#[derive(Debug)]
+enum CaptureMsg {
+    /// First message: the source is up (display geometry) or failed.
+    Ready(Result<(u32, u32)>),
+    /// One captured frame (owned, so the encoder can borrow from it).
+    Frame(OwnedFrame),
+}
+
+/// Owned frame data crossing the capture-thread boundary.
+#[derive(Debug)]
+struct OwnedFrame {
+    width: u32,
+    height: u32,
+    stride: usize,
+    data: Vec<u8>,
+}
+
+/// Runs the frame source on its own thread so the async loop never blocks
+/// behind capture waits (probes and metrics must be handled on time, §12).
+///
+/// The thread paces itself from `fps_shared` (updated live by the quality
+/// controller): DXGI already blocks up to `frame_time` waiting for desktop
+/// damage, so only the synthetic source sleeps explicitly.
+fn spawn_capture(args: &Args, fps_shared: Arc<AtomicU32>) -> mpsc::Receiver<CaptureMsg> {
+    let kind = args.source.clone();
+    let (width, height, output) = (args.width, args.height, args.output);
+    let (tx, rx) = mpsc::channel(2);
+    std::thread::spawn(move || {
+        let mut source = match Source::new(&kind, output, width, height) {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = tx.blocking_send(CaptureMsg::Ready(Err(e)));
+                return;
+            }
+        };
+        let dims = source.dimensions();
+        if tx.blocking_send(CaptureMsg::Ready(Ok(dims))).is_err() {
+            return;
+        }
+        let sleeps = matches!(source, Source::Synthetic(_));
+        loop {
+            let fps = fps_shared.load(Ordering::Relaxed).max(1);
+            let frame_time = Duration::from_secs_f64(1.0 / f64::from(fps));
+            match source.next_frame(frame_time) {
+                Ok(Some(f)) => {
+                    let owned = OwnedFrame {
+                        width: f.width,
+                        height: f.height,
+                        stride: f.stride,
+                        data: f.data.to_vec(),
+                    };
+                    if tx.blocking_send(CaptureMsg::Frame(owned)).is_err() {
+                        return; // session over
+                    }
+                }
+                Ok(None) => {} // no desktop damage this window
+                Err(e) => {
+                    warn!("capture failed: {e:#}");
+                    return;
+                }
+            }
+            if sleeps {
+                std::thread::sleep(frame_time);
+            }
+        }
+    });
+    rx
+}
+
 fn micros_since(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Audio channel is not wired yet (§9); nominal Opus ceiling for quality
+/// targets (§12.5).
+const AUDIO_CEILING_KBPS: u32 = 64;
+
+/// Feeds one link-quality report into the quality controller and, when the
+/// level changes, applies the new targets: encoder bitrate, capture fps and
+/// the codec-ladder regime force (§12.5).
+#[allow(clippy::too_many_arguments)]
+fn handle_metrics(
+    quality: &mut Option<protocol::QualityController>,
+    forced_video: &mut bool,
+    encoder: &mut ServerEncoder,
+    fps_shared: &AtomicU32,
+    video_ceiling_kbps: u32,
+    rtt_micros: u64,
+    jitter_micros: u64,
+    loss_permille: u16,
+) {
+    let controller = quality.get_or_insert_with(|| {
+        info!(baseline_rtt_micros = rtt_micros, "quality baseline set");
+        protocol::QualityController::new(protocol::QualityPolicy::standard(rtt_micros))
+    });
+    let sample = protocol::Sample {
+        rtt_micros,
+        jitter_micros,
+        loss: f64::from(loss_permille) / 1000.0,
+    };
+    let Some(event) = controller.update(Instant::now(), sample) else {
+        return;
+    };
+    let t = protocol::targets(
+        event.level,
+        video_ceiling_kbps,
+        AUDIO_CEILING_KBPS,
+        controller.policy(),
+    );
+    info!(
+        level = event.level,
+        degraded = event.degraded,
+        video_kbps = t.video_kbps,
+        fps = t.fps,
+        "quality level changed"
+    );
+    if let Err(e) = encoder.set_bitrate(t.video_kbps) {
+        warn!("set_bitrate failed: {e}");
+    }
+    fps_shared.store(t.fps, Ordering::Relaxed);
+    match (event.force_video_codec, *forced_video) {
+        (true, false) => {
+            encoder.force_video_regime(true);
+            *forced_video = true;
+        }
+        (false, true) => {
+            encoder.force_video_regime(false);
+            *forced_video = false;
+        }
+        _ => {}
+    }
 }
 
 /// Answers UDP detection probes (§12.1): the client probes up to N times,
@@ -154,6 +300,37 @@ async fn answer_probes(
     }
 }
 
+/// Encodes one captured frame and sends its fragments; also re-announces
+/// the display when the codec ladder switched regime (§8.5). Returns the
+/// next frame id.
+async fn handle_frame<T: ReliableTransport>(
+    frame: &OwnedFrame,
+    legs: &mut Legs<T>,
+    encoder: &mut ServerEncoder,
+    frame_id: u32,
+    width: u32,
+    height: u32,
+) -> Result<u32> {
+    let packet = encoder.encode(&codec::VideoFrame {
+        width: frame.width,
+        height: frame.height,
+        stride: frame.stride,
+        data: &frame.data,
+    })?;
+    if encoder.take_codec_change().is_some() {
+        // Codec ladder switched regime: re-announce before the fragments so
+        // the peer rebuilds its decoder (§8.5).
+        announce_display(legs, encoder, width, height).await?;
+    }
+    if packet.data.is_empty() {
+        return Ok(frame_id); // rect codecs: nothing changed on this frame
+    }
+    for frag in Fragmenter::split(0, frame_id, &packet.data) {
+        legs.send_fragment(&frag).await?;
+    }
+    Ok(frame_id.wrapping_add(1))
+}
+
 async fn serve<T: ReliableTransport>(
     raw: T,
     ticket: &[u8; protocol::TICKET_LENGTH],
@@ -168,13 +345,13 @@ async fn serve<T: ReliableTransport>(
     let (pending, token) = udp_offer(&mut stream, &udp_bind.to_string(), ticket, key).await?;
 
     let clock_start = Instant::now();
-    let display = match tokio::time::timeout(Duration::from_secs(3), pending.wait_first()).await {
+    let udp = match tokio::time::timeout(Duration::from_secs(3), pending.wait_first()).await {
         Ok(Ok((udp, first))) => {
             let keys = crypt::derive_datagram_keys(ticket, key)?;
             let mut dgram = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
             answer_probes(&mut dgram, &first, clock_start).await?;
             info!("display leg: UDP");
-            Display::Udp(Box::new(dgram))
+            Some(Box::new(dgram))
         }
         other => {
             if let Ok(Err(e)) = other {
@@ -183,63 +360,171 @@ async fn serve<T: ReliableTransport>(
                 info!("UDP detection timed out");
             }
             info!("display leg: TCP fallback");
-            Display::Tcp(Box::new(stream))
+            None
         }
     };
+    let mut legs = Legs { udp, stream: Box::new(stream) };
 
-    let mut display = display;
-    let mut source = Source::new(args)?;
-    let (width, height) = source.dimensions();
+    let fps_shared = Arc::new(AtomicU32::new(args.fps.max(1)));
+    let mut frame_rx = spawn_capture(args, Arc::clone(&fps_shared));
+    let (width, height) = match frame_rx.recv().await {
+        Some(CaptureMsg::Ready(r)) => r?,
+        other => bail!("capture thread ended before reporting readiness ({other:?})"),
+    };
     let mut encoder = build_encoder(args, width, height)?;
 
     // Announce the display codec/geometry before the first frame (§8.3/§8.4).
-    let info = protocol::ControlMessage::DisplayInfo {
+    announce_display(&mut legs, &mut encoder, width, height).await?;
+
+    // Link-quality state (§12): created on the first MetricsReport, with the
+    // first reported RTT as the baseline.
+    let mut quality: Option<protocol::QualityController> = None;
+    // True while congestion is forcing the codec ladder into its video regime.
+    let mut forced_video = false;
+    let video_ceiling_kbps = args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS);
+
+    let mut udp_buf = vec![0u8; 2048];
+    let mut ctrl_buf = vec![0u8; 2048];
+    let mut frame_id = 0u32;
+    loop {
+        tokio::select! {
+            msg = frame_rx.recv() => {
+                let Some(CaptureMsg::Frame(frame)) = msg else {
+                    bail!("capture thread ended");
+                };
+                frame_id =
+                    handle_frame(&frame, &mut legs, &mut encoder, frame_id, width, height).await?;
+                if args.max_frames.is_some_and(|max| frame_id >= max) {
+                    info!(frame_id, "max frames reached, closing session");
+                    return Ok(());
+                }
+            }
+            res = recv_udp(&mut legs.udp, &mut udp_buf) => {
+                // Continuous probing (§12.1): answer latency probes for the
+                // whole session, not only during UDP detection.
+                let (ch, n) = res?;
+                if ch == channel::CONTROL
+                    && let Ok(probe) = Probe::decode(&udp_buf[..n])
+                {
+                    let now = micros_since(clock_start);
+                    let ack = ProbeAck { t1: probe.t1, t2: now, t3: now };
+                    legs.send_control(&ack.encode()).await?;
+                }
+            }
+            res = legs.stream.recv_into(&mut ctrl_buf) => {
+                let (ch, n) = res?;
+                if ch != channel::CONTROL {
+                    continue;
+                }
+                match ControlMessage::decode(&ctrl_buf[..n]) {
+                    Ok(ControlMessage::MetricsReport {
+                        rtt_micros,
+                        jitter_micros,
+                        loss_permille,
+                    }) => handle_metrics(
+                        &mut quality,
+                        &mut forced_video,
+                        &mut encoder,
+                        &fps_shared,
+                        video_ceiling_kbps,
+                        rtt_micros,
+                        jitter_micros,
+                        loss_permille,
+                    ),
+                    Ok(_) => {} // other control messages: not handled here yet
+                    Err(e) => warn!("undecodable control message: {e}"),
+                }
+            }
+        }
+    }
+}
+
+/// Announces the display codec/geometry on the control channel (§8.3/§8.4);
+/// also used after a codec-ladder regime switch (§8.5).
+async fn announce_display<T: ReliableTransport>(
+    legs: &mut Legs<T>,
+    encoder: &mut ServerEncoder,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let info = ControlMessage::DisplayInfo {
         display_id: 0,
         width,
         height,
         codec: encoder.codec_type().wire_id(),
     };
-    display.send_control(&info.encode()?).await?;
+    legs.send_control(&info.encode()?).await?;
+    Ok(())
+}
 
-    let frame_time = Duration::from_secs_f64(1.0 / f64::from(args.fps.max(1)));
-    let mut interval = tokio::time::interval(frame_time);
-    let mut frame_id = 0u32;
-    loop {
-        interval.tick().await;
-        let Some(frame) = tokio::task::block_in_place(|| source.next_frame(frame_time))? else {
-            continue; // no desktop changes this tick
-        };
-        let packet = encoder.encode(&frame)?;
-        if let Some(codec) = encoder.take_codec_change() {
-            // Codec ladder switched regime: re-announce before the fragments
-            // so the peer rebuilds its decoder (§8.5).
-            info!(codec = codec.wire_id(), "codec ladder switched");
-            let info = protocol::ControlMessage::DisplayInfo {
-                display_id: 0,
-                width,
-                height,
-                codec: codec.wire_id(),
-            };
-            display.send_control(&info.encode()?).await?;
+/// Display encoder used by the server: either a plain preset encoder or the
+/// codec ladder (§8.5), kept concrete so congestion control can force its
+/// regime (§12.5) without downcasting a trait object.
+enum ServerEncoder {
+    #[cfg(feature = "ladder")]
+    Ladder(Box<codec::LadderEncoder>),
+    Simple(Box<dyn codec::VideoEncoder>),
+}
+
+impl codec::VideoEncoder for ServerEncoder {
+    fn encode(&mut self, frame: &codec::VideoFrame<'_>) -> codec::Result<codec::EncodedPacket> {
+        match self {
+            #[cfg(feature = "ladder")]
+            Self::Ladder(e) => e.encode(frame),
+            Self::Simple(e) => e.encode(frame),
         }
-        if packet.data.is_empty() {
-            continue; // rect codecs: nothing changed on this frame
+    }
+
+    fn request_keyframe(&mut self) {
+        match self {
+            #[cfg(feature = "ladder")]
+            Self::Ladder(e) => e.request_keyframe(),
+            Self::Simple(e) => e.request_keyframe(),
         }
-        for frag in Fragmenter::split(0, frame_id, &packet.data) {
-            display.send_fragment(&frag).await?;
+    }
+
+    fn set_bitrate(&mut self, kbps: u32) -> codec::Result<()> {
+        match self {
+            #[cfg(feature = "ladder")]
+            Self::Ladder(e) => e.set_bitrate(kbps),
+            Self::Simple(e) => e.set_bitrate(kbps),
         }
-        frame_id = frame_id.wrapping_add(1);
-        if args.max_frames.is_some_and(|max| frame_id >= max) {
-            info!(frame_id, "max frames reached, closing session");
-            return Ok(());
+    }
+
+    fn codec_type(&self) -> codec::VideoCodecType {
+        match self {
+            #[cfg(feature = "ladder")]
+            Self::Ladder(e) => e.codec_type(),
+            Self::Simple(e) => e.codec_type(),
         }
+    }
+
+    fn take_codec_change(&mut self) -> Option<codec::VideoCodecType> {
+        match self {
+            #[cfg(feature = "ladder")]
+            Self::Ladder(e) => e.take_codec_change(),
+            Self::Simple(e) => e.take_codec_change(),
+        }
+    }
+}
+
+impl ServerEncoder {
+    /// Orders the codec ladder into its video regime (VP9, real rate control)
+    /// or releases it back to the base regime. No-op for plain encoders.
+    fn force_video_regime(&mut self, on: bool) {
+        #[cfg(feature = "ladder")]
+        if let Self::Ladder(e) = self {
+            e.force_level(if on { codec::Level::High } else { codec::Level::Low });
+        }
+        #[cfg(not(feature = "ladder"))]
+        let _ = (self, on);
     }
 }
 
 /// Builds the display encoder from `--preset`: a named preset, or the codec
 /// ladder (`--preset ladder`, feature `ladder`) which starts in rects-JPEG
 /// and switches to VP9 on sustained video-like change (§8.5).
-fn build_encoder(args: &Args, width: u32, height: u32) -> Result<Box<dyn codec::VideoEncoder>> {
+fn build_encoder(args: &Args, width: u32, height: u32) -> Result<ServerEncoder> {
     #[cfg(feature = "ladder")]
     if args.preset == "ladder" {
         let kbps = args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS);
@@ -251,7 +536,7 @@ fn build_encoder(args: &Args, width: u32, height: u32) -> Result<Box<dyn codec::
             80,
         )?;
         info!(width, height, kbps, "codec ladder ready (rects-jpeg <-> vp9)");
-        return Ok(Box::new(encoder));
+        return Ok(ServerEncoder::Ladder(Box::new(encoder)));
     }
     let preset = CodecPreset::by_name(&args.preset)
         .with_context(|| format!("unknown preset: {}", args.preset))?;
@@ -261,7 +546,7 @@ fn build_encoder(args: &Args, width: u32, height: u32) -> Result<Box<dyn codec::
     };
     let encoder = preset.build_encoder(width, height)?;
     info!(preset = preset.name, codec = ?preset.codec, width, height, "display encoder ready");
-    Ok(encoder)
+    Ok(ServerEncoder::Simple(encoder))
 }
 
 /// Frame producer selected by `--source`: the synthetic pattern everywhere,
@@ -277,12 +562,13 @@ enum Source {
 }
 
 impl Source {
-    fn new(args: &Args) -> Result<Self> {
-        match args.source.as_str() {
-            "synthetic" => Ok(Self::Synthetic(SyntheticSource::new(args.width, args.height))),
+    fn new(kind: &str, output: u32, width: u32, height: u32) -> Result<Self> {
+        let _ = output; // used only by the Windows DXGI arm
+        match kind {
+            "synthetic" => Ok(Self::Synthetic(SyntheticSource::new(width, height))),
             #[cfg(all(windows, feature = "windows-capture"))]
             "dxgi" => Ok(Self::Dxgi {
-                source: Box::new(server::dxgi::DxgiSource::new(args.output)?),
+                source: Box::new(server::dxgi::DxgiSource::new(output)?),
                 last: None,
             }),
             other => bail!(

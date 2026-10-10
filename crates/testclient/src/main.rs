@@ -173,13 +173,71 @@ async fn run() -> Result<()> {
     let mut buf = vec![0u8; 2048];
 
     match leg {
-        Some(mut leg) => loop {
-            let (ch, n) = leg.dgram.recv_into(&mut buf).await?;
-            let lost = leg.dgram.lost_estimate();
-            if !handle_packet(ch, &buf[..n], lost, &args, &mut reasm, &mut decoders, &mut sink)? {
-                return Ok(());
+        Some(mut leg) => {
+            // Continuous probing (§12.1): one probe per second over the UDP
+            // leg; answered ones feed the RTT/jitter EWMAs, and once per
+            // second a MetricsReport goes to the server over the reliable
+            // control stream (§12.2).
+            let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
+            let mut rtt_ewma: Option<f64> = None;
+            let mut jitter_ewma = 0.0_f64;
+            // The first ack is delayed by the server's session bring-up
+            // (capture thread, encoder init), so it is discarded as warm-up
+            // and never feeds the EWMA/baseline.
+            let mut warmup_acks = 1u8;
+            let mut prev_lost = 0u64;
+            let mut prev_received = 0u64;
+            loop {
+                tokio::select! {
+                    res = leg.dgram.recv_into(&mut buf) => {
+                        let (ch, n) = res?;
+                        if ch == channel::CONTROL
+                            && let Ok(ack) = protocol::ProbeAck::decode(&buf[..n])
+                        {
+                            let rtt = protocol::compute_rtt(ack.t1, ack.t2, ack.t3, clock());
+                            #[allow(clippy::cast_precision_loss)] // micros fit in f64
+                            let rtt = rtt as f64;
+                            if warmup_acks > 0 {
+                                warmup_acks -= 1;
+                                continue;
+                            }
+                            let prev = rtt_ewma.unwrap_or(rtt);
+                            jitter_ewma += 0.25 * ((rtt - prev).abs() - jitter_ewma);
+                            rtt_ewma = Some(prev + 0.25 * (rtt - prev));
+                            continue;
+                        }
+                        let lost = leg.dgram.lost_estimate();
+                        if !handle_packet(ch, &buf[..n], lost, &args, &mut reasm, &mut decoders, &mut sink)? {
+                            return Ok(());
+                        }
+                    }
+                    _ = probe_tick.tick() => {
+                        leg.dgram
+                            .send(channel::CONTROL, &protocol::Probe { t1: clock() }.encode())
+                            .await?;
+                        let Some(rtt) = rtt_ewma else { continue };
+                        let lost = leg.dgram.lost_estimate();
+                        let received = leg.dgram.received();
+                        let dlost = lost - prev_lost;
+                        let drecv = received - prev_received;
+                        prev_lost = lost;
+                        prev_received = received;
+                        let denom = dlost + drecv;
+                        #[allow(clippy::cast_precision_loss)] // counters fit in f64
+                        let loss_rate = if denom == 0 { 0.0 } else { dlost as f64 / denom as f64 };
+                        // Rates and micros are non-negative and small; the
+                        // casts cannot lose sign or meaningful precision.
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let report = ControlMessage::MetricsReport {
+                            rtt_micros: rtt as u64,
+                            jitter_micros: jitter_ewma as u64,
+                            loss_permille: (loss_rate * 1000.0) as u16,
+                        };
+                        stream.send(channel::CONTROL, &report.encode()?).await?;
+                    }
+                }
             }
-        },
+        }
         None => loop {
             let (ch, n) = stream.recv_into(&mut buf).await?;
             if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink)? {

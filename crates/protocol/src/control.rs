@@ -77,6 +77,17 @@ pub enum ControlMessage {
         /// `VideoCodecType` wire ID.
         codec: u16,
     },
+    /// Link-quality report, client → server (§12.2): one per probe window
+    /// (~1 s) on the reliable control channel. The server feeds these into
+    /// its `QualityController` (§12.5).
+    MetricsReport {
+        /// Smoothed RTT in microseconds (EWMA over probe acks).
+        rtt_micros: u64,
+        /// RTT variation in microseconds (EWMA of |ΔRTT|).
+        jitter_micros: u64,
+        /// UDP loss rate in the window, in permille (0-1000), from seq gaps.
+        loss_permille: u16,
+    },
     /// Control channel heartbeat.
     Keepalive,
 }

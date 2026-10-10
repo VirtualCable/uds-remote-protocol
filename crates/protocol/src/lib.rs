@@ -11,9 +11,14 @@ mod control;
 mod error;
 mod hello;
 mod probe;
+mod quality;
 
 pub use channel::ChannelId;
 pub use control::{Capability, ControlMessage};
 pub use error::ProtocolError;
 pub use hello::{Command, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION, TICKET_LENGTH};
 pub use probe::{Probe, ProbeAck, ProbeError, compute_rtt};
+pub use quality::{
+    LEVEL_DEGRADED, LEVEL_FULL, QualityController, QualityEvent, QualityLevel, QualityPolicy,
+    QualityTargets, Sample, targets,
+};
