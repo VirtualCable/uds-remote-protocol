@@ -288,7 +288,9 @@ async fn run() -> Result<()> {
     // announcements, or Raw on first frame for servers that do not
     // announce (§8.4 compat).
     let mut decoders: HashMap<u8, Box<dyn VideoDecoder>> = HashMap::new();
-    let mut buf = vec![0u8; 2048];
+    // Sized for the largest stream record (~64 KiB): cursor shapes (§10)
+    // can be a few KiB; datagrams on this buffer stay MTU-sized anyway.
+    let mut buf = vec![0u8; 65_536];
     let mut recovery = DecodeRecovery::default();
     let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
@@ -327,7 +329,9 @@ async fn udp_session(
     let mut sink = Sink::new(args.headless);
     let mut reasm = Reassembler::new();
     let mut decoders: HashMap<u8, Box<dyn VideoDecoder>> = HashMap::new();
-    let mut buf = vec![0u8; 2048];
+    // Sized for the largest stream record (~64 KiB): cursor shapes (§10)
+    // can be a few KiB; datagrams on this buffer stay MTU-sized anyway.
+    let mut buf = vec![0u8; 65_536];
 
     let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
     let mut rtt_ewma: Option<f64> = None;

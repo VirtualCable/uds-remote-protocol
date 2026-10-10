@@ -412,7 +412,9 @@ async fn serve<T: ReliableTransport>(
     };
 
     let mut udp_buf = vec![0u8; 2048];
-    let mut ctrl_buf = vec![0u8; 2048];
+    // Sized for the largest stream record (~64 KiB): cursor shapes (§10)
+    // can be a few KiB.
+    let mut ctrl_buf = vec![0u8; 65_536];
     let mut frame_id = 0u32;
     loop {
         tokio::select! {
@@ -463,17 +465,25 @@ async fn send_cursor_update<T: ReliableTransport>(
             .await?;
     }
     if let Some(shape) = &update.shape {
-        legs.send_cursor(
-            &CursorMessage::Shape {
-                width: shape.width,
-                height: shape.height,
-                hot_x: shape.hot_x,
-                hot_y: shape.hot_y,
-                pixels: shape.rgba.clone(),
-            }
-            .encode(),
-        )
-        .await?;
+        let msg = CursorMessage::Shape {
+            width: shape.width,
+            height: shape.height,
+            hot_x: shape.hot_x,
+            hot_y: shape.hot_y,
+            pixels: shape.rgba.clone(),
+        }
+        .encode();
+        // A giant cursor must not kill the session: stream records cap at
+        // MAX_PLAINTEXT (~64 KiB); oversized shapes are skipped (§10).
+        if msg.len() > consts::MAX_PLAINTEXT {
+            warn!(
+                width = shape.width,
+                height = shape.height,
+                "cursor shape exceeds stream record size; skipped"
+            );
+        } else {
+            legs.send_cursor(&msg).await?;
+        }
     }
     Ok(())
 }
