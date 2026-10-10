@@ -68,7 +68,7 @@ fn micros_since(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Last cursor state received from the server (§11): the client paints the
+/// Last cursor state received from the server (§10): the client paints the
 /// cursor locally at the pointer position it injects.
 struct ClientCursor {
     visible: bool,
@@ -216,7 +216,7 @@ impl Sink {
                 .iter()
                 .map(|&[b, g, r, _]| u32::from_le_bytes([b, g, r, 0])),
         );
-        // Local cursor rendering (§11): painted at the local pointer
+        // Local cursor rendering (§10): painted at the local pointer
         // position, which is what we inject into the remote session.
         if cursor.visible
             && let Some(shape) = &cursor.shape

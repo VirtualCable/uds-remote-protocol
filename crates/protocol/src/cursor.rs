@@ -1,4 +1,4 @@
-//! Cursor messages, server → client (design doc §11): the client paints
+//! Cursor messages, server → client (design doc §10): the client paints
 //! the cursor locally (like RDP), so the server only sends the *shape* and
 //! *visibility*, never the position — the position is fixed client-side and
 //! injected into the remote session through the input channel.

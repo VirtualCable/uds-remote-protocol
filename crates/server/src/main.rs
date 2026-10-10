@@ -113,7 +113,7 @@ impl<T: ReliableTransport> Legs<T> {
     }
 
     /// Cursor updates always take the reliable stream: the client keeps the
-    /// last shape as state, so losing one would leave a stale cursor (§11).
+    /// last shape as state, so losing one would leave a stale cursor (§10).
     async fn send_cursor(&mut self, msg: &[u8]) -> transport::Result<()> {
         self.stream.send(channel::CURSOR, msg).await
     }
@@ -138,7 +138,7 @@ enum CaptureMsg {
     Ready(Result<(u32, u32)>),
     /// One captured frame (owned, so the encoder can borrow from it).
     Frame(OwnedFrame),
-    /// Cursor shape/visibility change observed while capturing (§11).
+    /// Cursor shape/visibility change observed while capturing (§10).
     Cursor(server::capture::CursorUpdate),
 }
 
@@ -453,7 +453,7 @@ async fn serve<T: ReliableTransport>(
 }
 
 /// Encodes and sends one cursor update (visibility and/or shape) on the
-/// reliable stream (§11).
+/// reliable stream (§10).
 async fn send_cursor_update<T: ReliableTransport>(
     legs: &mut Legs<T>,
     update: &server::capture::CursorUpdate,

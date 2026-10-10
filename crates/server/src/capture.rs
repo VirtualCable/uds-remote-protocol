@@ -74,7 +74,7 @@ pub struct CapturedCursor {
     pub rgba: Vec<u8>,
 }
 
-/// Cursor state change observed while capturing (design doc §11): the client
+/// Cursor state change observed while capturing (design doc §10): the client
 /// paints the cursor locally, so only shape and visibility cross the wire.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CursorUpdate {
@@ -103,7 +103,7 @@ pub enum MaskShapeKind {
 /// the buffer holds both masks, so its height is twice the logical one).
 /// XOR-inverted pixels (monochrome `and=1, xor=1`) are approximated with a
 /// semi-transparent gray — a PoC simplification, real inversion needs the
-/// pixel under the cursor which the client may not have yet (§11).
+/// pixel under the cursor which the client may not have yet (§10).
 ///
 /// Returns `None` for degenerate geometry (zero size, odd monochrome
 /// height, or a buffer too small for the declared layout).
