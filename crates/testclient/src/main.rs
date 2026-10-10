@@ -25,6 +25,56 @@ struct Args {
     ticket: [u8; protocol::TICKET_LENGTH],
     headless: bool,
     max_frames: Option<u64>,
+    /// Scripted input sequence for E2E tests (§10): sends moves, clicks and
+    /// keys on a fixed schedule, independent of the local windowing system.
+    selftest_input: bool,
+}
+
+/// One scripted input action for `--selftest-input`.
+struct SelfTest {
+    start: Instant,
+    sent: usize,
+}
+
+impl SelfTest {
+    fn new() -> Self {
+        Self { start: Instant::now(), sent: 0 }
+    }
+
+    /// Fixed schedule: `(delay from start, message)`.
+    fn schedule() -> Vec<(Duration, InputMessage)> {
+        use InputMessage as I;
+        let mut v: Vec<(Duration, InputMessage)> = vec![
+            (Duration::from_millis(2000), I::PointerMove { display_id: 0, x: 700, y: 400 }),
+            (Duration::from_millis(2500), I::PointerButton { button: PointerButton::Left, down: true }),
+            (Duration::from_millis(2600), I::PointerButton { button: PointerButton::Left, down: false }),
+            (Duration::from_millis(4000), I::PointerMove { display_id: 0, x: 45, y: 46 }),
+            (Duration::from_millis(4500), I::PointerButton { button: PointerButton::Left, down: true }),
+            (Duration::from_millis(4600), I::PointerButton { button: PointerButton::Left, down: false }),
+            (Duration::from_millis(8000), I::PointerMove { display_id: 0, x: 700, y: 400 }),
+            (Duration::from_millis(8500), I::PointerButton { button: PointerButton::Right, down: true }),
+            (Duration::from_millis(8600), I::PointerButton { button: PointerButton::Right, down: false }),
+        ];
+        // "test" (Set 1: t=0x14, e=0x12, s=0x1F) typed at t=10s.
+        for (i, sc) in [0x14u16, 0x12, 0x1F, 0x14].iter().enumerate() {
+            let base = Duration::from_millis(10_000 + 200 * i as u64);
+            v.push((base, I::Key { down: true, scancode: *sc, extended: false }));
+            v.push((base + Duration::from_millis(100), I::Key { down: false, scancode: *sc, extended: false }));
+        }
+        v
+    }
+
+    /// Messages due at this tick (each returned once).
+    fn due(&mut self) -> Vec<InputMessage> {
+        let sched = Self::schedule();
+        let now = self.start.elapsed();
+        let mut out = Vec::new();
+        while self.sent < sched.len() && sched[self.sent].0 <= now {
+            out.push(sched[self.sent].1);
+            self.sent += 1;
+        }
+        out
+    }
 }
 
 fn parse_args() -> Result<Args> {
@@ -34,6 +84,7 @@ fn parse_args() -> Result<Args> {
         ticket: [0; protocol::TICKET_LENGTH],
         headless: false,
         max_frames: None,
+        selftest_input: false,
     };
     let mut key_seen = false;
     let mut ticket_seen = false;
@@ -41,6 +92,10 @@ fn parse_args() -> Result<Args> {
     while let Some(arg) = it.next() {
         if arg == "--headless" {
             args.headless = true;
+            continue;
+        }
+        if arg == "--selftest-input" {
+            args.selftest_input = true;
             continue;
         }
         let value = it.next().context(format!("missing value for {arg}"))?;
@@ -303,6 +358,7 @@ async fn run() -> Result<()> {
     let mut recovery = DecodeRecovery::default();
     let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
+    let mut selftest = args.selftest_input.then(SelfTest::new);
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
         tokio::select! {
@@ -317,6 +373,13 @@ async fn run() -> Result<()> {
                 for msg in input.poll(&sink) {
                     let (buf, n) = msg.encode();
                     stream.send(channel::INPUT, &buf[..n]).await?;
+                }
+                if let Some(st) = &mut selftest {
+                    for msg in st.due() {
+                        info!(?msg, "selftest input");
+                        let (buf, n) = msg.encode();
+                        stream.send(channel::INPUT, &buf[..n]).await?;
+                    }
                 }
             }
         }
@@ -359,6 +422,7 @@ async fn udp_session(
     let mut recovery = DecodeRecovery::default();
     let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
+    let mut selftest = args.selftest_input.then(SelfTest::new);
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
         tokio::select! {
@@ -430,6 +494,13 @@ async fn udp_session(
                     let (buf, n) = msg.encode();
                     stream.send(channel::INPUT, &buf[..n]).await?;
                 }
+                if let Some(st) = &mut selftest {
+                    for msg in st.due() {
+                        info!(?msg, "selftest input");
+                        let (buf, n) = msg.encode();
+                        stream.send(channel::INPUT, &buf[..n]).await?;
+                    }
+                }
             }
         }
     }
@@ -490,6 +561,7 @@ impl InputPoll {
         {
             let down = window.get_mouse_down(*btn);
             if down != self.buttons[i] {
+                tracing::debug!(button = i, down, "pointer button change");
                 self.buttons[i] = down;
                 let button = match i {
                     0 => PointerButton::Left,
