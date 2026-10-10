@@ -206,7 +206,14 @@ impl DxgiSource {
             );
             self.pending_cursor.shape = Some(shape);
         } else {
-            warn!("pointer shape buffer rejected by conversion");
+            warn!(
+                kind = ?kind,
+                width = shape_info.Width,
+                height = shape_info.Height,
+                pitch = shape_info.Pitch,
+                buf_len = self.shape_buf.len(),
+                "pointer shape buffer rejected by conversion"
+            );
         }
     }
     /// Copies the desktop image out of the acquired `resource` and reads the

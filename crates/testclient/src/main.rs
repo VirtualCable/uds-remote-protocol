@@ -183,6 +183,15 @@ impl Sink {
         }
     }
 
+    /// Pumps window events without presenting a frame. Required when the
+    /// desktop is static (no frames flowing): minifb only processes X events
+    /// during `update*` calls, and input polling depends on them (§10).
+    fn pump_events(&mut self) {
+        if let Some(window) = &mut self.window {
+            window.update();
+        }
+    }
+
     fn push(&mut self, frame: &codec::DecodedFrame, cursor: &ClientCursor) -> Result<bool> {
         self.frames += 1;
         self.frame_size = (frame.width, frame.height);
@@ -304,6 +313,7 @@ async fn run() -> Result<()> {
                 }
             }
             _ = input_tick.tick() => {
+                sink.pump_events();
                 for msg in input.poll(&sink) {
                     let (buf, n) = msg.encode();
                     stream.send(channel::INPUT, &buf[..n]).await?;
@@ -413,7 +423,9 @@ async fn udp_session(
             }
             _ = input_tick.tick() => {
                 // Input channel (§10): poll the window, send the diffs on
-                // the reliable stream.
+                // the reliable stream. Events must be pumped even when the
+                // desktop is static (no frames → no render → no event pump).
+                sink.pump_events();
                 for msg in input.poll(&sink) {
                     let (buf, n) = msg.encode();
                     stream.send(channel::INPUT, &buf[..n]).await?;
