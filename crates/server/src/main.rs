@@ -175,6 +175,13 @@ fn spawn_capture(args: &Args, fps_shared: Arc<AtomicU32>) -> mpsc::Receiver<Capt
         }
         let sleeps = matches!(source, Source::Synthetic(_));
         loop {
+            // The session may end while the desktop is idle (no frames to
+            // send, so a dead receiver would go unnoticed and the DXGI
+            // duplication would leak into the next session, breaking its
+            // DuplicateOutput). Check liveness every iteration.
+            if tx.is_closed() {
+                return;
+            }
             let fps = fps_shared.load(Ordering::Relaxed).max(1);
             let frame_time = Duration::from_secs_f64(1.0 / f64::from(fps));
             match source.next_frame(frame_time) {
