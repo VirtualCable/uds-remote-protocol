@@ -28,7 +28,14 @@
 //! `force_video_codec: true` — the server should force the codec ladder to
 //! its VP9 level (real rate control) instead of squeezing JPEG quality to
 //! illegibility (§8.5).
+//!
+//! The RTT baseline is not the first sample but the **minimum RTT of a
+//! sliding window** (60 s): a session that starts on an already congested
+//! network re-learns the real distance as soon as the link breathes, and a
+//! permanently worse route expires out of the window instead of signalling
+//! congestion forever. Absolute signals (loss, jitter) need no baseline.
 
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// Quality level: 0 (full) through 6 (degraded, reduced resolution).
@@ -53,8 +60,15 @@ pub struct Sample {
 /// Controller tuning.
 #[derive(Debug, Clone)]
 pub struct QualityPolicy {
-    /// Baseline RTT in microseconds, learned during the connect burst.
+    /// Seed for the RTT baseline in microseconds (first healthy sample).
+    /// The effective baseline is the **minimum RTT of the sliding window**
+    /// (`baseline_window`), so a session that starts on an already
+    /// congested network re-learns the real distance as soon as the link
+    /// breathes, and a permanently worse route eventually expires out of
+    /// the window instead of signalling congestion forever.
     pub baseline_rtt_micros: u64,
+    /// Sliding window for the RTT baseline (minimum inside it).
+    pub baseline_window: Duration,
     /// RTT / baseline above which a sample counts as bad (queue filling).
     pub rtt_bad_factor: f64,
     /// Jitter above which a sample counts as bad (microseconds).
@@ -78,11 +92,13 @@ pub struct QualityPolicy {
 impl QualityPolicy {
     /// Defaults from §12: 1.5x baseline RTT is queue buildup, 1 % loss is
     /// real loss (not Wi-Fi noise), two bad samples to react, ten seconds of
-    /// stability (at ~1 probe/s) before recovering one level.
+    /// stability (at ~1 probe/s) before recovering one level. The baseline
+    /// is the minimum RTT of the last 60 s (sliding window).
     #[must_use]
     pub fn standard(baseline_rtt_micros: u64) -> Self {
         Self {
             baseline_rtt_micros: baseline_rtt_micros.max(1),
+            baseline_window: Duration::from_secs(60),
             rtt_bad_factor: 1.5,
             jitter_bad_micros: 15_000,
             loss_bad: 0.01,
@@ -165,18 +181,34 @@ pub struct QualityController {
     good_streak: u32,
     /// Last time the level went up (cooldown between raises).
     last_raise: Option<Instant>,
+    /// Sliding window of `(when, rtt_micros)`; the effective baseline is the
+    /// minimum RTT inside it (re-learned as the link improves, expired when
+    /// the link permanently worsens).
+    rtt_window: VecDeque<(Instant, u64)>,
+    /// Effective RTT baseline: minimum of `rtt_window` (seeded from the
+    /// policy, never below 1 µs).
+    baseline_rtt_micros: u64,
+    /// Lowest RTT ever reported (diagnostics).
+    rtt_min_observed: u64,
+    /// Highest RTT ever reported (diagnostics).
+    rtt_max_observed: u64,
 }
 
 impl QualityController {
     /// Creates a controller at [`LEVEL_FULL`].
     #[must_use]
     pub fn new(policy: QualityPolicy) -> Self {
+        let seed = policy.baseline_rtt_micros.max(1);
         Self {
             policy,
             level: LEVEL_FULL,
             bad_streak: 0,
             good_streak: 0,
             last_raise: None,
+            rtt_window: VecDeque::new(),
+            baseline_rtt_micros: seed,
+            rtt_min_observed: seed,
+            rtt_max_observed: seed,
         }
     }
 
@@ -192,6 +224,40 @@ impl QualityController {
         &self.policy
     }
 
+    /// Effective RTT baseline: minimum RTT of the sliding window.
+    #[must_use]
+    pub fn baseline_rtt_micros(&self) -> u64 {
+        self.baseline_rtt_micros
+    }
+
+    /// Lowest and highest RTT ever reported (diagnostics).
+    #[must_use]
+    pub fn rtt_observed(&self) -> (u64, u64) {
+        (self.rtt_min_observed, self.rtt_max_observed)
+    }
+
+    /// Feeds the sample's RTT into the sliding baseline window.
+    fn track_rtt(&mut self, now: Instant, rtt_micros: u64) {
+        self.rtt_min_observed = self.rtt_min_observed.min(rtt_micros);
+        self.rtt_max_observed = self.rtt_max_observed.max(rtt_micros);
+        self.rtt_window.push_back((now, rtt_micros));
+        let cutoff = now.checked_sub(self.policy.baseline_window).unwrap_or(now);
+        while self
+            .rtt_window
+            .front()
+            .is_some_and(|(t, _)| *t < cutoff)
+        {
+            self.rtt_window.pop_front();
+        }
+        let window_min = self
+            .rtt_window
+            .iter()
+            .map(|(_, r)| *r)
+            .min()
+            .unwrap_or(rtt_micros);
+        self.baseline_rtt_micros = window_min.max(1);
+    }
+
     /// True when the sample is bad by any signal (§12.2).
     fn is_bad(&self, s: &Sample) -> bool {
         // Integer-domain compare: bad RTT = baseline * factor (factor scaled
@@ -199,12 +265,13 @@ impl QualityController {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let factor_x1024 = (self.policy.rtt_bad_factor * 1024.0) as u128;
         let rtt_bad =
-            u128::from(s.rtt_micros) * 1024 > u128::from(self.policy.baseline_rtt_micros) * factor_x1024;
+            u128::from(s.rtt_micros) * 1024 > u128::from(self.baseline_rtt_micros) * factor_x1024;
         rtt_bad || s.jitter_micros > self.policy.jitter_bad_micros || s.loss > self.policy.loss_bad
     }
 
     /// Feeds one sample; returns an event when the level changes.
     pub fn update(&mut self, now: Instant, sample: Sample) -> Option<QualityEvent> {
+        self.track_rtt(now, sample.rtt_micros);
         if self.is_bad(&sample) {
             self.bad_streak += 1;
             self.good_streak = 0;
@@ -248,6 +315,7 @@ mod tests {
     fn policy() -> QualityPolicy {
         QualityPolicy {
             baseline_rtt_micros: 10_000,
+            baseline_window: Duration::from_secs(60),
             rtt_bad_factor: 1.5,
             jitter_bad_micros: 15_000,
             loss_bad: 0.01,
@@ -284,8 +352,9 @@ mod tests {
     #[test]
     fn two_bad_samples_step_down() {
         let mut c = QualityController::new(policy());
-        assert_eq!(c.update(t0(), bad_rtt()), None); // first bad: no reaction
-        let ev = c.update(t0() + Duration::from_secs(1), bad_rtt());
+        c.update(t0(), good()); // seed the baseline window with a healthy RTT
+        assert_eq!(c.update(t0() + Duration::from_secs(1), bad_rtt()), None); // first bad: no reaction
+        let ev = c.update(t0() + Duration::from_secs(2), bad_rtt());
         assert_eq!(
             ev,
             Some(QualityEvent { level: 1, degraded: true, force_video_codec: false })
@@ -321,8 +390,9 @@ mod tests {
     #[test]
     fn recovery_needs_sustained_good_and_cooldown() {
         let mut c = QualityController::new(policy());
+        c.update(t0(), good()); // seed the baseline window
         // Down to level 2.
-        for i in 0..4 {
+        for i in 1..5 {
             c.update(t0() + Duration::from_secs(i), bad_rtt());
         }
         assert_eq!(c.level(), 2);
@@ -359,7 +429,8 @@ mod tests {
     #[test]
     fn level_never_passes_degraded() {
         let mut c = QualityController::new(policy());
-        let mut now = t0();
+        c.update(t0(), good()); // seed the baseline window
+        let mut now = t0() + Duration::from_secs(1);
         for _ in 0..30 {
             c.update(now, bad_rtt());
             now += Duration::from_secs(1);
@@ -370,13 +441,14 @@ mod tests {
     #[test]
     fn force_video_codec_flag_below_threshold() {
         let mut c = QualityController::new(policy());
+        c.update(t0(), good()); // seed the baseline window
         // Level 1: no force.
-        c.update(t0(), bad_rtt());
-        let ev = c.update(t0() + Duration::from_secs(1), bad_rtt()).unwrap();
+        c.update(t0() + Duration::from_secs(1), bad_rtt());
+        let ev = c.update(t0() + Duration::from_secs(2), bad_rtt()).unwrap();
         assert!(!ev.force_video_codec);
         // Level 2: force.
-        c.update(t0() + Duration::from_secs(2), bad_rtt());
-        let ev = c.update(t0() + Duration::from_secs(3), bad_rtt()).unwrap();
+        c.update(t0() + Duration::from_secs(3), bad_rtt());
+        let ev = c.update(t0() + Duration::from_secs(4), bad_rtt()).unwrap();
         assert_eq!(ev.level, 2);
         assert!(ev.force_video_codec);
         // Recovery to level 1 clears the flag.
@@ -387,6 +459,52 @@ mod tests {
             now += Duration::from_secs(1);
         }
         assert_eq!(ev.map(|e| e.force_video_codec), Some(false));
+    }
+
+    #[test]
+    fn baseline_is_window_min_and_relaxes_when_the_link_breathes() {
+        let mut c = QualityController::new(policy());
+        // Session starts on an already congested link: RTT 100 ms.
+        let congested = Sample { rtt_micros: 100_000, jitter_micros: 1_000, loss: 0.0 };
+        for i in 0..10 {
+            c.update(t0() + Duration::from_secs(i), congested);
+        }
+        assert_eq!(c.baseline_rtt_micros(), 100_000, "baseline learned congested");
+        // The link breathes once (one probe slips through at 20 ms): the
+        // window min becomes the real distance and later samples at 100 ms
+        // correctly read as congestion again.
+        c.update(t0() + Duration::from_secs(10), Sample { rtt_micros: 20_000, ..congested });
+        assert_eq!(c.baseline_rtt_micros(), 20_000);
+        let ev = c.update(t0() + Duration::from_secs(11), congested);
+        let ev = ev.or_else(|| c.update(t0() + Duration::from_secs(12), congested));
+        assert!(ev.is_some_and(|e| e.degraded), "100 ms vs 20 ms baseline is bad");
+    }
+
+    #[test]
+    fn baseline_expires_a_permanently_worse_link() {
+        let mut c = QualityController::new(policy());
+        // Good link first.
+        for i in 0..10 {
+            c.update(t0() + Duration::from_secs(i), good());
+        }
+        assert_eq!(c.baseline_rtt_micros(), 10_000);
+        // The link permanently worsens to 100 ms (new route): while the good
+        // samples stay in the window it counts as congestion...
+        let worse = Sample { rtt_micros: 100_000, jitter_micros: 1_000, loss: 0.0 };
+        c.update(t0() + Duration::from_secs(10), worse);
+        assert_eq!(c.baseline_rtt_micros(), 10_000);
+        // ...but once the window slides past them, the baseline re-learns.
+        c.update(t0() + Duration::from_secs(71), worse);
+        assert_eq!(c.baseline_rtt_micros(), 100_000);
+    }
+
+    #[test]
+    fn observed_min_max_are_tracked() {
+        let mut c = QualityController::new(policy());
+        c.update(t0(), Sample { rtt_micros: 40_000, ..good() });
+        c.update(t0() + Duration::from_secs(1), Sample { rtt_micros: 5_000, ..good() });
+        c.update(t0() + Duration::from_secs(2), Sample { rtt_micros: 90_000, ..good() });
+        assert_eq!(c.rtt_observed(), (5_000, 90_000));
     }
 
     #[test]
