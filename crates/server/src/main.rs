@@ -381,6 +381,9 @@ async fn serve<T: ReliableTransport>(
     let mut quality: Option<protocol::QualityController> = None;
     // True while congestion is forcing the codec ladder into its video regime.
     let mut forced_video = false;
+    // Keyframe requests are also rate-limited server-side (max 1 per 500 ms,
+    // riesgos §2.1): a client bug must not turn into an encoder DoS.
+    let mut last_keyframe_req: Option<Instant> = None;
     let video_ceiling_kbps = args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS);
 
     let mut udp_buf = vec![0u8; 2048];
@@ -431,6 +434,15 @@ async fn serve<T: ReliableTransport>(
                         jitter_micros,
                         loss_permille,
                     ),
+                    Ok(ControlMessage::RequestKeyframe { display_id }) => {
+                        if last_keyframe_req
+                            .is_none_or(|t| t.elapsed() >= Duration::from_millis(500))
+                        {
+                            info!(display_id, "keyframe requested by client (frame loss)");
+                            encoder.request_keyframe();
+                            last_keyframe_req = Some(Instant::now());
+                        }
+                    }
                     Ok(_) => {} // other control messages: not handled here yet
                     Err(e) => warn!("undecodable control message: {e}"),
                 }

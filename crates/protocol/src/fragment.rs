@@ -82,11 +82,16 @@ struct Partial {
 /// Reassembles fragments into complete frames, dropping incomplete ones.
 ///
 /// Tracks a sliding window of recent frame ids; stale partial frames are
-/// evicted when newer frames arrive (no clock needed, §6.2).
+/// evicted when newer frames arrive (no clock needed, §6.2). Evicted
+/// incomplete frames are counted ([`Reassembler::dropped_frames`]) so the
+/// receiver can ask for a keyframe when loss makes the stream
+/// undecodable (§12.2).
 pub struct Reassembler {
     partials: HashMap<(u8, u32), Partial>,
     /// Highest frame id seen so far (per display); drives eviction.
     max_seen: HashMap<u8, u32>,
+    /// Frames evicted incomplete (their remaining fragments never came).
+    dropped: u64,
 }
 
 /// How far behind the newest frame a partial may lag before eviction.
@@ -105,7 +110,16 @@ impl Reassembler {
         Self {
             partials: HashMap::new(),
             max_seen: HashMap::new(),
+            dropped: 0,
         }
+    }
+
+    /// Frames evicted incomplete so far (cumulative). A raise means the
+    /// decoder may be missing a delta frame: predictive codecs need a
+    /// keyframe to recover (§12.2).
+    #[must_use]
+    pub fn dropped_frames(&self) -> u64 {
+        self.dropped
     }
 
     /// True if `frame_id` (display 0) has all its fragments.
@@ -144,8 +158,15 @@ impl Reassembler {
             *newest = frame_id;
         }
         let horizon = newest.saturating_sub(TRACK_WINDOW);
-        self.partials
-            .retain(|&(d, f), _| d != display_id || f >= horizon);
+        let mut dropped_now = 0u64;
+        self.partials.retain(|&(d, f), p| {
+            let keep = d != display_id || f >= horizon;
+            if !keep && p.received < p.count {
+                dropped_now += 1;
+            }
+            keep
+        });
+        self.dropped += dropped_now;
 
         let key = (display_id, frame_id);
         let entry = self.partials.entry(key).or_insert_with(|| Partial {

@@ -112,6 +112,7 @@ fn control_message_variants_roundtrip() {
             jitter_micros: 678,
             loss_permille: 25,
         },
+        ControlMessage::RequestKeyframe { display_id: 0 },
         ControlMessage::Keepalive,
     ];
     for msg in msgs {

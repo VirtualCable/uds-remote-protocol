@@ -106,6 +106,26 @@ fn old_incomplete_frames_are_evicted() {
 }
 
 #[test]
+fn evicted_incomplete_frames_are_counted() {
+    let mut rx = Reassembler::new();
+    assert_eq!(rx.dropped_frames(), 0);
+    // Two frames start but never finish; a far-newer frame evicts them.
+    for id in [1, 2] {
+        let partial = Fragmenter::split(0, id, &element(3_000));
+        rx.push(&partial[0]).unwrap();
+    }
+    let f = Fragmenter::split(0, 100, &element(100));
+    rx.push(&f[0]).unwrap();
+    assert_eq!(rx.dropped_frames(), 2);
+    // Completed frames are not counted as dropped.
+    let done = Fragmenter::split(0, 101, &element(3_000));
+    for frag in &done {
+        rx.push(frag).unwrap();
+    }
+    assert_eq!(rx.dropped_frames(), 2);
+}
+
+#[test]
 fn garbage_fragment_is_rejected() {
     let mut rx = Reassembler::new();
     assert!(matches!(

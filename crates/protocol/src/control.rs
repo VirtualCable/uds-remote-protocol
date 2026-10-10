@@ -88,6 +88,13 @@ pub enum ControlMessage {
         /// UDP loss rate in the window, in permille (0-1000), from seq gaps.
         loss_permille: u16,
     },
+    /// Keyframe request, client → server (§12.2): sent when fragment loss
+    /// makes the predictive stream undecodable. Rate-limited by both sides
+    /// (max 1 per 500 ms — riesgos §2.1).
+    RequestKeyframe {
+        /// Display whose stream must restart from a keyframe.
+        display_id: u8,
+    },
     /// Control channel heartbeat.
     Keepalive,
 }
