@@ -30,6 +30,41 @@ async fn connect(addr: std::net::SocketAddr) -> EncryptedStream<Box<dyn Reliable
 }
 
 #[tokio::test]
+async fn server_rejects_a_mismatched_protocol_version() {
+    let listener = DirectListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (raw, _) = listener.accept().await.unwrap();
+        EncryptedStream::server_handshake(raw, &test_key(), None).await
+    });
+
+    // A peer speaking a different wire format (e.g. v1 fragments without
+    // capture_ts_ms) must be rejected, never silently misparsed.
+    let connector = DirectConnector::new();
+    let (mut raw, _) = connector
+        .connect(&Target::new(addr, test_ticket(), test_key()))
+        .await
+        .unwrap();
+    let hello = protocol::Hello {
+        version: protocol::PROTOCOL_VERSION + 1,
+        command: protocol::Command::Open,
+        ticket: test_ticket(),
+    };
+    raw.send(&hello.encode()).await.unwrap();
+
+    let result = server.await.unwrap();
+    let Err(err) = result else {
+        panic!("version mismatch must fail the handshake");
+    };
+    assert!(
+        matches!(err, TransportError::VersionMismatch { expected, got }
+            if expected == protocol::PROTOCOL_VERSION && got == protocol::PROTOCOL_VERSION + 1),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
 async fn echo_roundtrip_over_encrypted_tcp() {
     let listener = DirectListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

@@ -19,6 +19,7 @@
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -66,6 +67,10 @@ enum AudioJob {
 /// packets; playback happens on its thread.
 pub struct AudioClient {
     tx: Option<Sender<AudioJob>>,
+    /// Audio playback cursor on the server's capture clock (ms, §9.1),
+    /// published by the audio thread; `-1` = no usable audio clock (no
+    /// stream, no output device, or not primed yet).
+    now_ms: Arc<AtomicI64>,
 }
 
 impl AudioClient {
@@ -73,12 +78,26 @@ impl AudioClient {
     /// dropped without decoding.
     #[must_use]
     pub fn new(enabled: bool) -> Self {
+        let now_ms = Arc::new(AtomicI64::new(-1));
         if !enabled {
-            return Self { tx: None };
+            return Self { tx: None, now_ms };
         }
         let (tx, rx) = channel();
-        std::thread::spawn(move || run(&rx));
-        Self { tx: Some(tx) }
+        let shared = Arc::clone(&now_ms);
+        std::thread::spawn(move || run(&rx, &shared));
+        Self {
+            tx: Some(tx),
+            now_ms,
+        }
+    }
+
+    /// Audio playback cursor on the shared capture clock (ms), for A/V
+    /// lip-sync decisions (§9.1). `None` means no audio clock is available
+    /// (audio disabled, null sink, or not primed): present video at once.
+    #[must_use]
+    pub fn audio_now_ms(&self) -> Option<u32> {
+        let v = self.now_ms.load(Ordering::Relaxed);
+        u32::try_from(v).ok()
     }
 
     /// Applies a stream announcement from the server.
@@ -105,6 +124,10 @@ impl AudioClient {
 /// callback (§9.1): overflow drains the oldest samples down to the target,
 /// underrun surfaces as silence (handled by the consumer side).
 ///
+/// The buffer also tracks the absolute play position (samples consumed +
+/// drained + underrun silence) so the audio thread can map the playback
+/// cursor onto the server's capture clock for A/V lip-sync (§9.1).
+///
 /// Pure and synchronous: unit-tested without any audio device.
 #[derive(Debug)]
 pub struct PlaybackBuffer {
@@ -113,6 +136,8 @@ pub struct PlaybackBuffer {
     max_samples: usize,
     /// Length the buffer is drained to on overflow (~1 jitter window).
     target_samples: usize,
+    /// Samples actually consumed by the device callback (cumulative).
+    consumed_samples: u64,
     /// Samples dropped by overflow drains (cumulative).
     drained_samples: u64,
     /// Samples the consumer asked for while the buffer was empty.
@@ -143,6 +168,7 @@ impl PlaybackBuffer {
             samples: VecDeque::new(),
             max_samples,
             target_samples,
+            consumed_samples: 0,
             drained_samples: 0,
             underrun_samples: 0,
         }
@@ -152,6 +178,23 @@ impl PlaybackBuffer {
     #[must_use]
     pub fn len(&self) -> usize {
         self.samples.len()
+    }
+
+    /// Absolute play position: samples already played, skipped by drains or
+    /// filled with underrun silence (§9.1). Advances in real time even
+    /// during underruns, so the A/V cursor never stalls.
+    #[must_use]
+    pub fn play_pos(&self) -> u64 {
+        self.consumed_samples + self.drained_samples + self.underrun_samples
+    }
+
+    /// Absolute position at which the next pushed sample is queued. When an
+    /// underrun overhang exists (the device played silence past the end),
+    /// newly pushed samples start playing at the play position instead —
+    /// timestamp anchors are registered at `max(push_pos, play_pos)`.
+    #[must_use]
+    pub fn push_pos(&self) -> u64 {
+        self.consumed_samples + self.drained_samples + self.samples.len() as u64
     }
 
     /// Samples dropped by overflow drains so far.
@@ -181,6 +224,7 @@ impl PlaybackBuffer {
     /// Allocation-free and wait-free on the buffer itself.
     pub fn pop_or_silence(&mut self) -> i16 {
         if let Some(s) = self.samples.pop_front() {
+            self.consumed_samples += 1;
             return s;
         }
         self.underrun_samples += 1;
@@ -191,16 +235,91 @@ impl PlaybackBuffer {
 /// Shared handle between the pump thread and the cpal callback.
 type SharedBuffer = Arc<Mutex<PlaybackBuffer>>;
 
+/// One queued frame's anchor: the absolute play position at which its first
+/// sample will be heard, and the capture timestamp of that sample (§9.1).
+#[derive(Debug)]
+struct Anchor {
+    pos: u64,
+    ts_ms: u32,
+}
+
+/// Maps the playback cursor onto the server's capture clock (§9.1).
+///
+/// Each decoded frame pushed to the playback buffer registers an
+/// [`Anchor`]; `ts_at` interpolates the timestamp of any absolute play
+/// position linearly (samples play at a constant device rate). Underrun
+/// silence counts as played (the clock advances in real time) and overflow
+/// drains count as skipped, both via [`PlaybackBuffer::play_pos`].
+#[derive(Debug)]
+struct AudioClockMap {
+    anchors: VecDeque<Anchor>,
+    /// Interleaved samples per millisecond (sample_rate × channels / 1000).
+    samples_per_ms: u64,
+}
+
+impl AudioClockMap {
+    fn new(sample_rate: u32, channels: u8) -> Self {
+        Self {
+            anchors: VecDeque::new(),
+            samples_per_ms: (u64::from(sample_rate) * u64::from(channels) / 1000).max(1),
+        }
+    }
+
+    /// Registers a frame whose first sample plays at absolute position `pos`.
+    fn push_anchor(&mut self, pos: u64, ts_ms: u32) {
+        self.anchors.push_back(Anchor { pos, ts_ms });
+    }
+
+    /// Capture timestamp (ms) of the sample at absolute play position
+    /// `played`; `None` before the first anchor. Positions between anchors
+    /// interpolate from the latest anchor at or before `played`; positions
+    /// past it (underrun) or before the first (priming) extrapolate.
+    fn ts_at(&self, played: u64) -> Option<u32> {
+        let anchor = self
+            .anchors
+            .iter()
+            .rev()
+            .find(|a| a.pos <= played)
+            .or(self.anchors.front())?;
+        let offset = played.abs_diff(anchor.pos) / self.samples_per_ms;
+        let ts = if played >= anchor.pos {
+            i64::from(anchor.ts_ms) + i64::try_from(offset).unwrap_or(i64::MAX)
+        } else {
+            i64::from(anchor.ts_ms) - i64::try_from(offset).unwrap_or(i64::MAX)
+        };
+        Some(u32::try_from(ts.clamp(0, i64::from(u32::MAX))).unwrap_or(0))
+    }
+
+    /// Drops anchors fully consumed by the play cursor (keeps the latest
+    /// one for extrapolation).
+    fn prune(&mut self, played: u64) {
+        while self.anchors.len() > 1 && self.anchors.get(1).is_some_and(|a| a.pos <= played) {
+            self.anchors.pop_front();
+        }
+    }
+}
+
 /// One active audio stream on the pump thread.
 struct ActiveStream {
     decoder: Box<dyn codec::AudioDecoder>,
     jitter: JitterBuffer,
     /// Device playback; `None` is the null sink (headless / no device).
     playback: Option<SharedBuffer>,
+    /// Capture-clock mapping for A/V lip-sync (§9.1); `None` with the null
+    /// sink — no device clock means no sync reference, and video presents
+    /// immediately.
+    clock_map: Option<AudioClockMap>,
+    /// Last pushed frame's capture ts (for PLC frame estimation).
+    last_frame_ts: Option<u32>,
+    /// Shared with the `AudioClient` handle: audio cursor in capture-ms,
+    /// `-1` until the clock is usable.
+    now_ms: Arc<AtomicI64>,
     /// Keeps the device stream alive; dropped with the stream state.
     _stream: Option<DeviceStream>,
     /// Scratch PCM buffer for one decoded frame (interleaved).
     pcm: Vec<i16>,
+    /// Frame duration in ms (for PLC timestamp estimation, §9.1).
+    frame_ms: u32,
     frame_time: Duration,
     next_tick: Instant,
     decoded_frames: u64,
@@ -209,7 +328,7 @@ struct ActiveStream {
 }
 
 impl ActiveStream {
-    fn new(spec: &AudioSpec) -> Option<Self> {
+    fn new(spec: &AudioSpec, now_ms: Arc<AtomicI64>) -> Option<Self> {
         let Some(codec) = AudioCodecType::from_wire_id(spec.codec) else {
             warn!(codec = spec.codec, "unknown audio codec id; stream dropped");
             return None;
@@ -231,6 +350,9 @@ impl ActiveStream {
             }
         };
         let (playback, stream) = start_playback(spec.sample_rate, spec.channels);
+        let clock_map = playback
+            .is_some()
+            .then(|| AudioClockMap::new(spec.sample_rate, spec.channels));
         info!(
             sample_rate = spec.sample_rate,
             channels = spec.channels,
@@ -243,8 +365,12 @@ impl ActiveStream {
             decoder,
             jitter: JitterBuffer::new(),
             playback,
+            clock_map,
+            last_frame_ts: None,
+            now_ms,
             _stream: stream,
             pcm: vec![0i16; preset.frame_samples() * usize::from(spec.channels)],
+            frame_ms: u32::from(spec.frame_ms),
             frame_time: Duration::from_millis(u64::from(spec.frame_ms)),
             next_tick: Instant::now(),
             decoded_frames: 0,
@@ -253,14 +379,12 @@ impl ActiveStream {
         })
     }
 
-    /// Feeds one raw payload into the jitter buffer.
+    /// Feeds one raw payload into the jitter buffer. The full payload
+    /// (header included) is stored so the capture timestamp survives
+    /// reordering and is available when the frame is popped (§9.1).
     fn push_packet(&mut self, payload: &[u8]) {
         match protocol::audio::decode(payload) {
-            Ok((header, frame)) => {
-                // capture_ts_ms is carried for future A/V lip-sync (§9.1);
-                // playback is clocked by the device for now.
-                self.jitter.push(header.seq, frame.to_vec());
-            }
+            Ok((header, _)) => self.jitter.push(header.seq, payload.to_vec()),
             Err(e) => warn!("bad audio datagram: {e}"),
         }
     }
@@ -271,9 +395,26 @@ impl ActiveStream {
         let Some(output) = self.jitter.pop() else {
             return; // still priming
         };
-        let packet = match &output {
-            JitterOutput::Packet(bytes) => Some(bytes.as_slice()),
-            JitterOutput::Plc => None,
+        let (packet, frame_ts) = match &output {
+            JitterOutput::Packet(bytes) => match protocol::audio::decode(bytes) {
+                Ok((header, frame)) => {
+                    self.last_frame_ts = Some(header.capture_ts_ms);
+                    (Some(frame), header.capture_ts_ms)
+                }
+                Err(e) => {
+                    warn!("bad audio datagram: {e}");
+                    return;
+                }
+            },
+            // PLC conceals a gap: the concealed samples fill the same time
+            // span, so their ts is the previous frame's plus one frame.
+            JitterOutput::Plc => {
+                let ts = self
+                    .last_frame_ts
+                    .map_or(0, |t| t.saturating_add(self.frame_ms));
+                self.last_frame_ts = Some(ts);
+                (None, ts)
+            }
         };
         match self.decoder.decode(packet, &mut self.pcm) {
             Ok(_) => {
@@ -283,6 +424,13 @@ impl ActiveStream {
                 self.decoded_frames += 1;
                 if let Some(buf) = &self.playback {
                     if let Ok(mut b) = buf.lock() {
+                        // Anchor before the push: after an underrun
+                        // overhang these samples play at the play
+                        // position, not at the queue tail (§9.1).
+                        if let Some(clock) = &mut self.clock_map {
+                            let pos = b.push_pos().max(b.play_pos());
+                            clock.push_anchor(pos, frame_ts);
+                        }
                         b.push(&self.pcm);
                     } else {
                         warn!("playback buffer poisoned; frame dropped");
@@ -291,6 +439,16 @@ impl ActiveStream {
                 // Null sink: decoded and counted, discarded.
             }
             Err(e) => warn!("audio decode failed: {e}"),
+        }
+        // Publish the audio cursor for the presentation loop (§9.1).
+        if let (Some(buf), Some(clock)) = (&self.playback, &mut self.clock_map)
+            && let Ok(b) = buf.lock()
+        {
+            let pos = b.play_pos();
+            clock.prune(pos);
+            if let Some(ts) = clock.ts_at(pos) {
+                self.now_ms.store(i64::from(ts), Ordering::Relaxed);
+            }
         }
         if self.last_log.elapsed() >= Duration::from_secs(5) {
             let stats = self.jitter.stats();
@@ -320,20 +478,21 @@ impl ActiveStream {
 
 /// Audio thread main loop: applies jobs and ticks the active stream once
 /// per frame duration (absolute pacing, like the server's audio thread).
-fn run(rx: &Receiver<AudioJob>) {
+/// Publishes the audio playback cursor (capture-clock ms) to `now_ms`.
+fn run(rx: &Receiver<AudioJob>, now_ms: &Arc<AtomicI64>) {
     let mut stream: Option<ActiveStream> = None;
     loop {
         let Some(st) = &mut stream else {
             // Nothing configured: block until the first job arrives.
             match rx.recv() {
-                Ok(job) => apply(&mut stream, job),
+                Ok(job) => apply(&mut stream, job, now_ms),
                 Err(_) => return, // client shutting down
             }
             continue;
         };
         let timeout = st.next_tick.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
-            Ok(job) => apply(&mut stream, job),
+            Ok(job) => apply(&mut stream, job, now_ms),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -347,9 +506,9 @@ fn run(rx: &Receiver<AudioJob>) {
     }
 }
 
-fn apply(stream: &mut Option<ActiveStream>, job: AudioJob) {
+fn apply(stream: &mut Option<ActiveStream>, job: AudioJob, now_ms: &Arc<AtomicI64>) {
     match job {
-        AudioJob::Config(spec) => *stream = ActiveStream::new(&spec),
+        AudioJob::Config(spec) => *stream = ActiveStream::new(&spec, Arc::clone(now_ms)),
         AudioJob::Packet(payload) => {
             if let Some(st) = stream {
                 st.push_packet(&payload);
@@ -544,6 +703,123 @@ mod tests {
         assert_eq!(buf.target_samples, 48_000 * 2 * 60 / 1000);
     }
 
+    #[test]
+    fn play_pos_tracks_consumed_drained_and_underrun() {
+        let mut buf = PlaybackBuffer::with_limits(10, 4);
+        assert_eq!(buf.play_pos(), 0);
+        assert_eq!(buf.push_pos(), 0);
+        buf.push(&[1, 2, 3]);
+        assert_eq!(buf.push_pos(), 3, "queued samples count as pushed");
+        assert_eq!(buf.pop_or_silence(), 1);
+        assert_eq!(buf.play_pos(), 1, "consumed sample advances the cursor");
+        // Drain: 12 pushed > 10 max → drains to 4, skipping 8-4=... : 12-4=8? No:
+        // 3+9=12 pushed total, drain 12-4=8 oldest, consumed 1 of them.
+        buf.push(&[0; 9]);
+        let drained = buf.drained_samples();
+        assert!(drained > 0);
+        assert_eq!(buf.play_pos(), 1 + drained, "drained samples skip the cursor");
+        // Underrun: empty the buffer, then pop silence.
+        while buf.len() > 0 {
+            buf.pop_or_silence();
+        }
+        let pos = buf.play_pos();
+        assert_eq!(buf.pop_or_silence(), 0);
+        assert_eq!(buf.play_pos(), pos + 1, "underrun advances the cursor in real time");
+    }
+
+    #[test]
+    fn clock_map_interpolates_between_anchors() {
+        // 48 kHz mono: 48 samples per ms.
+        let mut map = AudioClockMap::new(48_000, 1);
+        assert_eq!(map.ts_at(0), None, "no anchors, no clock");
+        map.push_anchor(0, 1_000);
+        map.push_anchor(960, 1_020); // one 20 ms frame later
+        assert_eq!(map.ts_at(0), Some(1_000));
+        assert_eq!(map.ts_at(480), Some(1_010));
+        assert_eq!(map.ts_at(960), Some(1_020));
+        // Past the last anchor (underrun): extrapolate forward.
+        assert_eq!(map.ts_at(1_920), Some(1_040));
+    }
+
+    #[test]
+    fn clock_map_extrapolates_backwards_before_first_anchor() {
+        let mut map = AudioClockMap::new(48_000, 1);
+        map.push_anchor(480, 1_000);
+        assert_eq!(map.ts_at(0), Some(990));
+        // Never below zero.
+        map.push_anchor(48_000, 500);
+        let mut map2 = AudioClockMap::new(48_000, 1);
+        map2.push_anchor(48_000, 500);
+        assert_eq!(map2.ts_at(0), Some(0));
+        drop(map);
+    }
+
+    #[test]
+    fn clock_map_prune_keeps_the_latest_relevant_anchor() {
+        let mut map = AudioClockMap::new(48_000, 1);
+        for i in 0..5u64 {
+            map.push_anchor(i * 960, 1_000 + u32::try_from(i).unwrap() * 20);
+        }
+        map.prune(2_000); // play cursor inside anchor 2's span
+        assert_eq!(map.anchors.len(), 3, "anchors 2..=4 survive");
+        map.prune(100_000);
+        assert_eq!(map.anchors.len(), 1, "the latest anchor is always kept");
+        assert_eq!(map.ts_at(100_000).unwrap(), 1_080 + (100_000 - 3_840) / 48);
+    }
+
+    /// The published audio cursor follows the play position: after three
+    /// priming frames (ts 0/20/40), consuming one frame of samples advances
+    /// `now_ms` by one frame (§9.1).
+    #[cfg(feature = "audio")]
+    #[test]
+    fn pump_publishes_audio_now_on_the_capture_clock() {
+        let spec = AudioSpec {
+            codec: AudioCodecType::Opus.wire_id(),
+            sample_rate: 48_000,
+            channels: 2,
+            bitrate_kbps: 64,
+            frame_ms: 20,
+            fec: false,
+        };
+        let now_ms = Arc::new(AtomicI64::new(-1));
+        let mut st = ActiveStream::new(&spec, Arc::clone(&now_ms)).unwrap();
+        // Headless CI has no output device; attach a buffer manually to
+        // exercise the clock mapping (the pump logic is device-independent).
+        let buf: SharedBuffer = Arc::new(Mutex::new(PlaybackBuffer::new(48_000, 2)));
+        st.playback = Some(Arc::clone(&buf));
+        st.clock_map = Some(AudioClockMap::new(48_000, 2));
+
+        let preset = AudioPreset::default();
+        let mut encoder = codec::build_audio_encoder(&preset).unwrap();
+        let pcm = vec![700i16; preset.frame_samples() * 2];
+        for seq in 0..3u32 {
+            let mut packet = Vec::new();
+            encoder.encode(&pcm, &mut packet).unwrap();
+            st.push_packet(&protocol::audio::encode(
+                protocol::audio::AudioHeader {
+                    seq,
+                    capture_ts_ms: seq * 20,
+                },
+                &packet,
+            ));
+        }
+        for _ in 0..3 {
+            st.tick();
+        }
+        // Primed: 3 frames (1920 samples × 2ch interleaved = 1920*2) queued,
+        // play cursor still at 0 → audio_now is the first frame's ts.
+        assert_eq!(st.now_ms.load(Ordering::Relaxed), 0);
+        // Consume exactly one frame (20 ms × 96 samples/ms stereo).
+        {
+            let mut b = buf.lock().unwrap();
+            for _ in 0..1_920 {
+                b.pop_or_silence();
+            }
+        }
+        st.tick();
+        assert_eq!(st.now_ms.load(Ordering::Relaxed), 20);
+    }
+
     /// An `AudioClient` disabled (or built without codec-opus) consumes
     /// packets and configs without decoding — the headless fallback.
     #[test]
@@ -578,6 +854,7 @@ mod tests {
         // counters instead of returning the stream (a cpal stream is not
         // guaranteed Send on every platform).
         let worker = std::thread::spawn(move || {
+            let now_ms = Arc::new(AtomicI64::new(-1));
             let mut stream: Option<ActiveStream> = None;
             while let Ok(job) = rx.recv() {
                 // An empty payload is the test's tick marker: real packets
@@ -592,7 +869,7 @@ mod tests {
                     }
                     continue;
                 }
-                apply(&mut stream, job);
+                apply(&mut stream, job, &now_ms);
             }
             (0, 0)
         });
@@ -637,6 +914,7 @@ mod tests {
         };
         let (tx, rx) = channel();
         let worker = std::thread::spawn(move || {
+            let now_ms = Arc::new(AtomicI64::new(-1));
             let mut stream: Option<ActiveStream> = None;
             while let Ok(job) = rx.recv() {
                 let is_tick = matches!(job, AudioJob::Packet(ref p) if p.is_empty());
@@ -649,7 +927,7 @@ mod tests {
                     }
                     continue;
                 }
-                apply(&mut stream, job);
+                apply(&mut stream, job, &now_ms);
             }
             (0, 0)
         });

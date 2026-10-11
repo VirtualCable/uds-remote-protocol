@@ -5,8 +5,10 @@ use crate::error::ProtocolError;
 /// Signature at the start of the handshake ("UDSRP/01").
 pub const HANDSHAKE_SIGNATURE: [u8; 8] = *b"UDSRP/01";
 
-/// Current protocol version.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Current protocol version. v2: the display fragment header carries
+/// `capture_ts_ms` (§9.1 A/V lip-sync); v1 peers misparse it, so the
+/// handshake rejects any version mismatch.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Session ticket length.
 pub const TICKET_LENGTH: usize = 48;

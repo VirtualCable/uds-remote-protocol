@@ -189,6 +189,9 @@ struct OwnedFrame {
     width: u32,
     height: u32,
     stride: usize,
+    /// Capture timestamp (ms on the session clock shared with audio) for
+    /// A/V lip-sync (§9.1); stamped by the capture thread.
+    capture_ts_ms: u32,
     data: Vec<u8>,
 }
 
@@ -197,8 +200,13 @@ struct OwnedFrame {
 ///
 /// The thread paces itself from `fps_shared` (updated live by the quality
 /// controller): DXGI already blocks up to `frame_time` waiting for desktop
-/// damage, so only the synthetic source sleeps explicitly.
-fn spawn_capture(args: &Args, fps_shared: Arc<AtomicU32>) -> mpsc::Receiver<CaptureMsg> {
+/// damage, so only the synthetic source sleeps explicitly. Frames are
+/// stamped with `clock_start`'s clock — the same one audio uses (§9.1).
+fn spawn_capture(
+    args: &Args,
+    fps_shared: Arc<AtomicU32>,
+    clock_start: Instant,
+) -> mpsc::Receiver<CaptureMsg> {
     let kind = args.source.clone();
     let (width, height, output) = (args.width, args.height, args.output);
     let (tx, rx) = mpsc::channel(2);
@@ -231,6 +239,7 @@ fn spawn_capture(args: &Args, fps_shared: Arc<AtomicU32>) -> mpsc::Receiver<Capt
                         width: f.width,
                         height: f.height,
                         stride: f.stride,
+                        capture_ts_ms: millis_since(clock_start),
                         data: f.data.to_vec(),
                     };
                     if tx.blocking_send(CaptureMsg::Frame(owned)).is_err() {
@@ -545,7 +554,8 @@ async fn handle_frame<T: ReliableTransport>(
     if packet.data.is_empty() {
         return Ok(frame_id); // rect codecs: nothing changed on this frame
     }
-    for frag in Fragmenter::split(0, frame_id, &packet.data) {
+    // Every fragment carries the frame's capture timestamp (§9.1).
+    for frag in Fragmenter::split(0, frame_id, frame.capture_ts_ms, &packet.data) {
         legs.send_fragment(&frag).await?;
     }
     Ok(frame_id.wrapping_add(1))
@@ -695,7 +705,7 @@ async fn serve<T: ReliableTransport>(
     let mut legs = Legs { udp, stream: Box::new(stream) };
 
     let fps_shared = Arc::new(AtomicU32::new(args.fps.max(1)));
-    let mut frame_rx = spawn_capture(args, Arc::clone(&fps_shared));
+    let mut frame_rx = spawn_capture(args, Arc::clone(&fps_shared), clock_start);
     let (width, height) = match frame_rx.recv().await {
         Some(CaptureMsg::Ready(r)) => r?,
         other => bail!("capture thread ended before reporting readiness ({other:?})"),

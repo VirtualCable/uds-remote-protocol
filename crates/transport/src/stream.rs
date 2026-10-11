@@ -144,6 +144,14 @@ impl<T: ReliableTransport> EncryptedStream<T> {
         let mut buf = [0u8; Hello::ENCODED_LEN];
         read_full(&mut inner, &mut buf).await?;
         let hello = Hello::decode(&buf)?;
+        // Wire formats differ between versions (v1→v2 changed the fragment
+        // header); a mismatching peer must fail loudly, never parse silently.
+        if hello.version != PROTOCOL_VERSION {
+            return Err(TransportError::VersionMismatch {
+                expected: PROTOCOL_VERSION,
+                got: hello.version,
+            });
+        }
         let keys = derive_session_keys(&hello.ticket, key)?;
         let mut stream = Self::with_keys(inner, &keys, Role::Server);
         stream.peer_hello = Some(hello);

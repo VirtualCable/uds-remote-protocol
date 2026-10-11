@@ -28,6 +28,16 @@ pub enum TransportError {
     /// Received a valid but unexpected control message at this point.
     #[error("unexpected control message: {0}")]
     UnexpectedMessage(String),
+    /// The peer's protocol version differs from ours. Wire formats change
+    /// between versions (e.g. v2 added `capture_ts_ms` to the fragment
+    /// header, §9.1), so a mismatch must fail loudly, never parse silently.
+    #[error("protocol version mismatch: peer speaks {got}, we speak {expected}")]
+    VersionMismatch {
+        /// Our protocol version.
+        expected: u16,
+        /// The peer's protocol version.
+        got: u16,
+    },
 }
 
 /// Standard result of the crate.

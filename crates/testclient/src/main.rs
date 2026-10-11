@@ -13,12 +13,13 @@
 mod audio;
 mod mic;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use client::avsync;
 use codec::{VideoCodecType, VideoDecoder};
 use protocol::fragment::Reassembler;
 use protocol::{self, ControlMessage, CursorMessage, InputMessage, PointerButton, channel};
@@ -327,6 +328,133 @@ impl Sink {
     }
 }
 
+/// A decoded frame waiting for the audio clock to catch up (§9.1).
+struct HeldFrame {
+    /// Present when `audio_now` reaches this capture timestamp (ms).
+    hold_until: u32,
+    frame: codec::DecodedFrame,
+}
+
+/// Presentation queue for held frames (§9.1): at most `MAX_HELD_FRAMES`;
+/// on overflow the oldest is dropped — stale video is worse than a skipped
+/// frame.
+struct PresentQueue {
+    frames: VecDeque<HeldFrame>,
+}
+
+/// Maximum frames waiting for presentation (§9.1: "a couple of frames").
+const MAX_HELD_FRAMES: usize = 3;
+
+impl PresentQueue {
+    fn new() -> Self {
+        Self {
+            frames: VecDeque::new(),
+        }
+    }
+
+    /// Holds a frame until the audio clock reaches `hold_until`.
+    fn hold(&mut self, hold_until: u32, frame: codec::DecodedFrame, stats: &mut avsync::SyncStats) {
+        stats.record_hold();
+        if self.frames.len() >= MAX_HELD_FRAMES {
+            self.frames.pop_front();
+            stats.record_overflow_drop();
+        }
+        self.frames.push_back(HeldFrame { hold_until, frame });
+    }
+
+    /// Presents every due frame; `audio_now` of `None` (audio clock gone)
+    /// flushes everything so video never stalls. Returns `false` when the
+    /// window was closed.
+    fn flush(
+        &mut self,
+        audio_now: Option<u32>,
+        sink: &mut Sink,
+        cursor: &ClientCursor,
+        stats: &mut avsync::SyncStats,
+    ) -> Result<bool> {
+        while let Some(front) = self.frames.front() {
+            let due = match audio_now {
+                Some(now) => front.hold_until <= now,
+                None => true,
+            };
+            if !due {
+                break;
+            }
+            let held = self.frames.pop_front().expect("front checked");
+            if let Some(now) = audio_now {
+                stats.record_present(i64::from(held.hold_until) - i64::from(now));
+            }
+            if !sink.push(&held.frame, cursor)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Applies the A/V sync decision (§9.1) to one freshly decoded frame.
+/// Returns `false` when the window was closed.
+fn present_or_hold(
+    frame: codec::DecodedFrame,
+    video_ts_ms: u32,
+    audio_client: &audio::AudioClient,
+    queue: &mut PresentQueue,
+    sink: &mut Sink,
+    cursor: &ClientCursor,
+    stats: &mut avsync::SyncStats,
+) -> Result<bool> {
+    let audio_now = audio_client.audio_now_ms();
+    match avsync::decide(video_ts_ms, audio_now.unwrap_or(0), audio_now.is_some()) {
+        avsync::PresentDecision::PresentNow => {
+            if let Some(now) = audio_now {
+                stats.record_present(i64::from(video_ts_ms) - i64::from(now));
+            }
+            sink.push(&frame, cursor)
+        }
+        avsync::PresentDecision::HoldUntil(ts) => {
+            queue.hold(ts, frame, stats);
+            Ok(true)
+        }
+        avsync::PresentDecision::Drop => {
+            stats.record_stale_drop();
+            Ok(true)
+        }
+    }
+}
+
+/// Presentation-queue pump (§9.1), driven by the input tick: presents due
+/// held frames and logs the sync stats every 5 s. Returns `false` when the
+/// window was closed.
+fn pump_avsync(
+    queue: &mut PresentQueue,
+    audio_client: &audio::AudioClient,
+    sink: &mut Sink,
+    cursor: &ClientCursor,
+    stats: &mut avsync::SyncStats,
+    last_log: &mut Instant,
+) -> Result<bool> {
+    let audio_now = audio_client.audio_now_ms();
+    if !queue.flush(audio_now, sink, cursor, stats)? {
+        info!("window closed");
+        return Ok(false);
+    }
+    if last_log.elapsed() >= Duration::from_secs(5) {
+        info!(
+            mode = if audio_now.is_some() { "audio" } else { "no-audio" },
+            presented = stats.presented,
+            held = stats.held,
+            dropped_stale = stats.dropped_stale,
+            dropped_overflow = stats.dropped_overflow,
+            skew_avg_ms = stats.skew_avg_ms(),
+            skew_max_abs_ms = stats.skew_max_abs_ms(),
+            "avsync"
+        );
+        stats.reset();
+        *last_log = Instant::now();
+    }
+    Ok(true)
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match Box::pin(run()).await {
@@ -384,13 +512,16 @@ async fn run() -> Result<()> {
     let mut input = InputPoll::new();
     let mut audio_client = audio::AudioClient::new(args.audio);
     let mut mic_client = mic::MicClient::new(args.mic, clock_start);
+    let mut present_queue = PresentQueue::new();
+    let mut avsync_stats = avsync::SyncStats::default();
+    let mut avsync_log = Instant::now();
     let mut selftest = args.selftest_input.then(SelfTest::new);
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
         tokio::select! {
             res = stream.recv_into(&mut buf) => {
                 let (ch, n) = res?;
-                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client, &mut mic_client)? {
+                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client, &mut mic_client, &mut present_queue, &mut avsync_stats)? {
                     return Ok(());
                 }
             }
@@ -405,6 +536,10 @@ async fn run() -> Result<()> {
                 }
             }
             _ = input_tick.tick() => {
+                // Present video frames whose audio-clock time has come (§9.1).
+                if !pump_avsync(&mut present_queue, &audio_client, &mut sink, &cursor, &mut avsync_stats, &mut avsync_log)? {
+                    return Ok(());
+                }
                 sink.pump_events();
                 for msg in input.poll(&sink) {
                     let (buf, n) = msg.encode();
@@ -463,6 +598,9 @@ async fn udp_session(
     let mut input = InputPoll::new();
     let mut audio_client = audio::AudioClient::new(args.audio);
     let mut mic_client = mic::MicClient::new(args.mic, clock_start);
+    let mut present_queue = PresentQueue::new();
+    let mut avsync_stats = avsync::SyncStats::default();
+    let mut avsync_log = Instant::now();
     let mut selftest = args.selftest_input.then(SelfTest::new);
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
@@ -485,7 +623,7 @@ async fn udp_session(
                     continue;
                 }
                 let lost = leg.dgram.lost_estimate();
-                if !handle_packet(ch, &buf[..n], lost, args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client, &mut mic_client)? {
+                if !handle_packet(ch, &buf[..n], lost, args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client, &mut mic_client, &mut present_queue, &mut avsync_stats)? {
                     return Ok(());
                 }
                 // Ask for a keyframe when the stream is broken (decode
@@ -537,6 +675,10 @@ async fn udp_session(
                 }
             }
             _ = input_tick.tick() => {
+                // Present video frames whose audio-clock time has come (§9.1).
+                if !pump_avsync(&mut present_queue, &audio_client, &mut sink, &cursor, &mut avsync_stats, &mut avsync_log)? {
+                    return Ok(());
+                }
                 // Input channel (§10): poll the window, send the diffs on
                 // the reliable stream. Events must be pumped even when the
                 // desktop is static (no frames → no render → no event pump).
@@ -772,6 +914,8 @@ fn handle_packet(
     cursor: &mut ClientCursor,
     audio_client: &mut audio::AudioClient,
     mic_client: &mut mic::MicClient,
+    present_queue: &mut PresentQueue,
+    avsync_stats: &mut avsync::SyncStats,
 ) -> Result<bool> {
     if ch == channel::CURSOR {
         match CursorMessage::decode(packet) {
@@ -872,8 +1016,19 @@ fn handle_packet(
                 recovery.awaiting = false;
                 // Only display 0 is rendered (multi-monitor arrives later,
                 // §8.3); other displays are still decoded to exercise the
-                // pipeline.
-                if complete.display_id == 0 && !sink.push(&frame, cursor)? {
+                // pipeline. Display 0 goes through the A/V sync decision
+                // (§9.1): present, hold for the audio clock, or drop.
+                if complete.display_id == 0
+                    && !present_or_hold(
+                        frame,
+                        complete.capture_ts_ms,
+                        audio_client,
+                        present_queue,
+                        sink,
+                        cursor,
+                        avsync_stats,
+                    )?
+                {
                     info!("window closed");
                     return Ok(false);
                 }

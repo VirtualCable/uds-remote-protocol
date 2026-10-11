@@ -10,3 +10,5 @@
 /// client for audio-out, the server for audio-in); re-exported here for
 /// existing client-side users.
 pub use protocol::jitter;
+
+pub mod avsync;

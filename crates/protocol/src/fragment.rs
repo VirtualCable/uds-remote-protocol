@@ -4,11 +4,13 @@
 //! datagrams, each carrying:
 //!
 //! ```text
-//! | display_id (1B) | frame_id (3B BE) | frag_idx (2B BE) | frag_count (2B BE) | chunk ... |
+//! | display_id (1B) | frame_id (3B BE) | frag_idx (2B BE) | frag_count (2B BE) | capture_ts_ms (4B BE) | chunk ... |
 //! ```
 //!
 //! - `display_id` is reserved for future multi-monitor (0 in phase 1).
 //! - `frame_id` is a 24-bit counter (wraps at 2^24).
+//! - `capture_ts_ms` is the frame's capture timestamp on the server's shared
+//!   session clock (ms), carried by every fragment for A/V lip-sync (§9.1).
 //! - If any fragment is missing, the whole frame is dropped: a half frame
 //!   never reaches the decoder.
 //! - Payload per fragment is capped so the full datagram stays within the
@@ -19,7 +21,7 @@ use std::collections::HashMap;
 use crate::error::ProtocolError;
 
 /// Fragment header size in bytes.
-pub const HEADER_SIZE: usize = 8;
+pub const HEADER_SIZE: usize = 12;
 
 /// Hard cap on datagram plaintext (must match `crypt::MAX_DATAGRAM_PAYLOAD`
 /// — kept as a literal so `protocol` does not depend on `crypt`).
@@ -36,9 +38,10 @@ pub struct Fragmenter;
 
 impl Fragmenter {
     /// Splits `element` (one encoded frame) into wire fragments for
-    /// `display_id`/`frame_id`. `frame_id` is truncated to 24 bits.
+    /// `display_id`/`frame_id`, all stamped with `capture_ts_ms` (ms on the
+    /// server's session clock, §9.1). `frame_id` is truncated to 24 bits.
     #[must_use]
-    pub fn split(display_id: u8, frame_id: u32, element: &[u8]) -> Vec<Vec<u8>> {
+    pub fn split(display_id: u8, frame_id: u32, capture_ts_ms: u32, element: &[u8]) -> Vec<Vec<u8>> {
         let chunk = fragment_payload_max();
         let count = element.len().div_ceil(chunk).max(1);
         let frame_id = frame_id & 0x00FF_FFFF;
@@ -53,6 +56,7 @@ impl Fragmenter {
                 frag.extend_from_slice(&frame_id.to_be_bytes()[1..]);
                 frag.extend_from_slice(&u16::try_from(idx).expect("idx < count ≤ u16").to_be_bytes());
                 frag.extend_from_slice(&count16.to_be_bytes());
+                frag.extend_from_slice(&capture_ts_ms.to_be_bytes());
                 frag.extend_from_slice(&element[start..end]);
                 frag
             })
@@ -67,6 +71,9 @@ pub struct ReassembledFrame {
     pub display_id: u8,
     /// 24-bit frame counter.
     pub frame_id: u32,
+    /// Capture timestamp (ms on the server's session clock) for A/V
+    /// lip-sync (§9.1).
+    pub capture_ts_ms: u32,
     /// The complete element (encoded frame).
     pub data: Vec<u8>,
 }
@@ -75,6 +82,7 @@ struct Partial {
     count: u16,
     received: u16,
     total_len: usize,
+    capture_ts_ms: u32,
     buf: Vec<u8>,
     present: Vec<bool>,
 }
@@ -146,6 +154,8 @@ impl Reassembler {
         let frame_id = u32::from_be_bytes([0, frag[1], frag[2], frag[3]]);
         let idx = u16::from_be_bytes(frag[4..6].try_into().expect("2-byte slice"));
         let count = u16::from_be_bytes(frag[6..8].try_into().expect("2-byte slice"));
+        let capture_ts_ms =
+            u32::from_be_bytes(frag[8..12].try_into().expect("4-byte slice"));
         let chunk = &frag[HEADER_SIZE..];
         if count == 0 || idx >= count || chunk.len() > fragment_payload_max() {
             return Err(ProtocolError::Truncated);
@@ -173,10 +183,11 @@ impl Reassembler {
             count,
             received: 0,
             total_len: 0,
+            capture_ts_ms,
             buf: vec![0u8; fragment_payload_max() * count as usize],
             present: vec![false; count as usize],
         });
-        if entry.count != count {
+        if entry.count != count || entry.capture_ts_ms != capture_ts_ms {
             // Inconsistent restatement of the same frame: drop it.
             self.partials.remove(&key);
             return Err(ProtocolError::Truncated);
@@ -198,6 +209,7 @@ impl Reassembler {
             return Ok(Some(ReassembledFrame {
                 display_id,
                 frame_id,
+                capture_ts_ms,
                 data,
             }));
         }

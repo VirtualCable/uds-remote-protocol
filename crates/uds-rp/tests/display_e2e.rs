@@ -47,7 +47,7 @@ fn roundtrip(
     let mut reasm = Reassembler::new();
 
     let packet = RawEncoder::new().encode(frame).expect("encode");
-    let frags = Fragmenter::split(0, frame_id, &packet.data);
+    let frags = Fragmenter::split(0, frame_id, 1_000, &packet.data);
     let mut decoded = None;
     for (i, frag) in frags.iter().enumerate() {
         if !frag_filter(i) {
@@ -57,6 +57,7 @@ fn roundtrip(
         let (ch, plain) = rx.decrypt(&dgram).expect("decrypt");
         assert_eq!(ch, channel::DISPLAY);
         if let Some(complete) = reasm.push(&plain).expect("reassemble") {
+            assert_eq!(complete.capture_ts_ms, 1_000, "capture ts survives the wire");
             decoded = Some(decode_frame(complete.data));
         }
     }
@@ -79,9 +80,10 @@ fn fragments_are_mtu_sized() {
     let mut src = SyntheticSource::new(320, 240);
     let frame = src.next_frame();
     let packet = RawEncoder::new().encode(&frame).expect("encode");
-    let frags = Fragmenter::split(0, 0, &packet.data);
-    // 320*240*4 + 8 bytes of raw header = 307208 B → 263 fragments of ≤1172 B.
-    assert_eq!(frags.len(), 263);
+    let frags = Fragmenter::split(0, 0, 0, &packet.data);
+    // 320*240*4 + 8 bytes of raw header = 307208 B → 264 fragments of ≤1168 B
+    // of payload (12-byte header since capture_ts_ms, §9.1).
+    assert_eq!(frags.len(), 264);
     assert!(
         frags
             .iter()
@@ -106,7 +108,7 @@ fn moderately_reordered_fragments_still_reassemble() {
     let mut reasm = Reassembler::new();
 
     let packet = RawEncoder::new().encode(&frame).expect("encode");
-    let frags = Fragmenter::split(0, 0, &packet.data);
+    let frags = Fragmenter::split(0, 0, 0, &packet.data);
     // Encrypt in order, deliver reversed within 32-datagram windows: a
     // realistic reorder distance, inside the anti-replay window (64).
     let dgrams: Vec<_> = frags
