@@ -1,11 +1,13 @@
 //! Audio capture abstraction (design doc §9).
 //!
-//! WASAPI loopback capture is deliberately NOT in this chunk: the
-//! [`AudioSource`] trait is the seam for it (a future `WasapiLoopbackSource`
-//! behind the `windows-capture` feature). For now the only implementation is
-//! [`SyntheticSource`], a two-tone generator that lets the whole audio path
-//! (Opus encode → datagram → jitter buffer → PLC → playback) be exercised
-//! end to end on any platform.
+//! [`AudioSource`] is the seam between the encoder loop and the capture
+//! backends: [`SyntheticSource`] (two-tone generator, every platform) and
+//! `audio_wasapi::WasapiLoopbackSource` (real desktop loopback, Windows with
+//! the `windows-capture` feature). The format adaptation they share (f32→i16
+//! conversion, remix, resampling, capture ring) lives in `audio_dsp`.
+//!
+//! [`SilenceGate`] implements the PoC-level DTX policy (§9.1): frames that
+//! are exact digital silence are sent only as keepalives.
 
 /// A source of audio frames: interleaved signed 16-bit PCM, exactly
 /// `frame_samples * channels` samples per frame.
@@ -24,7 +26,85 @@ pub trait AudioSource: Send {
     fn fill_frame(&mut self, out: &mut [i16]) -> anyhow::Result<()>;
 }
 
-/// Synthetic audio source: a two-tone sine (440 Hz left, 660 Hz right; 440 Hz
+/// Keepalive cadence for silent frames (PoC-level DTX, §9.1): one frame in
+/// every `SILENCE_KEEPALIVE_EVERY` is still sent while the source produces
+/// exact silence — at 20 ms frames that is 2 packets/s, enough to keep the
+/// client's jitter buffer alive and the UDP leg warm without spending
+/// bitrate on silence. The sequence counter does NOT advance for skipped
+/// frames (the client sees fewer frames, not losses).
+pub const SILENCE_KEEPALIVE_EVERY: u32 = 25;
+
+/// PoC-level discontinuous transmission (§9.1): a frame is "silent" when
+/// every sample is exactly zero — what WASAPI loopback delivers on an idle
+/// desktop (including its `AUDCLNT_BUFFERFLAGS_SILENT` packets, which the
+/// capture pipeline materializes as zeros). The first silent frame after
+/// activity always goes out (a clean silence onset), then one keepalive per
+/// `SILENCE_KEEPALIVE_EVERY` frames.
+#[derive(Debug, Default)]
+pub struct SilenceGate {
+    /// Consecutive silent frames seen so far.
+    silent_run: u32,
+}
+
+impl SilenceGate {
+    /// Creates a gate in the "activity" state (the first silent frame is
+    /// sent).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns true when this frame must be encoded and sent.
+    pub fn should_send(&mut self, frame: &[i16]) -> bool {
+        if frame.iter().any(|&s| s != 0) {
+            self.silent_run = 0;
+            return true;
+        }
+        self.silent_run = self.silent_run.saturating_add(1);
+        // Send the 1st silent frame, then every Nth (runs 1, 26, 51, ...).
+        (self.silent_run - 1).is_multiple_of(SILENCE_KEEPALIVE_EVERY)
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn non_silent_always_passes() {
+        let mut gate = SilenceGate::new();
+        let frame = [0i16, 5, 0];
+        for _ in 0..100 {
+            assert!(gate.should_send(&frame));
+        }
+    }
+
+    #[test]
+    fn silence_sends_first_then_every_nth() {
+        let mut gate = SilenceGate::new();
+        let silent = [0i16; 1920];
+        let sent = (0..100).filter(|_| gate.should_send(&silent)).count();
+        assert_eq!(sent, 4, "frames 1, 26, 51, 76 of 100");
+    }
+
+    #[test]
+    fn activity_resets_the_silent_run() {
+        let mut gate = SilenceGate::new();
+        let silent = [0i16; 960];
+        let tone = [1i16; 960];
+        assert!(gate.should_send(&silent)); // 1st: sent
+        for _ in 0..30 {
+            gate.should_send(&silent);
+        }
+        assert!(gate.should_send(&tone), "activity passes");
+        assert!(gate.should_send(&silent), "silence restarts: sent");
+        for _ in 0..24 {
+            assert!(!gate.should_send(&silent), "skipped until the keepalive");
+        }
+        assert!(gate.should_send(&silent), "keepalive 25 frames later");
+    }
+}
+
 /// everywhere in mono), with continuous phase across frames so no clicks
 /// appear at frame boundaries. Deterministic given the same shape.
 pub struct SyntheticSource {

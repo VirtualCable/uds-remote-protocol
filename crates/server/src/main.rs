@@ -5,18 +5,23 @@
 //!                 [--source synthetic|dxgi] [--output N]
 //!                 [--preset NAME] [--bitrate KBPS]
 //!                 [--width N] [--height N] [--fps N] [--max-frames N]
-//!                 [--audio-preset NAME] [--no-audio]`
+//!                 [--audio-preset NAME] [--audio-source auto|synthetic|wasapi]
+//!                 [--no-audio]`
 //!
 //! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`,
 //! `vp8-low-latency`); VP8/VP9 presets require the crate features
 //! `vp9`/`vp8`. The chosen codec/geometry is announced on the control
 //! channel (`DisplayInfo`) before the first frame.
 //!
-//! Audio (§9) is served by default: a synthetic two-tone source encoded with
-//! the Opus preset named by `--audio-preset` (a name from
-//! `codec::AUDIO_PRESETS`, default `opus-music`), one frame per datagram on
-//! channel `AUDIO_OUT`. `--no-audio` disables it. Real capture (WASAPI
-//! loopback) plugs into the `server::audio::AudioSource` trait later.
+//! Audio (§9) is served by default: one Opus frame (preset named by
+//! `--audio-preset`, a name from `codec::AUDIO_PRESETS`, default
+//! `opus-music`) per datagram on channel `AUDIO_OUT`. `--no-audio` disables
+//! it. `--audio-source` picks the capture: `wasapi` (real desktop loopback,
+//! Windows with the `windows-capture` feature), `synthetic` (two-tone
+//! generator) or `auto` (the default: WASAPI where available, synthetic
+//! elsewhere; a WASAPI init failure under `auto` falls back to synthetic
+//! with a warning, while an explicit `wasapi` failure disables audio with a
+//! loud error).
 //!
 //! The session ticket is printed on startup when not given; pass it to the
 //! test client with `--ticket`.
@@ -32,14 +37,14 @@ use codec::{AudioPreset, CodecPreset, VideoEncoder as _};
 use crypt::consts;
 use protocol::fragment::Fragmenter;
 use protocol::{self, ControlMessage, CursorMessage, Probe, ProbeAck, channel};
-use server::audio::AudioSource as _;
+use server::audio::AudioSource;
 use server::synthetic::SyntheticSource;
 use tokio::sync::mpsc;
 use transport::{
     DirectListener, EncryptedDatagram, EncryptedStream, ReliableTransport, UdpTransport,
     udp_offer,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 struct Args {
     bind: SocketAddr,
@@ -55,6 +60,7 @@ struct Args {
     max_frames: Option<u32>,
     audio: bool,
     audio_preset: String,
+    audio_source: String,
 }
 
 fn parse_args() -> Result<Args> {
@@ -72,6 +78,7 @@ fn parse_args() -> Result<Args> {
         max_frames: None,
         audio: true,
         audio_preset: "opus-music".to_string(),
+        audio_source: "auto".to_string(),
     };
     let mut key_seen = false;
     let mut it = std::env::args().skip(1);
@@ -97,6 +104,7 @@ fn parse_args() -> Result<Args> {
             "--fps" => args.fps = value.parse().context("bad --fps")?,
             "--max-frames" => args.max_frames = Some(value.parse().context("bad --max-frames")?),
             "--audio-preset" => args.audio_preset = value,
+            "--audio-source" => args.audio_source = value,
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -260,12 +268,19 @@ struct AudioPacket {
     data: Vec<u8>,
 }
 
-/// Spawns the audio pipeline thread (§9): synthetic source → Opus encoder →
-/// one message per frame, paced at the preset's frame duration.
+/// Spawns the audio pipeline thread (§9): source → silence gate (PoC DTX) →
+/// Opus encoder → one message per frame, paced at the preset's frame
+/// duration.
 ///
-/// Returns `None` (with a warning) when the codec is not compiled in — audio
-/// is best-effort and never kills the session.
-fn spawn_audio(preset: AudioPreset, clock_start: Instant) -> Option<mpsc::Receiver<AudioPacket>> {
+/// The source is created inside the thread (COM objects are bound to their
+/// apartment thread), which reports readiness back before this function
+/// returns: on init failure it returns `None` (audio disabled) instead of
+/// announcing a stream that would never send.
+fn spawn_audio(
+    preset: AudioPreset,
+    clock_start: Instant,
+    source_kind: &str,
+) -> Option<mpsc::Receiver<AudioPacket>> {
     let mut encoder = match codec::build_audio_encoder(&preset) {
         Ok(e) => e,
         Err(e) => {
@@ -273,11 +288,18 @@ fn spawn_audio(preset: AudioPreset, clock_start: Instant) -> Option<mpsc::Receiv
             return None;
         }
     };
-    let mut source =
-        server::audio::SyntheticSource::new(preset.sample_rate, preset.channels, preset.frame_samples());
+    let kind = source_kind.to_string();
     let (tx, rx) = mpsc::channel(8);
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
     let frame_time = Duration::from_millis(u64::from(preset.frame_ms));
     std::thread::spawn(move || {
+        let Some(mut source) = create_audio_source(&kind, &preset) else {
+            return; // readiness channel dropped: the caller sees the failure
+        };
+        if ready_tx.send(()).is_err() {
+            return; // session over while starting
+        }
+        let mut gate = server::audio::SilenceGate::new();
         let mut pcm = vec![0i16; preset.frame_samples() * usize::from(preset.channels)];
         let mut packet = Vec::with_capacity(512);
         let mut seq = 0u32;
@@ -293,29 +315,91 @@ fn spawn_audio(preset: AudioPreset, clock_start: Instant) -> Option<mpsc::Receiv
                 warn!("audio source failed: {e:#}");
                 return;
             }
-            packet.clear();
-            match encoder.encode(&pcm, &mut packet) {
-                Ok(_) => {
-                    let msg = AudioPacket {
-                        seq,
-                        capture_ts_ms: millis_since(clock_start),
-                        data: packet.clone(),
-                    };
-                    if tx.blocking_send(msg).is_err() {
-                        return; // session over
+            // PoC DTX (§9.1): silent frames go out only as keepalives, and
+            // skipped frames do not advance `seq` (the client sees fewer
+            // frames, not losses).
+            if gate.should_send(&pcm) {
+                packet.clear();
+                match encoder.encode(&pcm, &mut packet) {
+                    Ok(_) => {
+                        let msg = AudioPacket {
+                            seq,
+                            capture_ts_ms: millis_since(clock_start),
+                            data: packet.clone(),
+                        };
+                        if tx.blocking_send(msg).is_err() {
+                            return; // session over
+                        }
+                        seq = seq.wrapping_add(1);
                     }
-                    seq = seq.wrapping_add(1);
-                }
-                Err(e) => {
-                    warn!("audio encode failed: {e}");
-                    return;
+                    Err(e) => {
+                        warn!("audio encode failed: {e}");
+                        return;
+                    }
                 }
             }
             next_tick += frame_time;
             std::thread::sleep(next_tick.saturating_duration_since(Instant::now()));
         }
     });
+    // The thread always reports readiness (or dies trying, which drops the
+    // sender and errors the recv), so this cannot block forever.
+    ready_rx.recv().ok()?;
     Some(rx)
+}
+
+/// Resolves `--audio-source` (§9): `synthetic` is the two-tone generator,
+/// `wasapi` is real desktop loopback (Windows with the `windows-capture`
+/// feature) and `auto` prefers WASAPI with a synthetic fallback. An
+/// explicit `wasapi` that cannot start disables audio with a loud error — a
+/// silently-fake source would hide the misconfiguration.
+fn create_audio_source(kind: &str, preset: &AudioPreset) -> Option<Box<dyn AudioSource>> {
+    let synthetic = || {
+        Box::new(server::audio::SyntheticSource::new(
+            preset.sample_rate,
+            preset.channels,
+            preset.frame_samples(),
+        )) as Box<dyn AudioSource>
+    };
+    #[cfg(all(windows, feature = "windows-capture"))]
+    let wasapi = |explicit: bool| {
+        match server::audio_wasapi::WasapiLoopbackSource::new(
+            preset.sample_rate,
+            preset.channels,
+            preset.frame_samples(),
+        ) {
+            Ok(s) => Some(Box::new(s) as Box<dyn AudioSource>),
+            Err(e) => {
+                if explicit {
+                    error!("WASAPI loopback init failed; audio disabled: {e:#}");
+                } else {
+                    warn!("WASAPI loopback unavailable ({e:#}); falling back to synthetic audio");
+                }
+                None
+            }
+        }
+    };
+    match kind {
+        "synthetic" => Some(synthetic()),
+        #[cfg(all(windows, feature = "windows-capture"))]
+        "wasapi" => wasapi(true),
+        #[cfg(not(all(windows, feature = "windows-capture")))]
+        "wasapi" => {
+            error!("--audio-source wasapi needs Windows with the windows-capture feature; audio disabled");
+            None
+        }
+        "auto" => {
+            #[cfg(all(windows, feature = "windows-capture"))]
+            if let Some(s) = wasapi(false) {
+                return Some(s);
+            }
+            Some(synthetic())
+        }
+        other => {
+            warn!(%other, "unknown audio source; audio disabled");
+            None
+        }
+    }
 }
 
 /// Receives the next encoded audio frame; pends forever when audio is
@@ -475,8 +559,8 @@ fn new_injector() -> Box<dyn server::input::InputInjector> {
 /// Starts the audio pipeline (§9) and announces `AudioConfig` on the
 /// control channel. Returns the receiver of encoded frames plus the audio
 /// bitrate ceiling for quality targets (§12.5). Best-effort: an unknown
-/// preset or a missing codec feature disables audio with a warning instead
-/// of failing the session.
+/// preset, a missing codec feature or a source init failure disables audio
+/// with a warning instead of failing the session.
 async fn setup_audio<T: ReliableTransport>(
     args: &Args,
     legs: &mut Legs<T>,
@@ -489,7 +573,7 @@ async fn setup_audio<T: ReliableTransport>(
         warn!(preset = %args.audio_preset, "unknown audio preset; audio disabled");
         return Ok((None, AUDIO_CEILING_KBPS));
     };
-    let Some(rx) = spawn_audio(preset, clock_start) else {
+    let Some(rx) = spawn_audio(preset, clock_start, &args.audio_source) else {
         return Ok((None, AUDIO_CEILING_KBPS));
     };
     let cfg = ControlMessage::AudioConfig {
@@ -501,7 +585,7 @@ async fn setup_audio<T: ReliableTransport>(
         fec: preset.fec,
     };
     legs.send_control(&cfg.encode()?).await?;
-    info!(preset = %args.audio_preset, "audio announced (synthetic source)");
+    info!(preset = %args.audio_preset, source = %args.audio_source, "audio announced");
     Ok((Some(rx), preset.bitrate_kbps))
 }
 

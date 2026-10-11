@@ -9,6 +9,9 @@
 //! future without touching the core.
 
 pub mod audio;
+pub mod audio_dsp;
+#[cfg(all(windows, feature = "windows-capture"))]
+pub mod audio_wasapi;
 pub mod capture;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod dxgi;
