@@ -126,6 +126,18 @@ impl AudioEncoder for OpusEncoder {
             .map_err(|e| map_err(&e))
     }
 
+    fn set_fec(&mut self, enabled: bool) -> Result<()> {
+        self.inner.set_inband_fec(enabled).map_err(|e| map_err(&e))?;
+        if enabled {
+            // Tell the encoder how much loss to expect so it sizes the
+            // redundant copy (same hint as the preset-time setup).
+            self.inner
+                .set_packet_loss_perc(FEC_PACKET_LOSS_PERC)
+                .map_err(|e| map_err(&e))?;
+        }
+        Ok(())
+    }
+
     fn codec_type(&self) -> AudioCodecType {
         AudioCodecType::Opus
     }
@@ -303,6 +315,28 @@ mod tests {
             enc.inner.get_bitrate().unwrap(),
             ::opus::Bitrate::Bits(96_000)
         );
+    }
+
+    #[test]
+    fn set_fec_toggles_live_and_encoding_continues() {
+        // §12.5: the congestion controller flips FEC at runtime; the encoder
+        // must keep producing valid frames across the toggle.
+        let (mut enc, mut dec) = default_pair();
+        let pcm = vec![1_000i16; 960 * 2];
+        let mut packet = Vec::new();
+        enc.encode(&pcm, &mut packet).unwrap();
+        enc.set_fec(true).unwrap();
+        assert!(enc.inner.get_inband_fec().unwrap());
+        packet.clear();
+        enc.encode(&pcm, &mut packet).unwrap();
+        enc.set_fec(false).unwrap();
+        assert!(!enc.inner.get_inband_fec().unwrap());
+        packet.clear();
+        enc.encode(&pcm, &mut packet).unwrap();
+        // The decoder (never informed) still decodes: frames are
+        // self-describing, FEC is purely encoder-local.
+        let mut out = vec![0i16; 960 * 2];
+        assert_eq!(dec.decode(Some(&packet), &mut out).unwrap(), 960);
     }
 
     #[test]

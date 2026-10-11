@@ -286,7 +286,8 @@ struct AudioPacket {
 
 /// Spawns the audio pipeline thread (§9): source → silence gate (PoC DTX) →
 /// Opus encoder → one message per frame, paced at the preset's frame
-/// duration.
+/// duration. The congestion controller's knobs (§12.5) are applied to the
+/// encoder at frame boundaries.
 ///
 /// The source is created inside the thread (COM objects are bound to their
 /// apartment thread), which reports readiness back before this function
@@ -296,6 +297,7 @@ fn spawn_audio(
     preset: AudioPreset,
     clock_start: Instant,
     source_kind: &str,
+    control: server::audio::AudioControl,
 ) -> Option<mpsc::Receiver<AudioPacket>> {
     let mut encoder = match codec::build_audio_encoder(&preset) {
         Ok(e) => e,
@@ -319,6 +321,8 @@ fn spawn_audio(
         let mut pcm = vec![0i16; preset.frame_samples() * usize::from(preset.channels)];
         let mut packet = Vec::with_capacity(512);
         let mut seq = 0u32;
+        // Last control values applied to the encoder (§12.5).
+        let mut applied = (preset.bitrate_kbps, preset.fec);
         // Absolute pacing: accumulate the frame period instead of sleeping a
         // fixed duration, so encode time does not drift the audio clock.
         let mut next_tick = Instant::now();
@@ -327,6 +331,9 @@ fn spawn_audio(
             if tx.is_closed() {
                 return;
             }
+            // Congestion control (§12.5): apply pending bitrate/FEC changes
+            // at the frame boundary, before encoding.
+            server::audio::apply_control(&mut *encoder, &control, &mut applied);
             if let Err(e) = source.fill_frame(&mut pcm) {
                 warn!("audio source failed: {e:#}");
                 return;
@@ -431,13 +438,16 @@ async fn recv_audio(rx: &mut Option<mpsc::Receiver<AudioPacket>>) -> Option<Audi
 /// the active preset's bitrate is used when audio is on.
 const AUDIO_CEILING_KBPS: u32 = 64;
 
-/// Feeds one link-quality report into the quality controller and, when the
-/// level changes, applies the new targets: encoder bitrate, capture fps and
-/// the codec-ladder regime force (§12.5).
+/// Feeds one link-quality report into the quality controller. FEC reacts to
+/// the loss signal on every report (hysteresis, §12.5); when the level
+/// changes, the new targets are applied: video encoder bitrate, capture fps,
+/// codec-ladder regime force and the audio thread's bitrate knob (§12.5).
 #[allow(clippy::too_many_arguments)]
 fn handle_metrics(
     quality: &mut Option<protocol::QualityController>,
     forced_video: &mut bool,
+    audio_control: Option<&server::audio::AudioControl>,
+    fec_on: &mut bool,
     encoder: &mut ServerEncoder,
     fps_shared: &AtomicU32,
     video_ceiling_kbps: u32,
@@ -446,6 +456,16 @@ fn handle_metrics(
     jitter_micros: u64,
     loss_permille: u16,
 ) {
+    let loss = f64::from(loss_permille) / 1000.0;
+    // FEC is loss-driven, not level-driven: evaluate it on every report.
+    if let Some(ac) = audio_control {
+        let fec = protocol::fec_update(*fec_on, loss);
+        if fec != *fec_on {
+            *fec_on = fec;
+            ac.set_fec(fec);
+            info!(fec, loss_permille, "audio FEC toggled");
+        }
+    }
     let controller = quality.get_or_insert_with(|| {
         info!(baseline_rtt_micros = rtt_micros, "quality baseline set");
         protocol::QualityController::new(protocol::QualityPolicy::standard(rtt_micros))
@@ -453,7 +473,7 @@ fn handle_metrics(
     let sample = protocol::Sample {
         rtt_micros,
         jitter_micros,
-        loss: f64::from(loss_permille) / 1000.0,
+        loss,
     };
     let Some(event) = controller.update(Instant::now(), sample) else {
         return;
@@ -468,11 +488,16 @@ fn handle_metrics(
         level = event.level,
         degraded = event.degraded,
         video_kbps = t.video_kbps,
+        audio_kbps = t.audio_kbps,
         fps = t.fps,
         "quality level changed"
     );
     if let Err(e) = encoder.set_bitrate(t.video_kbps) {
         warn!("set_bitrate failed: {e}");
+    }
+    if let Some(ac) = audio_control {
+        // The audio thread applies the new target at the next frame (§12.5).
+        ac.set_target_kbps(t.audio_kbps);
     }
     fps_shared.store(t.fps, Ordering::Relaxed);
     match (event.force_video_codec, *forced_video) {
@@ -574,24 +599,31 @@ fn new_injector() -> Box<dyn server::input::InputInjector> {
 }
 
 /// Starts the audio pipeline (§9) and announces `AudioConfig` on the
-/// control channel. Returns the receiver of encoded frames plus the audio
-/// bitrate ceiling for quality targets (§12.5). Best-effort: an unknown
-/// preset, a missing codec feature or a source init failure disables audio
-/// with a warning instead of failing the session.
+/// control channel. Returns the receiver of encoded frames, the audio
+/// bitrate ceiling for quality targets (§12.5) and the control knobs the
+/// congestion controller writes to. Best-effort: an unknown preset, a
+/// missing codec feature or a source init failure disables audio with a
+/// warning instead of failing the session.
+#[allow(clippy::type_complexity)] // the tuple is the session's audio state
 async fn setup_audio<T: ReliableTransport>(
     args: &Args,
     legs: &mut Legs<T>,
     clock_start: Instant,
-) -> Result<(Option<mpsc::Receiver<AudioPacket>>, u32)> {
+) -> Result<(
+    Option<mpsc::Receiver<AudioPacket>>,
+    u32,
+    Option<server::audio::AudioControl>,
+)> {
     if !args.audio {
-        return Ok((None, AUDIO_CEILING_KBPS));
+        return Ok((None, AUDIO_CEILING_KBPS, None));
     }
     let Some(preset) = AudioPreset::by_name(&args.audio_preset) else {
         warn!(preset = %args.audio_preset, "unknown audio preset; audio disabled");
-        return Ok((None, AUDIO_CEILING_KBPS));
+        return Ok((None, AUDIO_CEILING_KBPS, None));
     };
-    let Some(rx) = spawn_audio(preset, clock_start, &args.audio_source) else {
-        return Ok((None, AUDIO_CEILING_KBPS));
+    let control = server::audio::AudioControl::new(preset.bitrate_kbps, preset.fec);
+    let Some(rx) = spawn_audio(preset, clock_start, &args.audio_source, control.clone()) else {
+        return Ok((None, AUDIO_CEILING_KBPS, None));
     };
     let cfg = ControlMessage::AudioConfig {
         codec: codec::AudioCodecType::Opus.wire_id(),
@@ -603,7 +635,7 @@ async fn setup_audio<T: ReliableTransport>(
     };
     legs.send_control(&cfg.encode()?).await?;
     info!(preset = %args.audio_preset, source = %args.audio_source, "audio announced");
-    Ok((Some(rx), preset.bitrate_kbps))
+    Ok((Some(rx), preset.bitrate_kbps, Some(control)))
 }
 
 /// Sets up the audio-in (client microphone) receiving path (§9.2).
@@ -717,7 +749,8 @@ async fn serve<T: ReliableTransport>(
 
     // Audio (§9): announced right after the display, only when the pipeline
     // actually started (best-effort: a missing codec feature disables it).
-    let (mut audio_rx, audio_ceiling_kbps) = setup_audio(args, &mut legs, clock_start).await?;
+    let (mut audio_rx, audio_ceiling_kbps, audio_control) =
+        setup_audio(args, &mut legs, clock_start).await?;
 
     // Audio-in (§9.2): client microphone. Announced only when a sink was
     // configured and the decode thread started; otherwise AUDIO_IN packets
@@ -736,6 +769,8 @@ async fn serve<T: ReliableTransport>(
         injector: new_injector(),
         video_ceiling_kbps: args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS),
         audio_ceiling_kbps,
+        audio_control,
+        fec_on: false,
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -855,9 +890,14 @@ struct ControlState {
     injector: Box<dyn server::input::InputInjector>,
     /// Negotiated video bitrate ceiling for quality targets.
     video_ceiling_kbps: u32,
-    /// Audio bitrate ceiling for quality targets (the active preset's
-    /// bitrate, §12.5).
+    /// Negotiated audio bitrate ceiling for quality targets (the active
+    /// preset's bitrate, §12.5).
     audio_ceiling_kbps: u32,
+    /// Control knobs of the audio encoder thread (§12.5); `None` when audio
+    /// is off.
+    audio_control: Option<server::audio::AudioControl>,
+    /// Current FEC state (for the loss hysteresis, §12.5).
+    fec_on: bool,
 }
 
 /// Handles one packet from the reliable stream: input events (§10) and
@@ -886,6 +926,8 @@ fn handle_stream_packet(
             handle_metrics(
                 &mut ctl.quality,
                 &mut ctl.forced_video,
+                ctl.audio_control.as_ref(),
+                &mut ctl.fec_on,
                 encoder,
                 fps_shared,
                 ctl.video_ceiling_kbps,

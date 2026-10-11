@@ -61,6 +61,12 @@ pub trait AudioEncoder: Send {
     /// backend allows it) for the adaptive bitrate controller (§12).
     fn set_bitrate_kbps(&mut self, kbps: u32) -> Result<()>;
 
+    /// Switches in-band FEC on/off (hot) for the congestion controller
+    /// (§12.5): on when the link shows real loss, off when it subsides.
+    /// Encoder-local: Opus frames are self-describing, the decoder needs no
+    /// announcement and simply uses the redundancy when it is present.
+    fn set_fec(&mut self, enabled: bool) -> Result<()>;
+
     /// Codec implemented by this encoder.
     fn codec_type(&self) -> AudioCodecType;
 

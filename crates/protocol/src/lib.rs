@@ -25,6 +25,6 @@ pub use hello::{Command, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION, TICKET_LE
 pub use input::{InputError, InputMessage, PointerButton};
 pub use probe::{Probe, ProbeAck, ProbeError, compute_rtt};
 pub use quality::{
-    LEVEL_DEGRADED, LEVEL_FULL, QualityController, QualityEvent, QualityLevel, QualityPolicy,
-    QualityTargets, Sample, targets,
+    FEC_OFF_LOSS, FEC_ON_LOSS, LEVEL_DEGRADED, LEVEL_FULL, QualityController, QualityEvent,
+    QualityLevel, QualityPolicy, QualityTargets, Sample, fec_update, targets,
 };

@@ -12,16 +12,23 @@
 //! | level | video bitrate | fps | audio bitrate |
 //! |-------|---------------|-----|---------------|
 //! | N0    | 100 %         | 30  | 100 %         |
-//! | N1    | 50 %          | 30  | 100 %         |
-//! | N2    | 25 %          | 30  | 100 %         |
-//! | N3    | 25 %          | 20  | 100 %         |
-//! | N4    | 25 %          | 15  | 100 %         |
-//! | N5    | floor         | 15  | floor         |
-//! | N6    | floor         | 10  | floor + reduced resolution |
+//! | N1    | 50 %          | 30  | 75 %          |
+//! | N2    | 25 %          | 30  | 62.5 %        |
+//! | N3    | 25 %          | 20  | 50 %          |
+//! | N4    | 25 %          | 15  | 37.5 %        |
+//! | N5    | 10 %          | 15  | 25 %          |
+//! | N6    | 10 %          | 10  | 18.75 % + reduced resolution |
+//!
+//! With the default ceilings that resolves to opus-music 64→48→40→32→24→16→12
+//! kbps and opus-voice 32→24→20→16→12→8→6 kbps (floor 6 kbps, §12.4).
 //!
 //! The bitrates are *factors* of the negotiated ceiling, clamped to the
 //! configured floors — absolute numbers belong to session policy, not to
 //! this controller.
+//!
+//! Independent of the level ladder, in-band FEC reacts directly to the loss
+//! signal with hysteresis (§12.5): on above [`FEC_ON_LOSS`], off below
+//! [`FEC_OFF_LOSS`], unchanged in between, so it never flaps.
 //!
 //! Congestion vs content regime: when the level drops at or below
 //! [`QualityPolicy::force_video_codec_at`], the event carries
@@ -85,7 +92,8 @@ pub struct QualityPolicy {
     pub force_video_codec_at: QualityLevel,
     /// Lowest video bitrate we ever apply (kbps, §12.4 floor).
     pub video_floor_kbps: u32,
-    /// Lowest audio bitrate we ever apply (kbps, §12.4 floor).
+    /// Lowest audio bitrate we ever apply (kbps, §12.4 floor; 6 is the
+    /// lowest sane Opus target).
     pub audio_floor_kbps: u32,
 }
 
@@ -107,7 +115,7 @@ impl QualityPolicy {
             raise_cooldown: Duration::from_secs(10),
             force_video_codec_at: 2,
             video_floor_kbps: 256,
-            audio_floor_kbps: 16,
+            audio_floor_kbps: 6,
         }
     }
 }
@@ -127,14 +135,32 @@ pub struct QualityEvent {
 /// The level ladder: `(video_bitrate_factor, fps, audio_bitrate_factor)`.
 /// Factors apply to the negotiated ceilings, clamped to the policy floors.
 const LADDER: [(f64, u32, f64); 7] = [
-    (1.00, 30, 1.0), // N0 full
-    (0.50, 30, 1.0), // N1 video 50 %
-    (0.25, 30, 1.0), // N2 video 25 % (+ force VP9)
-    (0.25, 20, 1.0), // N3 20 fps
-    (0.25, 15, 1.0), // N4 15 fps
-    (0.10, 15, 0.5), // N5 near the floors
-    (0.10, 10, 0.5), // N6 degraded (reduced resolution, §12.3 last resort)
+    (1.00, 30, 1.0),     // N0 full
+    (0.50, 30, 0.75),    // N1 video 50 %, audio 75 %
+    (0.25, 30, 0.625),   // N2 video 25 % (+ force VP9), audio 62.5 %
+    (0.25, 20, 0.5),     // N3 20 fps, audio 50 %
+    (0.25, 15, 0.375),   // N4 15 fps, audio 37.5 %
+    (0.10, 15, 0.25),    // N5 near the floors
+    (0.10, 10, 0.1875),  // N6 degraded (reduced resolution, §12.3 last resort)
 ];
+
+/// Loss rate above which in-band FEC is switched on (§12.5).
+pub const FEC_ON_LOSS: f64 = 0.02;
+
+/// Loss rate below which in-band FEC is switched off; the band between this
+/// and [`FEC_ON_LOSS`] keeps the previous state (hysteresis, no flapping).
+pub const FEC_OFF_LOSS: f64 = 0.005;
+
+/// FEC hysteresis (§12.5): enable in-band FEC when the loss rate exceeds
+/// [`FEC_ON_LOSS`], keep it until loss falls below [`FEC_OFF_LOSS`].
+#[must_use]
+pub fn fec_update(enabled: bool, loss: f64) -> bool {
+    if enabled {
+        loss >= FEC_OFF_LOSS
+    } else {
+        loss > FEC_ON_LOSS
+    }
+}
 
 /// Resolved targets for a level: absolute bitrates from ceiling + floors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,7 +542,7 @@ mod tests {
 
         let n5 = targets(5, 4_000, 64, &p);
         assert_eq!(n5.video_kbps, 400); // 10 % of ceiling, above the floor
-        assert_eq!(n5.audio_kbps, 32);
+        assert_eq!(n5.audio_kbps, 16); // 25 % of 64
 
         // A tiny ceiling clamps to the floors instead of going under.
         let floored = targets(5, 1_000, 24, &p);
@@ -526,5 +552,33 @@ mod tests {
         let n6 = targets(LEVEL_DEGRADED, 4_000, 64, &p);
         assert!(n6.degraded_resolution);
         assert_eq!(n6.fps, 10);
+    }
+
+    #[test]
+    fn audio_ladder_steps_down_with_the_level() {
+        // §12.5: opus-music (64k stereo ceiling) steps 64→48→40→32→24→16→12,
+        // opus-voice (32k ceiling) 32→24→20→16→12→8→6 — one factor ladder
+        // serves both presets; the floor (6 kbps here) is the last clamp.
+        let p = QualityPolicy { audio_floor_kbps: 6, ..policy() };
+        let music: Vec<u32> = (0..=6).map(|l| targets(l, 4_000, 64, &p).audio_kbps).collect();
+        assert_eq!(music, [64, 48, 40, 32, 24, 16, 12]);
+        let voice: Vec<u32> = (0..=6).map(|l| targets(l, 4_000, 32, &p).audio_kbps).collect();
+        assert_eq!(voice, [32, 24, 20, 16, 12, 8, 6]);
+        // Never above the ceiling, never below the floor.
+        let tiny: Vec<u32> = (0..=6).map(|l| targets(l, 4_000, 7, &p).audio_kbps).collect();
+        assert!(tiny.iter().all(|&k| (6..=7).contains(&k)), "{tiny:?}");
+    }
+
+    #[test]
+    fn fec_hysteresis_never_flaps() {
+        // Off below the band, on above it, sticky inside it (§12.5).
+        assert!(!fec_update(false, 0.0));
+        assert!(!fec_update(false, 0.01), "1 % loss is below the on threshold");
+        assert!(!fec_update(false, FEC_ON_LOSS), "exactly at the threshold stays off");
+        assert!(fec_update(false, 0.03));
+        assert!(fec_update(true, 0.01), "inside the band FEC stays on");
+        assert!(!fec_update(false, 0.01), "inside the band FEC stays off");
+        assert!(!fec_update(true, 0.004));
+        assert!(!fec_update(true, 0.0));
     }
 }

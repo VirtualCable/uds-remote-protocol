@@ -66,6 +66,134 @@ impl SilenceGate {
     }
 }
 
+/// Shared congestion-control knobs for the audio encoder thread (§12.5).
+///
+/// The async control loop (owner of the `QualityController`) writes; the
+/// audio thread, which owns the encoder, reads and applies at frame
+/// boundaries — the same shared-atomic mechanism the capture thread uses
+/// for `fps`. Bitrate is capped by the negotiated ceiling at the writer
+/// side (`protocol::targets`); the floor (6 kbps) comes from the policy.
+#[derive(Clone, Debug)]
+pub struct AudioControl {
+    /// Target encoder bitrate in kbps.
+    pub target_kbps: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// In-band FEC on/off (loss-driven, with hysteresis — §12.5).
+    pub fec: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl AudioControl {
+    /// Creates the knobs at the preset's initial values.
+    #[must_use]
+    pub fn new(target_kbps: u32, fec: bool) -> Self {
+        Self {
+            target_kbps: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(target_kbps)),
+            fec: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(fec)),
+        }
+    }
+
+    /// Stores a new target bitrate (kbps).
+    pub fn set_target_kbps(&self, kbps: u32) {
+        self.target_kbps
+            .store(kbps, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Stores the FEC switch.
+    pub fn set_fec(&self, enabled: bool) {
+        self.fec.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Applies pending control changes to `encoder`, updating `applied`
+/// (`(kbps, fec)` last applied). Encoder calls happen only on change, so
+/// this is safe to call once per frame (§12.5). Failures are logged and the
+/// new value is still recorded as applied (retrying a rejected knob every
+/// frame would spam; the next change retries it).
+pub fn apply_control(
+    encoder: &mut dyn codec::AudioEncoder,
+    control: &AudioControl,
+    applied: &mut (u32, bool),
+) {
+    use std::sync::atomic::Ordering;
+    use tracing::{info, warn};
+
+    let kbps = control.target_kbps.load(Ordering::Relaxed);
+    if kbps != applied.0 {
+        match encoder.set_bitrate_kbps(kbps) {
+            Ok(()) => info!(kbps, "audio bitrate applied"),
+            Err(e) => warn!(kbps, "audio set_bitrate failed: {e}"),
+        }
+        applied.0 = kbps;
+    }
+    let fec = control.fec.load(Ordering::Relaxed);
+    if fec != applied.1 {
+        match encoder.set_fec(fec) {
+            Ok(()) => info!(fec, "audio FEC applied"),
+            Err(e) => warn!(fec, "audio set_fec failed: {e}"),
+        }
+        applied.1 = fec;
+    }
+}
+
+#[cfg(test)]
+mod control_tests {
+    use super::*;
+
+    /// Records the control calls instead of encoding.
+    struct MockEncoder {
+        calls: Vec<(u32, bool)>,
+    }
+
+    impl codec::AudioEncoder for MockEncoder {
+        fn encode(&mut self, _pcm: &[i16], _out: &mut Vec<u8>) -> codec::Result<usize> {
+            Ok(0)
+        }
+        fn set_bitrate_kbps(&mut self, kbps: u32) -> codec::Result<()> {
+            self.calls.push((kbps, false));
+            Ok(())
+        }
+        fn set_fec(&mut self, enabled: bool) -> codec::Result<()> {
+            self.calls.push((0, enabled));
+            Ok(())
+        }
+        fn codec_type(&self) -> codec::AudioCodecType {
+            codec::AudioCodecType::Opus
+        }
+        fn sample_rate(&self) -> u32 {
+            48_000
+        }
+        fn channels(&self) -> u8 {
+            2
+        }
+        fn frame_samples(&self) -> usize {
+            960
+        }
+    }
+
+    #[test]
+    fn applies_only_on_change() {
+        let control = AudioControl::new(64, false);
+        let mut enc = MockEncoder { calls: Vec::new() };
+        let mut applied = (64, false);
+        // Nothing pending: no encoder calls.
+        apply_control(&mut enc, &control, &mut applied);
+        assert!(enc.calls.is_empty());
+        // New bitrate: exactly one call.
+        control.set_target_kbps(32);
+        apply_control(&mut enc, &control, &mut applied);
+        assert_eq!(enc.calls, [(32, false)]);
+        // Same value again: no repeat.
+        apply_control(&mut enc, &control, &mut applied);
+        assert_eq!(enc.calls.len(), 1);
+        // FEC on, then off: two calls.
+        control.set_fec(true);
+        apply_control(&mut enc, &control, &mut applied);
+        control.set_fec(false);
+        apply_control(&mut enc, &control, &mut applied);
+        assert_eq!(enc.calls, [(32, false), (0, true), (0, false)]);
+        assert_eq!(applied, (32, false));
+    }
+}
+
 #[cfg(test)]
 mod gate_tests {
     use super::*;
