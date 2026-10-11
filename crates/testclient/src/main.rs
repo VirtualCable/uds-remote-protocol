@@ -2,10 +2,14 @@
 //!
 //! Minimal development binary to exercise the framework end to end
 //! (direct connection, no gateway). Renders the display channel with
-//! minifb, or runs `--headless` to validate the pipeline without a GUI.
+//! minifb, plays the audio channel (§9) through the default output device
+//! (feature `audio`, on by default), or runs `--headless` to validate the
+//! pipeline without a GUI.
 //!
 //! Usage: `testclient --key <hex64> --ticket <hex96> [--addr host:port]
-//!                     [--headless] [--max-frames N]`
+//!                     [--headless] [--max-frames N] [--no-audio]`
+
+mod audio;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -28,6 +32,8 @@ struct Args {
     /// Scripted input sequence for E2E tests (§10): sends moves, clicks and
     /// keys on a fixed schedule, independent of the local windowing system.
     selftest_input: bool,
+    /// Audio playback (§9); disabled with `--no-audio`.
+    audio: bool,
 }
 
 /// One scripted input action for `--selftest-input`.
@@ -85,6 +91,7 @@ fn parse_args() -> Result<Args> {
         headless: false,
         max_frames: None,
         selftest_input: false,
+        audio: true,
     };
     let mut key_seen = false;
     let mut ticket_seen = false;
@@ -96,6 +103,10 @@ fn parse_args() -> Result<Args> {
         }
         if arg == "--selftest-input" {
             args.selftest_input = true;
+            continue;
+        }
+        if arg == "--no-audio" {
+            args.audio = false;
             continue;
         }
         let value = it.next().context(format!("missing value for {arg}"))?;
@@ -358,13 +369,14 @@ async fn run() -> Result<()> {
     let mut recovery = DecodeRecovery::default();
     let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
+    let mut audio_client = audio::AudioClient::new(args.audio);
     let mut selftest = args.selftest_input.then(SelfTest::new);
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
         tokio::select! {
             res = stream.recv_into(&mut buf) => {
                 let (ch, n) = res?;
-                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor)? {
+                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client)? {
                     return Ok(());
                 }
             }
@@ -422,6 +434,7 @@ async fn udp_session(
     let mut recovery = DecodeRecovery::default();
     let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
+    let mut audio_client = audio::AudioClient::new(args.audio);
     let mut selftest = args.selftest_input.then(SelfTest::new);
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
@@ -444,7 +457,7 @@ async fn udp_session(
                     continue;
                 }
                 let lost = leg.dgram.lost_estimate();
-                if !handle_packet(ch, &buf[..n], lost, args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor)? {
+                if !handle_packet(ch, &buf[..n], lost, args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client)? {
                     return Ok(());
                 }
                 // Ask for a keyframe when the stream is broken (decode
@@ -718,6 +731,7 @@ fn handle_packet(
     sink: &mut Sink,
     recovery: &mut DecodeRecovery,
     cursor: &mut ClientCursor,
+    audio_client: &mut audio::AudioClient,
 ) -> Result<bool> {
     if ch == channel::CURSOR {
         match CursorMessage::decode(packet) {
@@ -726,25 +740,52 @@ fn handle_packet(
         }
         return Ok(true);
     }
-    if ch == channel::CONTROL
-        && let Ok(ControlMessage::DisplayInfo {
-            display_id,
-            width,
-            height,
-            codec,
-        }) = ControlMessage::decode(packet)
-    {
-        match VideoCodecType::from_wire_id(codec)
-            .map(codec::build_decoder)
-            .transpose()
-        {
-            Ok(Some(dec)) => {
-                info!(display_id, width, height, codec, "display announced");
-                decoders.insert(display_id, dec);
+    if ch == channel::AUDIO_OUT {
+        // Audio (§9): the audio thread owns jitter buffer, decoder and
+        // playback; the receive loop only forwards raw payloads.
+        audio_client.feed(packet);
+        return Ok(true);
+    }
+    if ch == channel::CONTROL {
+        match ControlMessage::decode(packet) {
+            Ok(ControlMessage::DisplayInfo {
+                display_id,
+                width,
+                height,
+                codec,
+            }) => {
+                match VideoCodecType::from_wire_id(codec)
+                    .map(codec::build_decoder)
+                    .transpose()
+                {
+                    Ok(Some(dec)) => {
+                        info!(display_id, width, height, codec, "display announced");
+                        decoders.insert(display_id, dec);
+                    }
+                    Ok(None) => warn!(codec, "unknown codec id; frames will be dropped"),
+                    Err(e) => warn!(codec, "cannot build decoder: {e}"),
+                }
             }
-            Ok(None) => warn!(codec, "unknown codec id; frames will be dropped"),
-            Err(e) => warn!(codec, "cannot build decoder: {e}"),
+            Ok(ControlMessage::AudioConfig {
+                codec,
+                sample_rate,
+                channels,
+                bitrate_kbps,
+                frame_ms,
+                fec,
+            }) => {
+                audio_client.configure(audio::AudioSpec {
+                    codec,
+                    sample_rate,
+                    channels,
+                    bitrate_kbps,
+                    frame_ms,
+                    fec,
+                });
+            }
+            _ => {}
         }
+        return Ok(true);
     }
     if ch == channel::DISPLAY
         && let Some(complete) = reasm.push(packet)?
@@ -808,7 +849,7 @@ mod tests {
         let mut px = vec![0x0000_0000u32]; // black 1x1
         overlay_cursor(&mut px, 1, 1, &shape_1px(255, 0, 0, 128), 0, 0);
         // ~50% red over black
-        assert_eq!(px[0], (128 << 16) | 0);
+        assert_eq!(px[0], 128 << 16);
     }
 
     #[test]

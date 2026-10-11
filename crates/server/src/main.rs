@@ -4,12 +4,19 @@
 //! Usage: `server --key <hex64> [--ticket <hex96>] [--bind host:port]
 //!                 [--source synthetic|dxgi] [--output N]
 //!                 [--preset NAME] [--bitrate KBPS]
-//!                 [--width N] [--height N] [--fps N] [--max-frames N]`
+//!                 [--width N] [--height N] [--fps N] [--max-frames N]
+//!                 [--audio-preset NAME] [--no-audio]`
 //!
 //! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`,
 //! `vp8-low-latency`); VP8/VP9 presets require the crate features
 //! `vp9`/`vp8`. The chosen codec/geometry is announced on the control
 //! channel (`DisplayInfo`) before the first frame.
+//!
+//! Audio (§9) is served by default: a synthetic two-tone source encoded with
+//! the Opus preset named by `--audio-preset` (a name from
+//! `codec::AUDIO_PRESETS`, default `opus-music`), one frame per datagram on
+//! channel `AUDIO_OUT`. `--no-audio` disables it. Real capture (WASAPI
+//! loopback) plugs into the `server::audio::AudioSource` trait later.
 //!
 //! The session ticket is printed on startup when not given; pass it to the
 //! test client with `--ticket`.
@@ -21,10 +28,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use codec::{CodecPreset, VideoEncoder as _};
+use codec::{AudioPreset, CodecPreset, VideoEncoder as _};
 use crypt::consts;
 use protocol::fragment::Fragmenter;
 use protocol::{self, ControlMessage, CursorMessage, Probe, ProbeAck, channel};
+use server::audio::AudioSource as _;
 use server::synthetic::SyntheticSource;
 use tokio::sync::mpsc;
 use transport::{
@@ -45,6 +53,8 @@ struct Args {
     height: u32,
     fps: u32,
     max_frames: Option<u32>,
+    audio: bool,
+    audio_preset: String,
 }
 
 fn parse_args() -> Result<Args> {
@@ -60,10 +70,16 @@ fn parse_args() -> Result<Args> {
         height: 480,
         fps: 30,
         max_frames: None,
+        audio: true,
+        audio_preset: "opus-music".to_string(),
     };
     let mut key_seen = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
+        if arg == "--no-audio" {
+            args.audio = false;
+            continue;
+        }
         let value = it.next().context(format!("missing value for {arg}"))?;
         match arg.as_str() {
             "--bind" => args.bind = value.parse().context("bad --bind")?,
@@ -80,6 +96,7 @@ fn parse_args() -> Result<Args> {
             "--height" => args.height = value.parse().context("bad --height")?,
             "--fps" => args.fps = value.parse().context("bad --fps")?,
             "--max-frames" => args.max_frames = Some(value.parse().context("bad --max-frames")?),
+            "--audio-preset" => args.audio_preset = value,
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -109,6 +126,15 @@ impl<T: ReliableTransport> Legs<T> {
         match &mut self.udp {
             Some(d) => d.send(channel::CONTROL, msg).await,
             None => self.stream.send(channel::CONTROL, msg).await,
+        }
+    }
+
+    /// Audio datagrams (§9): one Opus frame per datagram on `AUDIO_OUT`,
+    /// over the UDP leg when present, else the reliable stream fallback.
+    async fn send_audio(&mut self, payload: &[u8]) -> transport::Result<()> {
+        match &mut self.udp {
+            Some(d) => d.send(channel::AUDIO_OUT, payload).await,
+            None => self.stream.send(channel::AUDIO_OUT, payload).await,
         }
     }
 
@@ -219,8 +245,90 @@ fn micros_since(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Audio channel is not wired yet (§9); nominal Opus ceiling for quality
-/// targets (§12.5).
+fn millis_since(start: Instant) -> u32 {
+    u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX)
+}
+
+/// One encoded audio frame crossing the audio-thread boundary.
+#[derive(Debug)]
+struct AudioPacket {
+    /// Per-session sender counter for the client's jitter buffer (§9).
+    seq: u32,
+    /// Capture timestamp (ms since session start) for A/V lip-sync (§9.1).
+    capture_ts_ms: u32,
+    /// The encoded Opus frame.
+    data: Vec<u8>,
+}
+
+/// Spawns the audio pipeline thread (§9): synthetic source → Opus encoder →
+/// one message per frame, paced at the preset's frame duration.
+///
+/// Returns `None` (with a warning) when the codec is not compiled in — audio
+/// is best-effort and never kills the session.
+fn spawn_audio(preset: AudioPreset, clock_start: Instant) -> Option<mpsc::Receiver<AudioPacket>> {
+    let mut encoder = match codec::build_audio_encoder(&preset) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(preset = preset.bitrate_kbps, "audio disabled: {e}");
+            return None;
+        }
+    };
+    let mut source =
+        server::audio::SyntheticSource::new(preset.sample_rate, preset.channels, preset.frame_samples());
+    let (tx, rx) = mpsc::channel(8);
+    let frame_time = Duration::from_millis(u64::from(preset.frame_ms));
+    std::thread::spawn(move || {
+        let mut pcm = vec![0i16; preset.frame_samples() * usize::from(preset.channels)];
+        let mut packet = Vec::with_capacity(512);
+        let mut seq = 0u32;
+        // Absolute pacing: accumulate the frame period instead of sleeping a
+        // fixed duration, so encode time does not drift the audio clock.
+        let mut next_tick = Instant::now();
+        loop {
+            // Same liveness rule as the capture thread: die with the session.
+            if tx.is_closed() {
+                return;
+            }
+            if let Err(e) = source.fill_frame(&mut pcm) {
+                warn!("audio source failed: {e:#}");
+                return;
+            }
+            packet.clear();
+            match encoder.encode(&pcm, &mut packet) {
+                Ok(_) => {
+                    let msg = AudioPacket {
+                        seq,
+                        capture_ts_ms: millis_since(clock_start),
+                        data: packet.clone(),
+                    };
+                    if tx.blocking_send(msg).is_err() {
+                        return; // session over
+                    }
+                    seq = seq.wrapping_add(1);
+                }
+                Err(e) => {
+                    warn!("audio encode failed: {e}");
+                    return;
+                }
+            }
+            next_tick += frame_time;
+            std::thread::sleep(next_tick.saturating_duration_since(Instant::now()));
+        }
+    });
+    Some(rx)
+}
+
+/// Receives the next encoded audio frame; pends forever when audio is
+/// disabled, so it can sit in a `select!` branch.
+async fn recv_audio(rx: &mut Option<mpsc::Receiver<AudioPacket>>) -> Option<AudioPacket> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Fallback audio ceiling for quality targets when audio is off (§12.5);
+/// the active preset's bitrate is used when audio is on.
 const AUDIO_CEILING_KBPS: u32 = 64;
 
 /// Feeds one link-quality report into the quality controller and, when the
@@ -233,6 +341,7 @@ fn handle_metrics(
     encoder: &mut ServerEncoder,
     fps_shared: &AtomicU32,
     video_ceiling_kbps: u32,
+    audio_ceiling_kbps: u32,
     rtt_micros: u64,
     jitter_micros: u64,
     loss_permille: u16,
@@ -252,7 +361,7 @@ fn handle_metrics(
     let t = protocol::targets(
         event.level,
         video_ceiling_kbps,
-        AUDIO_CEILING_KBPS,
+        audio_ceiling_kbps,
         controller.policy(),
     );
     info!(
@@ -363,6 +472,39 @@ fn new_injector() -> Box<dyn server::input::InputInjector> {
     Box::new(server::input::LogInjector::default())
 }
 
+/// Starts the audio pipeline (§9) and announces `AudioConfig` on the
+/// control channel. Returns the receiver of encoded frames plus the audio
+/// bitrate ceiling for quality targets (§12.5). Best-effort: an unknown
+/// preset or a missing codec feature disables audio with a warning instead
+/// of failing the session.
+async fn setup_audio<T: ReliableTransport>(
+    args: &Args,
+    legs: &mut Legs<T>,
+    clock_start: Instant,
+) -> Result<(Option<mpsc::Receiver<AudioPacket>>, u32)> {
+    if !args.audio {
+        return Ok((None, AUDIO_CEILING_KBPS));
+    }
+    let Some(preset) = AudioPreset::by_name(&args.audio_preset) else {
+        warn!(preset = %args.audio_preset, "unknown audio preset; audio disabled");
+        return Ok((None, AUDIO_CEILING_KBPS));
+    };
+    let Some(rx) = spawn_audio(preset, clock_start) else {
+        return Ok((None, AUDIO_CEILING_KBPS));
+    };
+    let cfg = ControlMessage::AudioConfig {
+        codec: codec::AudioCodecType::Opus.wire_id(),
+        sample_rate: preset.sample_rate,
+        channels: preset.channels,
+        bitrate_kbps: preset.bitrate_kbps,
+        frame_ms: preset.frame_ms,
+        fec: preset.fec,
+    };
+    legs.send_control(&cfg.encode()?).await?;
+    info!(preset = %args.audio_preset, "audio announced (synthetic source)");
+    Ok((Some(rx), preset.bitrate_kbps))
+}
+
 async fn serve<T: ReliableTransport>(
     raw: T,
     ticket: &[u8; protocol::TICKET_LENGTH],
@@ -408,6 +550,10 @@ async fn serve<T: ReliableTransport>(
     // Announce the display codec/geometry before the first frame (§8.3/§8.4).
     announce_display(&mut legs, &mut encoder, width, height).await?;
 
+    // Audio (§9): announced right after the display, only when the pipeline
+    // actually started (best-effort: a missing codec feature disables it).
+    let (mut audio_rx, audio_ceiling_kbps) = setup_audio(args, &mut legs, clock_start).await?;
+
     // Link-quality state (§12): created on the first MetricsReport, with the
     // first reported RTT as the baseline.
     let mut ctl = ControlState {
@@ -416,12 +562,15 @@ async fn serve<T: ReliableTransport>(
         last_keyframe_req: None,
         injector: new_injector(),
         video_ceiling_kbps: args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS),
+        audio_ceiling_kbps,
     };
 
     let mut udp_buf = vec![0u8; 2048];
     // Sized for the largest stream record (~64 KiB): cursor shapes (§10)
     // can be a few KiB.
     let mut ctrl_buf = vec![0u8; 65_536];
+    // Reusable buffer for audio datagram payloads (header + Opus frame).
+    let mut audio_buf = Vec::with_capacity(1024);
     let mut frame_id = 0u32;
     loop {
         tokio::select! {
@@ -439,6 +588,26 @@ async fn serve<T: ReliableTransport>(
                         send_cursor_update(&mut legs, &update).await?;
                     }
                     other => bail!("capture thread ended ({other:?})"),
+                }
+            }
+            msg = recv_audio(&mut audio_rx) => {
+                if let Some(packet) = msg {
+                    audio_buf.clear();
+                    protocol::audio::encode_into(
+                        protocol::audio::AudioHeader {
+                            seq: packet.seq,
+                            capture_ts_ms: packet.capture_ts_ms,
+                        },
+                        &packet.data,
+                        &mut audio_buf,
+                    );
+                    legs.send_audio(&audio_buf).await?;
+                } else {
+                    // The audio thread died (encode/source failure): log
+                    // once and disable the branch (None would re-fire
+                    // immediately, spinning the loop).
+                    warn!("audio thread ended; audio disabled for this session");
+                    audio_rx = None;
                 }
             }
             res = recv_udp(&mut legs.udp, &mut udp_buf) => {
@@ -507,6 +676,9 @@ struct ControlState {
     injector: Box<dyn server::input::InputInjector>,
     /// Negotiated video bitrate ceiling for quality targets.
     video_ceiling_kbps: u32,
+    /// Audio bitrate ceiling for quality targets (the active preset's
+    /// bitrate, §12.5).
+    audio_ceiling_kbps: u32,
 }
 
 /// Handles one packet from the reliable stream: input events (§10) and
@@ -538,6 +710,7 @@ fn handle_stream_packet(
                 encoder,
                 fps_shared,
                 ctl.video_ceiling_kbps,
+                ctl.audio_ceiling_kbps,
                 rtt_micros,
                 jitter_micros,
                 loss_permille,

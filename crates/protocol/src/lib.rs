@@ -4,6 +4,7 @@
 //! common error types. **Synchronous and pure** crate: no dependency on
 //! networking, cryptography or async runtimes (compilable to `wasm32-unknown-unknown`).
 
+pub mod audio;
 pub mod channel;
 pub mod fragment;
 pub mod hex;

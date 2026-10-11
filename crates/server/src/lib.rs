@@ -8,6 +8,7 @@
 //! behind the `windows-capture` feature; Linux/macOS may be added in the
 //! future without touching the core.
 
+pub mod audio;
 pub mod capture;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod dxgi;

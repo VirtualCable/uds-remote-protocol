@@ -21,6 +21,25 @@ pub enum CodecError {
     /// Malformed bitstream/packet.
     #[error("malformed packet")]
     Malformed,
+    /// PCM input length does not match the configured frame size.
+    #[error("bad PCM length: got {got} samples, expected exactly {expected}")]
+    BadPcmLength {
+        /// Samples actually provided.
+        got: usize,
+        /// Samples required (`frame_samples * channels`).
+        expected: usize,
+    },
+    /// PCM output buffer cannot hold one full decoded frame.
+    #[error("output buffer too small: got {got} samples, need at least {needed}")]
+    OutputTooSmall {
+        /// Samples the caller's buffer holds.
+        got: usize,
+        /// Samples required (`frame_samples * channels`).
+        needed: usize,
+    },
+    /// Invalid codec configuration (sample rate, channels, frame duration...).
+    #[error("invalid configuration: {0}")]
+    InvalidConfig(&'static str),
     /// Operation not supported by this codec/backend.
     #[error("unsupported operation: {0}")]
     Unsupported(&'static str),

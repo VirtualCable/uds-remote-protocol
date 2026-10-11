@@ -10,12 +10,13 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = []
+default = ["opus"]
 windows-capture = ["dep:windows"]
 vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
 jpeg = ["codec/codec-jpeg"]
 ladder = ["codec/codec-ladder"]
+opus = ["codec/codec-opus"]
 
 [dependencies]
 protocol.workspace = true

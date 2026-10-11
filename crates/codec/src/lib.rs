@@ -13,11 +13,14 @@
 //! - Always available: [`RawEncoder`]/[`RawDecoder`] (uncompressed reference
 //!   implementation for tests and channel-level E2E).
 
+mod audio;
 mod error;
 #[cfg(feature = "codec-jpeg")]
 mod jpeg_rects;
 #[cfg(feature = "codec-ladder")]
 mod ladder_encoder;
+#[cfg(feature = "codec-opus")]
+mod opus;
 mod preset;
 mod raw;
 mod video;
@@ -32,6 +35,10 @@ pub mod ladder;
 /// Dirty-region detection and rect merging for rect-oriented codecs (§8.5).
 pub mod rects;
 
+pub use audio::{
+    AUDIO_PRESETS, AudioCodecType, AudioDecoder, AudioEncoder, AudioPreset, build_audio_decoder,
+    build_audio_encoder,
+};
 pub use error::{CodecError, Result};
 pub use ladder::{Ladder, LadderPolicy, Level, Switch};
 #[cfg(feature = "codec-ladder")]
@@ -39,6 +46,8 @@ pub use ladder_encoder::LadderEncoder;
 #[cfg(feature = "codec-jpeg")]
 pub use jpeg_rects::{JpegRectsDecoder, JpegRectsEncoder};
 pub use preset::{CodecParams, CodecPreset, DEFAULT_BITRATE_KBPS, PRESETS, build_decoder};
+#[cfg(feature = "codec-opus")]
+pub use opus::{OpusDecoder, OpusEncoder};
 pub use raw::{RawDecoder, RawEncoder};
 pub use video::{
     DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame,

@@ -97,6 +97,26 @@ pub enum ControlMessage {
     },
     /// Control channel heartbeat.
     Keepalive,
+    /// Audio stream announcement (§9), server → client: codec and format of
+    /// one audio direction, sent before its first packet and whenever they
+    /// change. `codec` is an `AudioCodecType` wire ID (codec crate); unknown
+    /// IDs must be ignored (packets for that stream are then dropped with a
+    /// log). Appended at the end so existing postcard variant indices do not
+    /// shift.
+    AudioConfig {
+        /// `AudioCodecType` wire ID.
+        codec: u16,
+        /// Sample rate in Hz (e.g. 48000).
+        sample_rate: u32,
+        /// Channels: 1 (mono) or 2 (stereo).
+        channels: u8,
+        /// Target bitrate in kbps.
+        bitrate_kbps: u32,
+        /// Frame duration in milliseconds (one frame per datagram).
+        frame_ms: u8,
+        /// In-band FEC enabled on the encoder.
+        fec: bool,
+    },
 }
 
 impl ControlMessage {
