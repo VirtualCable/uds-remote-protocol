@@ -6,5 +6,7 @@
 //! consumer (testclient during development, UDS launcher in production).
 
 /// Audio jitter buffer (§9.1): reorders datagrams by `seq` and requests PLC
-/// for lost frames.
-pub mod jitter;
+/// for lost frames. Lives in `protocol` (both audio directions use it: the
+/// client for audio-out, the server for audio-in); re-exported here for
+/// existing client-side users.
+pub use protocol::jitter;

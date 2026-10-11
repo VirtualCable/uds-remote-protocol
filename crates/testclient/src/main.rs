@@ -7,9 +7,11 @@
 //! pipeline without a GUI.
 //!
 //! Usage: `testclient --key <hex64> --ticket <hex96> [--addr host:port]
-//!                     [--headless] [--max-frames N] [--no-audio]`
+//!                     [--headless] [--max-frames N] [--no-audio]
+//!                     [--mic] [--mic-test-tone FREQ]`
 
 mod audio;
+mod mic;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -34,6 +36,9 @@ struct Args {
     selftest_input: bool,
     /// Audio playback (§9); disabled with `--no-audio`.
     audio: bool,
+    /// Mic capture (§9.2): off by default, `--mic` captures the default
+    /// input device, `--mic-test-tone FREQ` sends a synthetic sine instead.
+    mic: mic::MicMode,
 }
 
 /// One scripted input action for `--selftest-input`.
@@ -92,6 +97,7 @@ fn parse_args() -> Result<Args> {
         max_frames: None,
         selftest_input: false,
         audio: true,
+        mic: mic::MicMode::Off,
     };
     let mut key_seen = false;
     let mut ticket_seen = false;
@@ -109,6 +115,10 @@ fn parse_args() -> Result<Args> {
             args.audio = false;
             continue;
         }
+        if arg == "--mic" {
+            args.mic = mic::MicMode::Device;
+            continue;
+        }
         let value = it.next().context(format!("missing value for {arg}"))?;
         match arg.as_str() {
             "--addr" => args.addr = value.parse().context("bad --addr")?,
@@ -121,6 +131,9 @@ fn parse_args() -> Result<Args> {
                 ticket_seen = true;
             }
             "--max-frames" => args.max_frames = Some(value.parse().context("bad --max-frames")?),
+            "--mic-test-tone" => {
+                args.mic = mic::MicMode::Tone(value.parse().context("bad --mic-test-tone")?);
+            }
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -370,14 +383,25 @@ async fn run() -> Result<()> {
     let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
     let mut audio_client = audio::AudioClient::new(args.audio);
+    let mut mic_client = mic::MicClient::new(args.mic, clock_start);
     let mut selftest = args.selftest_input.then(SelfTest::new);
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
         tokio::select! {
             res = stream.recv_into(&mut buf) => {
                 let (ch, n) = res?;
-                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client)? {
+                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client, &mut mic_client)? {
                     return Ok(());
+                }
+            }
+            msg = mic_client.recv() => {
+                if let Some(payload) = msg {
+                    // TCP fallback session: audio-in goes over the reliable
+                    // stream (like the server's audio-out fallback, §9).
+                    stream.send(channel::AUDIO_IN, &payload).await?;
+                } else {
+                    warn!("mic thread ended; audio-in disabled for this session");
+                    mic_client.disable();
                 }
             }
             _ = input_tick.tick() => {
@@ -403,6 +427,9 @@ async fn run() -> Result<()> {
 /// the RTT/jitter EWMAs, and once per second a MetricsReport goes to the
 /// server over the reliable control stream (§12.2). Unrecoverable frame
 /// loss triggers a rate-limited `RequestKeyframe`.
+// Select loop over display + probing + mic send; splitting it further
+// would only scatter the session state.
+#[allow(clippy::too_many_lines)]
 async fn udp_session(
     leg: transport::UdpLeg<transport::UdpTransport>,
     mut stream: EncryptedStream<Box<dyn ReliableTransport>>,
@@ -435,6 +462,7 @@ async fn udp_session(
     let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
     let mut audio_client = audio::AudioClient::new(args.audio);
+    let mut mic_client = mic::MicClient::new(args.mic, clock_start);
     let mut selftest = args.selftest_input.then(SelfTest::new);
     let mut input_tick = tokio::time::interval(Duration::from_millis(8));
     loop {
@@ -457,7 +485,7 @@ async fn udp_session(
                     continue;
                 }
                 let lost = leg.dgram.lost_estimate();
-                if !handle_packet(ch, &buf[..n], lost, args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client)? {
+                if !handle_packet(ch, &buf[..n], lost, args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client, &mut mic_client)? {
                     return Ok(());
                 }
                 // Ask for a keyframe when the stream is broken (decode
@@ -497,6 +525,16 @@ async fn udp_session(
                     loss_permille: (loss_rate * 1000.0) as u16,
                 };
                 stream.send(channel::CONTROL, &report.encode()?).await?;
+            }
+            msg = mic_client.recv() => {
+                if let Some(payload) = msg {
+                    // Audio-in goes over the UDP leg (lossy is fine: the
+                    // server's jitter buffer conceals gaps), like probes do.
+                    leg.dgram.send(channel::AUDIO_IN, &payload).await?;
+                } else {
+                    warn!("mic thread ended; audio-in disabled for this session");
+                    mic_client.disable();
+                }
             }
             _ = input_tick.tick() => {
                 // Input channel (§10): poll the window, send the diffs on
@@ -720,7 +758,8 @@ fn set1_scancode(key: minifb::Key) -> Option<(u16, bool)> {
 }
 
 /// Handles one received packet; returns `false` when the session should end.
-#[allow(clippy::too_many_arguments)]
+// One dispatch arm per channel; the packet kinds are the structure.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn handle_packet(
     ch: u16,
     packet: &[u8],
@@ -732,6 +771,7 @@ fn handle_packet(
     recovery: &mut DecodeRecovery,
     cursor: &mut ClientCursor,
     audio_client: &mut audio::AudioClient,
+    mic_client: &mut mic::MicClient,
 ) -> Result<bool> {
     if ch == channel::CURSOR {
         match CursorMessage::decode(packet) {
@@ -775,6 +815,25 @@ fn handle_packet(
                 fec,
             }) => {
                 audio_client.configure(audio::AudioSpec {
+                    codec,
+                    sample_rate,
+                    channels,
+                    bitrate_kbps,
+                    frame_ms,
+                    fec,
+                });
+            }
+            Ok(ControlMessage::AudioInConfig {
+                codec,
+                sample_rate,
+                channels,
+                bitrate_kbps,
+                frame_ms,
+                fec,
+            }) => {
+                // Audio-in support (§9.2): the server has a real mic sink;
+                // capture starts now (no packets are sent before this).
+                mic_client.enable(&audio::AudioSpec {
                     codec,
                     sample_rate,
                     channels,

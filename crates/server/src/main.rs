@@ -6,7 +6,7 @@
 //!                 [--preset NAME] [--bitrate KBPS]
 //!                 [--width N] [--height N] [--fps N] [--max-frames N]
 //!                 [--audio-preset NAME] [--audio-source auto|synthetic|wasapi]
-//!                 [--no-audio]`
+//!                 [--no-audio] [--mic-sink null|wav:PATH]`
 //!
 //! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`,
 //! `vp8-low-latency`); VP8/VP9 presets require the crate features
@@ -25,6 +25,10 @@
 //!
 //! The session ticket is printed on startup when not given; pass it to the
 //! test client with `--ticket`.
+//!
+//! Audio-in (§9.2): `--mic-sink wav:PATH` records the client microphone to a
+//! WAV file (48 kHz mono) and announces audio-in support to the client; the
+//! default `null` keeps audio-in off (no announcement, packets discarded).
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -61,6 +65,7 @@ struct Args {
     audio: bool,
     audio_preset: String,
     audio_source: String,
+    mic_sink: String,
 }
 
 fn parse_args() -> Result<Args> {
@@ -79,6 +84,7 @@ fn parse_args() -> Result<Args> {
         audio: true,
         audio_preset: "opus-music".to_string(),
         audio_source: "auto".to_string(),
+        mic_sink: "null".to_string(),
     };
     let mut key_seen = false;
     let mut it = std::env::args().skip(1);
@@ -105,6 +111,7 @@ fn parse_args() -> Result<Args> {
             "--max-frames" => args.max_frames = Some(value.parse().context("bad --max-frames")?),
             "--audio-preset" => args.audio_preset = value,
             "--audio-source" => args.audio_source = value,
+            "--mic-sink" => args.mic_sink = value,
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -589,6 +596,70 @@ async fn setup_audio<T: ReliableTransport>(
     Ok((Some(rx), preset.bitrate_kbps))
 }
 
+/// Sets up the audio-in (client microphone) receiving path (§9.2).
+///
+/// When `--mic-sink` selects a sink other than `null`, spawns the mic
+/// thread (jitter + Opus decode + sink), announces the capability to the
+/// client with [`ControlMessage::AudioInConfig`] and returns the channel
+/// sender that incoming `AUDIO_IN` payloads are forwarded to. Returns
+/// `None` — no announce, incoming packets dropped — when the sink is
+/// `null`, unknown, or the decoder cannot be built.
+fn setup_mic(args: &Args) -> Option<std::sync::mpsc::Sender<Vec<u8>>> {
+    if args.mic_sink == "null" {
+        return None;
+    }
+    let sink: Box<dyn server::mic::MicSink> = if let Some(path) = args.mic_sink.strip_prefix("wav:")
+    {
+        match server::mic::WavSink::create(path) {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                warn!(path, "mic wav sink init failed: {e}; audio-in disabled");
+                return None;
+            }
+        }
+    } else {
+        warn!(sink = %args.mic_sink, "unknown --mic-sink; audio-in disabled");
+        return None;
+    };
+    let tx = server::mic::spawn_mic(sink)?;
+    info!(sink = %args.mic_sink, "audio-in announced");
+    Some(tx)
+}
+
+/// Announces the audio-in decode parameters to the client (§9.2). The
+/// client sends raw Opus frames pre-jitter, so `jitter_ms`/`buffer_frames`
+/// are server-side concerns and are not part of the wire message.
+async fn announce_mic<T: ReliableTransport>(legs: &mut Legs<T>) -> Result<()> {
+    let preset = server::mic::audio_in_preset();
+    legs.send_control(
+        &ControlMessage::AudioInConfig {
+            codec: codec::AudioCodecType::Opus.wire_id(),
+            sample_rate: preset.sample_rate,
+            channels: preset.channels,
+            bitrate_kbps: preset.bitrate_kbps,
+            frame_ms: preset.frame_ms,
+            fec: preset.fec,
+        }
+        .encode()?,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Forwards one `AUDIO_IN` payload to the mic thread. A send failure means
+/// the thread ended; disable forwarding for the rest of the session instead
+/// of failing the connection.
+fn forward_mic(tx: &mut Option<std::sync::mpsc::Sender<Vec<u8>>>, payload: &[u8]) {
+    let Some(t) = tx else { return };
+    if t.send(payload.to_vec()).is_err() {
+        warn!("mic thread ended; audio-in disabled for this session");
+        *tx = None;
+    }
+}
+
+// The session loop owns capture, display, audio and mic branches; splitting
+// it further would only scatter the shared session state.
+#[allow(clippy::too_many_lines)]
 async fn serve<T: ReliableTransport>(
     raw: T,
     ticket: &[u8; protocol::TICKET_LENGTH],
@@ -637,6 +708,14 @@ async fn serve<T: ReliableTransport>(
     // Audio (§9): announced right after the display, only when the pipeline
     // actually started (best-effort: a missing codec feature disables it).
     let (mut audio_rx, audio_ceiling_kbps) = setup_audio(args, &mut legs, clock_start).await?;
+
+    // Audio-in (§9.2): client microphone. Announced only when a sink was
+    // configured and the decode thread started; otherwise AUDIO_IN packets
+    // are dropped.
+    let mut mic_tx = setup_mic(args);
+    if mic_tx.is_some() {
+        announce_mic(&mut legs).await?;
+    }
 
     // Link-quality state (§12): created on the first MetricsReport, with the
     // first reported RTT as the baseline.
@@ -704,11 +783,17 @@ async fn serve<T: ReliableTransport>(
                     let now = micros_since(clock_start);
                     let ack = ProbeAck { t1: probe.t1, t2: now, t3: now };
                     legs.send_control(&ack.encode()).await?;
+                } else if ch == channel::AUDIO_IN {
+                    forward_mic(&mut mic_tx, &udp_buf[..n]);
                 }
             }
             res = legs.stream.recv_into(&mut ctrl_buf) => {
                 let (ch, n) = res?;
-                handle_stream_packet(&mut ctl, &mut encoder, &fps_shared, ch, &ctrl_buf[..n]);
+                if ch == channel::AUDIO_IN {
+                    forward_mic(&mut mic_tx, &ctrl_buf[..n]);
+                } else {
+                    handle_stream_packet(&mut ctl, &mut encoder, &fps_shared, ch, &ctrl_buf[..n]);
+                }
             }
         }
     }

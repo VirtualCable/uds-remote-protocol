@@ -8,6 +8,7 @@ pub mod audio;
 pub mod channel;
 pub mod fragment;
 pub mod hex;
+pub mod jitter;
 mod control;
 mod cursor;
 mod error;

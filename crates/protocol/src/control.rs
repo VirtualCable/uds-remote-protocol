@@ -117,6 +117,26 @@ pub enum ControlMessage {
         /// In-band FEC enabled on the encoder.
         fec: bool,
     },
+    /// Audio-in support announcement (§9.2), server → client: the server has
+    /// a real microphone sink and accepts mic audio on channel `AUDIO_IN` in
+    /// exactly this format. Absence means no mic support: the client must
+    /// not send `AUDIO_IN` packets then (a server without a sink discards
+    /// them defensively). Appended at the end so existing postcard variant
+    /// indices do not shift.
+    AudioInConfig {
+        /// `AudioCodecType` wire ID.
+        codec: u16,
+        /// Sample rate in Hz (fixed 48000 in the PoC).
+        sample_rate: u32,
+        /// Channels: 1 (mono; the PoC wire format).
+        channels: u8,
+        /// Target bitrate in kbps.
+        bitrate_kbps: u32,
+        /// Frame duration in milliseconds (one frame per datagram).
+        frame_ms: u8,
+        /// In-band FEC expected on the encoder.
+        fec: bool,
+    },
 }
 
 impl ControlMessage {

@@ -114,6 +114,22 @@ fn control_message_variants_roundtrip() {
         },
         ControlMessage::RequestKeyframe { display_id: 0 },
         ControlMessage::Keepalive,
+        ControlMessage::AudioConfig {
+            codec: 1,
+            sample_rate: 48_000,
+            channels: 2,
+            bitrate_kbps: 64,
+            frame_ms: 20,
+            fec: false,
+        },
+        ControlMessage::AudioInConfig {
+            codec: 1,
+            sample_rate: 48_000,
+            channels: 1,
+            bitrate_kbps: 32,
+            frame_ms: 20,
+            fec: true,
+        },
     ];
     for msg in msgs {
         let bytes = msg.encode().unwrap();

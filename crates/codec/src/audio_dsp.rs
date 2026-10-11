@@ -1,18 +1,20 @@
-//! Audio format adaptation for real capture sources (design doc §9).
+//! Audio format adaptation between device capture/playback shapes and the
+//! wire format (design doc §9).
 //!
-//! Pure DSP helpers with no platform dependencies, so the whole capture-side
-//! adaptation chain is unit-testable on any host:
+//! Pure DSP helpers with no platform dependencies, so the whole adaptation
+//! chain is unit-testable on any host:
 //!
 //! ```text
 //! device packet (f32/i16, device channels, device rate)
 //!   ─▶ i16 conversion (clamp)          [`f32_to_i16`]
 //!   ─▶ channel remix to the wire shape [`remix_channels`]
 //!   ─▶ resample to the wire rate       [`LinearResampler`]
-//!   ─▶ bounded ring for `fill_frame`   [`CaptureRing`]
+//!   ─▶ bounded ring for frame pulls    [`CaptureRing`]
 //! ```
 //!
-//! [`DevicePipeline`] chains the four stages for one captured packet. The
-//! resampler is a PoC-grade linear interpolator (§9.1 lists a proper
+//! [`DevicePipeline`] chains the four stages for one captured packet; both
+//! capture sides use it (server WASAPI loopback, client cpal microphone).
+//! The resampler is a PoC-grade linear interpolator (§9.1 lists a proper
 //! resampler as a refinement): transparent enough for 44.1↔48 kHz speech and
 //! desktop audio, with no anti-aliasing on the downsample path.
 
@@ -241,10 +243,17 @@ impl DevicePipeline {
         in_rate: u32,
         out_channels: u8,
         out_rate: u32,
-    ) -> anyhow::Result<Self> {
-        anyhow::ensure!(in_channels >= 1, "device reports zero channels");
-        anyhow::ensure!(in_rate >= 8000, "implausible device rate {in_rate}");
-        anyhow::ensure!(out_rate >= 8000, "implausible output rate {out_rate}");
+    ) -> crate::Result<Self> {
+        use crate::CodecError;
+        if in_channels == 0 {
+            return Err(CodecError::InvalidConfig("device reports zero channels"));
+        }
+        if in_rate < 8000 {
+            return Err(CodecError::InvalidConfig("implausible device sample rate"));
+        }
+        if out_rate < 8000 {
+            return Err(CodecError::InvalidConfig("implausible output sample rate"));
+        }
         let resampler =
             (in_rate != out_rate).then(|| LinearResampler::new(in_rate, out_rate, out_channels));
         Ok(Self {
