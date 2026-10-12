@@ -166,11 +166,16 @@ unsafe fn data_range_intersection(
             return STATUS_INVALID_PARAMETER;
         }
         let kind = (*(this as *const Miniport)).kind;
+        dlog!(
+            "DRI: kind 0x%I64x",
+            ((kind as u64) << 32) | u64::from(pin_id)
+        );
         let Some(format) = kind.stream_format(pin_id) else {
             return STATUS_INVALID_PARAMETER;
         };
         let client = &(*client_data_range).__bindgen_anon_1;
         if !guid_eq(&client.Specifier, &tables::KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) {
+            dlog!("DRI: specifier mismatch");
             return STATUS_NOT_IMPLEMENTED;
         }
         let required = size_of::<pc::KSDATAFORMAT_WAVEFORMATEX>() as u32;
@@ -187,8 +192,10 @@ unsafe fn data_range_intersection(
         // The client's range must allow our channel count.
         let client_audio = &*(client_data_range as *const tables::DataRangeAudio);
         if client_audio.maximum_channels < format.channels as u32 {
+            dlog!("DRI: no channel match");
             return STATUS_NO_MATCH;
         }
+        dlog!("DRI: answering with our format");
         // The intersection of "anything reasonable" with a single-format
         // range is that format. KSDATAFORMAT_WAVEFORMATEX is packed: write
         // field by field with unaligned stores.
