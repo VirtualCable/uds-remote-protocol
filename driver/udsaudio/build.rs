@@ -49,6 +49,11 @@ mod win {
             .clang_arg(format!("-I{}", include.join("shared").display()))
             .clang_arg("-D_KERNEL_MODE=1")
             .clang_arg("-DPOOL_NX_OPTIN=1")
+            // WDK headers select target-arch code via _AMD64_ (defining the
+            // clang --target is not enough: ntdef.h errors with "No Target
+            // Architecture" otherwise).
+            .clang_arg("-D_AMD64_=1")
+            .clang_arg("-fms-extensions")
             .clang_arg("--target=x86_64-pc-windows-msvc")
             // PortCls entry points and the miniport/port interface vtables.
             .allowlist_function("Pc.*")
