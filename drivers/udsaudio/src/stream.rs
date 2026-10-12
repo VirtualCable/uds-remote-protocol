@@ -8,6 +8,8 @@ use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use alloc::boxed::Box;
+
 use crate::common::{
     STATUS_INVALID_PARAMETER, STATUS_NOINTERFACE, STATUS_NOT_IMPLEMENTED, STATUS_NOT_SUPPORTED,
     STATUS_SUCCESS, STATUS_UNSUCCESSFUL, guid_eq,
@@ -16,6 +18,12 @@ use crate::dbg::dlog;
 use crate::logic::{self, FilterKind, PositionClock};
 use crate::portcls as pc;
 use crate::tables;
+
+unsafe extern "C" {
+    /// `KeQueryPerformanceCounter` (ntddk.h) — not in wdk-sys's base subset.
+    /// Callable at any IRQL.
+    fn KeQueryPerformanceCounter(performance_frequency: *mut i64) -> u64;
+}
 
 /// KSSTATE numeric values (ks.h).
 const KSSTATE_STOP: i32 = 0;
@@ -168,7 +176,7 @@ fn qpc() -> (u64, u64) {
     let mut freq: i64 = 0;
     // SAFETY: KeQueryPerformanceCounter is callable at any IRQL; the out
     // param is a valid stack pointer.
-    let ticks = unsafe { wdk_sys::KeQueryPerformanceCounter(&raw mut freq) };
+    let ticks = unsafe { KeQueryPerformanceCounter(&raw mut freq) };
     (ticks, freq as u64)
 }
 
@@ -256,7 +264,7 @@ unsafe extern "C" fn stream_allocate_audio_buffer(
         let mdl = allocate(
             stream.port_stream as *mut pc::INTERFACE,
             high_address,
-            requested_size as usize,
+            requested_size as u64,
         );
         if mdl.is_null() {
             dlog!("AllocateAudioBuffer: AllocatePagesForMdl failed");

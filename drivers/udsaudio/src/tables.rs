@@ -13,6 +13,16 @@ use core::ptr;
 use crate::logic::{self, FilterKind};
 use crate::portcls as pc;
 
+/// Read-only static wrapper: the KS tables are written once at compile time
+/// and only ever read by PortCls, so sharing them across threads is safe
+/// even though they contain raw pointers (which are not `Sync` by default).
+#[repr(transparent)]
+pub struct SyncRo<T>(pub T);
+
+// SAFETY: instances are only used for immutable statics; the pointees are
+// read-only kernel tables.
+unsafe impl<T> Sync for SyncRo<T> {}
+
 /// Converts a pure [`logic::KsGuid`] into the bindgen GUID type (same
 /// layout; used for statics, so it must be const).
 const fn to_guid(g: &logic::KsGuid) -> pc::GUID {
@@ -156,13 +166,13 @@ static DR_RENDER_LOOPBACK: DataRangeAudio = pcm_range(&logic::SPEAKER_FORMAT);
 static DR_CAPTURE_SOURCE: DataRangeAudio = pcm_range(&logic::MIC_FORMAT);
 static DR_BRIDGE: pc::KSDATAFORMAT = analog_range();
 
-static PTRS_RENDER_SINK: [pc::PKSDATARANGE; 1] =
-    [&raw const DR_RENDER_SINK as pc::PKSDATARANGE];
-static PTRS_RENDER_LOOPBACK: [pc::PKSDATARANGE; 1] =
-    [&raw const DR_RENDER_LOOPBACK as pc::PKSDATARANGE];
-static PTRS_CAPTURE_SOURCE: [pc::PKSDATARANGE; 1] =
-    [&raw const DR_CAPTURE_SOURCE as pc::PKSDATARANGE];
-static PTRS_BRIDGE: [pc::PKSDATARANGE; 1] = [&raw const DR_BRIDGE as pc::PKSDATARANGE];
+static PTRS_RENDER_SINK: SyncRo<[pc::PKSDATARANGE; 1]> =
+    SyncRo([&raw const DR_RENDER_SINK as pc::PKSDATARANGE]);
+static PTRS_RENDER_LOOPBACK: SyncRo<[pc::PKSDATARANGE; 1]> =
+    SyncRo([&raw const DR_RENDER_LOOPBACK as pc::PKSDATARANGE]);
+static PTRS_CAPTURE_SOURCE: SyncRo<[pc::PKSDATARANGE; 1]> =
+    SyncRo([&raw const DR_CAPTURE_SOURCE as pc::PKSDATARANGE]);
+static PTRS_BRIDGE: SyncRo<[pc::PKSDATARANGE; 1]> = SyncRo([&raw const DR_BRIDGE as pc::PKSDATARANGE]);
 
 // --- pin helpers ----------------------------------------------------------------
 
@@ -207,10 +217,10 @@ const KSPIN_COMMUNICATION_SOURCE: i32 = 2;
 
 // --- render wave filter (sink + loopback + bridge) -----------------------------
 
-static RENDER_WAVE_PINS: [pc::PCPIN_DESCRIPTOR; 3] = [
+static RENDER_WAVE_PINS: SyncRo<[pc::PCPIN_DESCRIPTOR; 3]> = SyncRo([
     pc_pin(
         ks_pin(
-            &PTRS_RENDER_SINK,
+            &PTRS_RENDER_SINK.0,
             KSPIN_DATAFLOW_IN,
             KSPIN_COMMUNICATION_SINK,
             &KSCATEGORY_AUDIO,
@@ -219,7 +229,7 @@ static RENDER_WAVE_PINS: [pc::PCPIN_DESCRIPTOR; 3] = [
     ),
     pc_pin(
         ks_pin(
-            &PTRS_RENDER_LOOPBACK,
+            &PTRS_RENDER_LOOPBACK.0,
             KSPIN_DATAFLOW_OUT,
             KSPIN_COMMUNICATION_SINK,
             &KSNODETYPE_AUDIO_LOOPBACK,
@@ -228,14 +238,14 @@ static RENDER_WAVE_PINS: [pc::PCPIN_DESCRIPTOR; 3] = [
     ),
     pc_pin(
         ks_pin(
-            &PTRS_BRIDGE,
+            &PTRS_BRIDGE.0,
             KSPIN_DATAFLOW_OUT,
             KSPIN_COMMUNICATION_NONE,
             &KSCATEGORY_AUDIO,
         ),
         0,
     ),
-];
+]);
 
 static RENDER_WAVE_CONNECTIONS: [pc::KSTOPOLOGY_CONNECTION; 2] = [
     pc::KSTOPOLOGY_CONNECTION {
@@ -254,10 +264,10 @@ static RENDER_WAVE_CONNECTIONS: [pc::KSTOPOLOGY_CONNECTION; 2] = [
 
 // --- capture wave filter (bridge + source) ---------------------------------------
 
-static CAPTURE_WAVE_PINS: [pc::PCPIN_DESCRIPTOR; 2] = [
+static CAPTURE_WAVE_PINS: SyncRo<[pc::PCPIN_DESCRIPTOR; 2]> = SyncRo([
     pc_pin(
         ks_pin(
-            &PTRS_BRIDGE,
+            &PTRS_BRIDGE.0,
             KSPIN_DATAFLOW_IN,
             KSPIN_COMMUNICATION_NONE,
             &KSCATEGORY_AUDIO,
@@ -266,14 +276,14 @@ static CAPTURE_WAVE_PINS: [pc::PCPIN_DESCRIPTOR; 2] = [
     ),
     pc_pin(
         ks_pin(
-            &PTRS_CAPTURE_SOURCE,
+            &PTRS_CAPTURE_SOURCE.0,
             KSPIN_DATAFLOW_OUT,
             KSPIN_COMMUNICATION_SOURCE,
             &KSCATEGORY_AUDIO,
         ),
         logic::MAX_CAPTURE_STREAMS,
     ),
-];
+]);
 
 static CAPTURE_WAVE_CONNECTIONS: [pc::KSTOPOLOGY_CONNECTION; 1] =
     [pc::KSTOPOLOGY_CONNECTION {
@@ -285,10 +295,10 @@ static CAPTURE_WAVE_CONNECTIONS: [pc::KSTOPOLOGY_CONNECTION; 1] =
 
 // --- topology filters -------------------------------------------------------------
 
-static RENDER_TOPO_PINS: [pc::PCPIN_DESCRIPTOR; 2] = [
+static RENDER_TOPO_PINS: SyncRo<[pc::PCPIN_DESCRIPTOR; 2]> = SyncRo([
     pc_pin(
         ks_pin(
-            &PTRS_BRIDGE,
+            &PTRS_BRIDGE.0,
             KSPIN_DATAFLOW_IN,
             KSPIN_COMMUNICATION_NONE,
             &KSCATEGORY_AUDIO,
@@ -297,19 +307,19 @@ static RENDER_TOPO_PINS: [pc::PCPIN_DESCRIPTOR; 2] = [
     ),
     pc_pin(
         ks_pin(
-            &PTRS_BRIDGE,
+            &PTRS_BRIDGE.0,
             KSPIN_DATAFLOW_OUT,
             KSPIN_COMMUNICATION_NONE,
             &KSNODETYPE_SPEAKER,
         ),
         0,
     ),
-];
+]);
 
-static CAPTURE_TOPO_PINS: [pc::PCPIN_DESCRIPTOR; 2] = [
+static CAPTURE_TOPO_PINS: SyncRo<[pc::PCPIN_DESCRIPTOR; 2]> = SyncRo([
     pc_pin(
         ks_pin(
-            &PTRS_BRIDGE,
+            &PTRS_BRIDGE.0,
             KSPIN_DATAFLOW_IN,
             KSPIN_COMMUNICATION_NONE,
             &KSNODETYPE_MICROPHONE,
@@ -318,14 +328,14 @@ static CAPTURE_TOPO_PINS: [pc::PCPIN_DESCRIPTOR; 2] = [
     ),
     pc_pin(
         ks_pin(
-            &PTRS_BRIDGE,
+            &PTRS_BRIDGE.0,
             KSPIN_DATAFLOW_OUT,
             KSPIN_COMMUNICATION_NONE,
             &KSCATEGORY_AUDIO,
         ),
         0,
     ),
-];
+]);
 
 static TOPO_CONNECTIONS: [pc::KSTOPOLOGY_CONNECTION; 1] = [pc::KSTOPOLOGY_CONNECTION {
     FromNode: logic::PCFILTER_NODE,
@@ -356,22 +366,22 @@ const fn filter_desc(
     }
 }
 
-static RENDER_WAVE_FILTER: pc::PCFILTER_DESCRIPTOR =
-    filter_desc(&RENDER_WAVE_PINS, &RENDER_WAVE_CONNECTIONS);
-static CAPTURE_WAVE_FILTER: pc::PCFILTER_DESCRIPTOR =
-    filter_desc(&CAPTURE_WAVE_PINS, &CAPTURE_WAVE_CONNECTIONS);
-static RENDER_TOPO_FILTER: pc::PCFILTER_DESCRIPTOR =
-    filter_desc(&RENDER_TOPO_PINS, &TOPO_CONNECTIONS);
-static CAPTURE_TOPO_FILTER: pc::PCFILTER_DESCRIPTOR =
-    filter_desc(&CAPTURE_TOPO_PINS, &TOPO_CONNECTIONS);
+static RENDER_WAVE_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> =
+    SyncRo(filter_desc(&RENDER_WAVE_PINS.0, &RENDER_WAVE_CONNECTIONS));
+static CAPTURE_WAVE_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> =
+    SyncRo(filter_desc(&CAPTURE_WAVE_PINS.0, &CAPTURE_WAVE_CONNECTIONS));
+static RENDER_TOPO_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> =
+    SyncRo(filter_desc(&RENDER_TOPO_PINS.0, &TOPO_CONNECTIONS));
+static CAPTURE_TOPO_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> =
+    SyncRo(filter_desc(&CAPTURE_TOPO_PINS.0, &TOPO_CONNECTIONS));
 
 /// The static filter descriptor for a miniport kind. Returned from
 /// `IMiniport::GetDescription`; PortCls copies/reads it, never frees it.
 pub fn filter_descriptor(kind: FilterKind) -> *const pc::PCFILTER_DESCRIPTOR {
     match kind {
-        FilterKind::RenderWave => &raw const RENDER_WAVE_FILTER,
-        FilterKind::CaptureWave => &raw const CAPTURE_WAVE_FILTER,
-        FilterKind::RenderTopo => &raw const RENDER_TOPO_FILTER,
-        FilterKind::CaptureTopo => &raw const CAPTURE_TOPO_FILTER,
+        FilterKind::RenderWave => &raw const RENDER_WAVE_FILTER.0,
+        FilterKind::CaptureWave => &raw const CAPTURE_WAVE_FILTER.0,
+        FilterKind::RenderTopo => &raw const RENDER_TOPO_FILTER.0,
+        FilterKind::CaptureTopo => &raw const CAPTURE_TOPO_FILTER.0,
     }
 }

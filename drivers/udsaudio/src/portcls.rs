@@ -7,5 +7,6 @@
 #![allow(non_upper_case_globals)]
 #![allow(dead_code)]
 #![allow(clippy::all)]
+#![allow(unsafe_op_in_unsafe_fn)]
 
 include!(concat!(env!("OUT_DIR"), "/portcls_bindings.rs"));

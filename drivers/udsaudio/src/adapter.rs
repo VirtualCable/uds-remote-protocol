@@ -40,7 +40,7 @@ static NAME_WAVE_MIC: [u16; 11] = wide(b"UDSWaveMic");
 /// The unload routine PortCls installed (we chain to it, like sysvad).
 static PREVIOUS_UNLOAD: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
-type DriverUnloadFn = unsafe extern "system" fn(wdk_sys::PDRIVER_OBJECT);
+type DriverUnloadFn = unsafe extern "C" fn(wdk_sys::PDRIVER_OBJECT);
 
 /// DriverEntry body: hand the driver over to PortCls, then hook unload.
 ///
@@ -80,7 +80,11 @@ pub unsafe fn driver_entry(
 }
 
 /// Unload hook: chains to the routine PortCls registered.
-unsafe extern "system" fn driver_unload(driver: wdk_sys::PDRIVER_OBJECT) {
+///
+/// wdk-sys types `PDRIVER_UNLOAD` as `extern "C"` (x64 has a single calling
+/// convention, so this matches the kernel's `extern "system"` at the ABI
+/// level).
+unsafe extern "C" fn driver_unload(driver: wdk_sys::PDRIVER_OBJECT) {
     dlog!("DriverUnload");
     let previous = PREVIOUS_UNLOAD.load(Ordering::Relaxed);
     if !previous.is_null() {
@@ -189,7 +193,7 @@ fn install_subdevice(
     }
 
     // SAFETY: `name` is a null-terminated static UTF-16 string.
-    status = unsafe { pc::PcRegisterSubdevice(device, name.as_ptr(), port as pc::PUNKNOWN) };
+    status = unsafe { pc::PcRegisterSubdevice(device, name.as_ptr() as pc::PWSTR, port as pc::PUNKNOWN) };
     if status != STATUS_SUCCESS {
         dlog!("PcRegisterSubdevice failed", status as u32 as u64);
         // SAFETY: port is ours.

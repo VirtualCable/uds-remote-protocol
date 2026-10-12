@@ -30,6 +30,9 @@ mod tables;
 #[cfg(all(windows, not(test)))]
 extern crate wdk_panic;
 
+#[cfg(windows)]
+extern crate alloc;
+
 #[cfg(all(windows, not(test)))]
 use wdk_alloc::WdkAllocator;
 

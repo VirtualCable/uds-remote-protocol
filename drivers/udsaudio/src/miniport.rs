@@ -9,6 +9,8 @@ use core::mem::size_of;
 use core::ptr;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use alloc::boxed::Box;
+
 use crate::common::{
     STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INSUFFICIENT_RESOURCES,
     STATUS_INVALID_PARAMETER, STATUS_NOINTERFACE, STATUS_NO_MATCH, STATUS_NOT_IMPLEMENTED,
