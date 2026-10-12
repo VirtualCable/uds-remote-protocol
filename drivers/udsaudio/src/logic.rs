@@ -602,13 +602,16 @@ impl<const N: usize> SpscRing<N> {
         }
     }
 
-    /// Bytes currently buffered.
+    /// Bytes currently buffered. Used by the tests today; kept public for
+    /// the future pacing/telemetry IOCTL.
+    #[allow(dead_code)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.head.load(Ordering::Acquire) - self.tail.load(Ordering::Acquire)
     }
 
-    /// Whether the ring holds no data.
+    /// Whether the ring holds no data. See [`SpscRing::len`].
+    #[allow(dead_code)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0

@@ -8,5 +8,7 @@
 #![allow(dead_code)]
 #![allow(clippy::all)]
 #![allow(unsafe_op_in_unsafe_fn)]
+// bindgen 0.72 emits bitfield accessors with identity transmutes.
+#![allow(unnecessary_transmutes)]
 
 include!(concat!(env!("OUT_DIR"), "/portcls_bindings.rs"));
