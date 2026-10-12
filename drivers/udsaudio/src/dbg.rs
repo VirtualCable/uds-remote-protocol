@@ -9,41 +9,33 @@ unsafe extern "C" {
     fn DbgPrint(format: *const c_char, ...) -> u32;
 }
 
-/// Emits one static log line. `msg` must be a null-terminated byte string
-/// (use the [`log`] macro, which appends the terminator).
-///
-/// SAFETY: `DbgPrint` accepts a null-terminated format string at any IRQL.
-pub unsafe fn raw(msg: *const c_char) {
-    // SAFETY: caller guarantees `msg` is null-terminated and static.
+/// Emits one static log line. Only callable via the [`dlog`] macro, which
+/// guarantees a static null-terminated string.
+pub fn log_str(msg: &'static [u8]) {
+    // SAFETY: the macro only passes `concat!(...).as_bytes()` of string
+    // literals ending in "\0", so the pointer is a valid null-terminated
+    // static C string. DbgPrint is callable at any IRQL.
     unsafe {
-        DbgPrint(msg);
+        DbgPrint(msg.as_ptr().cast());
+    }
+}
+
+/// Same as [`log_str`] with a single `%I64x` argument.
+pub fn log_str_int(msg: &'static [u8], val: u64) {
+    // SAFETY: as above; the format strings we use take one u64.
+    unsafe {
+        DbgPrint(msg.as_ptr().cast(), val);
     }
 }
 
 /// Logs a static string with the driver prefix.
 macro_rules! dlog {
     ($msg:literal) => {{
-        // SAFETY: concat! of string literals is a 'static null-terminated C
-        // string.
-        unsafe { $crate::dbg::raw(concat!("udsaudio: ", $msg, "\0").as_ptr().cast()) }
+        $crate::dbg::log_str(concat!("udsaudio: ", $msg, "\0").as_bytes())
     }};
     ($msg:literal, $val:expr) => {{
-        // SAFETY: as above; single %x / %lx style argument passed varargs-style.
-        unsafe {
-            $crate::dbg::raw_int(concat!("udsaudio: ", $msg, "\0").as_ptr().cast(), $val)
-        }
+        $crate::dbg::log_str_int(concat!("udsaudio: ", $msg, "\0").as_bytes(), $val)
     }};
-}
-
-/// Emits one log line with a single `0x%lx` argument.
-///
-/// SAFETY: `fmt` must be a null-terminated static string containing exactly
-/// one `%lx`-compatible specifier.
-pub unsafe fn raw_int(fmt: *const c_char, val: u64) {
-    // SAFETY: caller guarantees format/argument pairing.
-    unsafe {
-        DbgPrint(fmt, val);
-    }
 }
 
 pub(crate) use dlog;

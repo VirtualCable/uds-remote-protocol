@@ -61,7 +61,7 @@ pub unsafe fn driver_entry(
         )
     };
     if status != STATUS_SUCCESS {
-        dlog!("PcInitializeAdapterDriver failed", status as u32 as u64);
+        dlog!("PcInitializeAdapterDriver failed 0x%I64x", status as u32 as u64);
         return status;
     }
     // Chain our unload hook after PortCls's (it just installed its own).
@@ -107,7 +107,7 @@ unsafe extern "C" fn add_device(
         pc::PcAddAdapterDevice(driver, physical_device, Some(start_device), MAX_SUBDEVICES, 0)
     };
     if status != STATUS_SUCCESS {
-        dlog!("PcAddAdapterDevice failed", status as u32 as u64);
+        dlog!("PcAddAdapterDevice failed 0x%I64x", status as u32 as u64);
     }
     status
 }
@@ -143,7 +143,7 @@ fn install_subdevice(
     // SAFETY: `port` is a valid out param; `port_clsid` is a static GUID.
     let mut status = unsafe { pc::PcNewPort(&mut port, port_clsid) };
     if status != STATUS_SUCCESS || port.is_null() {
-        dlog!("PcNewPort failed", status as u32 as u64);
+        dlog!("PcNewPort failed 0x%I64x", status as u32 as u64);
         return Err(if status == STATUS_SUCCESS {
             STATUS_UNSUCCESSFUL
         } else {
@@ -186,7 +186,7 @@ fn install_subdevice(
     unsafe { Miniport::release_reference(miniport) };
 
     if status != STATUS_SUCCESS {
-        dlog!("port Init failed", status as u32 as u64);
+        dlog!("port Init failed 0x%I64x", status as u32 as u64);
         // SAFETY: port is ours.
         unsafe { port_release(port) };
         return Err(status);
@@ -195,7 +195,7 @@ fn install_subdevice(
     // SAFETY: `name` is a null-terminated static UTF-16 string.
     status = unsafe { pc::PcRegisterSubdevice(device, name.as_ptr() as pc::PWSTR, port as pc::PUNKNOWN) };
     if status != STATUS_SUCCESS {
-        dlog!("PcRegisterSubdevice failed", status as u32 as u64);
+        dlog!("PcRegisterSubdevice failed 0x%I64x", status as u32 as u64);
         // SAFETY: port is ours.
         unsafe { port_release(port) };
         return Err(status);
@@ -224,7 +224,7 @@ fn connect_filters(
         )
     };
     if status != STATUS_SUCCESS {
-        dlog!("PcRegisterPhysicalConnection failed", status as u32 as u64);
+        dlog!("PcRegisterPhysicalConnection failed 0x%I64x", status as u32 as u64);
     }
 }
 

@@ -201,7 +201,7 @@ unsafe extern "C" fn stream_set_state(this: *mut pc::INTERFACE, state: i32) -> i
                 stream.clock.reset();
             }
             _ => {
-                dlog!("SetState: unknown state", state as u64);
+                dlog!("SetState: unknown state 0x%I64x", state as u64);
                 return STATUS_INVALID_PARAMETER;
             }
         }

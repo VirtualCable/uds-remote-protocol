@@ -40,7 +40,9 @@ impl PcmFormat {
         (self.channels as usize) * (self.bits_per_sample as usize) / 8
     }
 
-    /// Bytes per millisecond of audio.
+    /// Bytes per millisecond of audio. Used by the tests and by the future
+    /// pacing logic (M4); the kernel path uses `bytes_per_sec`.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn bytes_per_ms(&self) -> usize {
         self.frame_bytes() * (self.sample_rate as usize) / 1000
@@ -84,6 +86,30 @@ pub const fn ks_guid(d1: u32, d2: u16, d3: u16, d4: [u8; 8]) -> KsGuid {
 /// `CLSID_PortWaveRT` (portcls.h) — class id for `PcNewPort`.
 pub const CLSID_PORT_WAVE_RT: KsGuid =
     ks_guid(0xcc9b_e57a, 0xeb9e, 0x42b4, [0x94, 0xfc, 0x0c, 0xad, 0x3d, 0xbc, 0xe7, 0xfa]);
+
+/// `CLSID_PortTopology` (portcls.h) — class id for `PcNewPort`.
+pub const CLSID_PORT_TOPOLOGY: KsGuid =
+    ks_guid(0xb4c9_0a32, 0x5791, 0x11d0, [0x86, 0xf9, 0x00, 0xa0, 0xc9, 0x11, 0xb5, 0x44]);
+
+/// `IID_IUnknown`.
+pub const IID_IUNKNOWN: KsGuid =
+    ks_guid(0x0000_0000, 0x0000, 0x0000, [0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46]);
+
+/// `IID_IMiniport` (portcls.h).
+pub const IID_IMINIPORT: KsGuid =
+    ks_guid(0xb4c9_0a24, 0x5791, 0x11d0, [0x86, 0xf9, 0x00, 0xa0, 0xc9, 0x11, 0xb5, 0x44]);
+
+/// `IID_IMiniportWaveRT` (portcls.h).
+pub const IID_IMINIPORT_WAVE_RT: KsGuid =
+    ks_guid(0x0f9f_c4d6, 0x6061, 0x4f3c, [0xb1, 0xfc, 0x07, 0x5e, 0x35, 0xf7, 0x96, 0x0a]);
+
+/// `IID_IMiniportWaveRTStream` (portcls.h).
+pub const IID_IMINIPORT_WAVE_RT_STREAM: KsGuid =
+    ks_guid(0x000a_c9ab, 0xfaab, 0x4f3d, [0x94, 0x55, 0x6f, 0xf8, 0x30, 0x6a, 0x74, 0xa0]);
+
+/// `IID_IMiniportTopology` (portcls.h).
+pub const IID_IMINIPORT_TOPOLOGY: KsGuid =
+    ks_guid(0xb4c9_0a31, 0x5791, 0x11d0, [0x86, 0xf9, 0x00, 0xa0, 0xc9, 0x11, 0xb5, 0x44]);
 
 /// `KSCATEGORY_AUDIO` (ksmedia.h).
 pub const KSCATEGORY_AUDIO: KsGuid =
@@ -132,6 +158,17 @@ pub enum DataFlow {
     Out,
 }
 
+impl DataFlow {
+    /// The numeric `KSPIN_DATAFLOW` value.
+    #[must_use]
+    pub const fn ks(self) -> i32 {
+        match self {
+            Self::In => 1,
+            Self::Out => 2,
+        }
+    }
+}
+
 /// `KSPIN_COMMUNICATION` values (ks.h).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Communication {
@@ -141,6 +178,18 @@ pub enum Communication {
     Sink,
     /// `KSPIN_COMMUNICATION_SOURCE` (2).
     Source,
+}
+
+impl Communication {
+    /// The numeric `KSPIN_COMMUNICATION` value.
+    #[must_use]
+    pub const fn ks(self) -> i32 {
+        match self {
+            Self::None => 0,
+            Self::Sink => 1,
+            Self::Source => 2,
+        }
+    }
 }
 
 /// What a pin carries: a PCM stream range or an analog bridge range.
