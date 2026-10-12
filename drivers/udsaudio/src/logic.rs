@@ -536,9 +536,197 @@ impl PositionClock {
     }
 }
 
+// --- SPSC PCM ring ------------------------------------------------------------
+
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)`:
+/// the single control-channel command, pushes PCM into the mic ring.
+/// The user-mode tool recomputes this with the same formula (Win32
+/// `CTL_CODE`); keep both in sync.
+pub const IOCTL_PUSH_MIC: u32 = ctl_code(34, 0x800, 0, 0);
+
+/// Win32/WDK `CTL_CODE` macro as a const fn (host-testable).
+#[must_use]
+pub const fn ctl_code(device_type: u32, function: u32, method: u32, access: u32) -> u32 {
+    (device_type << 16) | (access << 14) | (function << 2) | method
+}
+
+/// Capacity of the mic feed ring in bytes (~680 ms at 96 kB/s).
+pub const MIC_RING_CAPACITY: usize = 64 * 1024;
+
+/// Capacity of the render→loopback ring in bytes (~680 ms at 192 kB/s).
+pub const LOOPBACK_RING_CAPACITY: usize = 128 * 1024;
+
+/// Lock-free single-producer/single-consumer PCM byte ring.
+///
+/// Used in two places:
+/// - mic feed: producer is the control-channel IOCTL (PASSIVE_LEVEL),
+///   consumer is the capture stream's `GetPosition` (up to DISPATCH_LEVEL);
+/// - render→loopback: producer is the render sink stream's `GetPosition`,
+///   consumer is the loopback stream's `GetPosition` (both up to DISPATCH).
+///
+/// Only atomics and plain byte copies — no locks, no allocation — so every
+/// method is safe at any IRQL. Positions are monotonic counters; the buffer
+/// offset is `position % N`, so a wrap is just a two-chunk copy. Torn audio
+/// on an overwrite race is accepted (a glitch, never UB); the counters are
+/// always consistent because each side only stores its own index.
+///
+/// Not `Sync`-safe beyond the SPSC contract: exactly one producer thread
+/// calls `push*` and exactly one consumer thread calls `pop*` at a time.
+#[repr(C)]
+pub struct SpscRing<const N: usize> {
+    buffer: UnsafeCell<[u8; N]>,
+    /// Total bytes ever pushed (write index). Owned by the producer.
+    head: AtomicUsize,
+    /// Total bytes ever popped (read index). Owned by the consumer, except
+    /// that `push_overwrite` may advance it when discarding old data.
+    tail: AtomicUsize,
+}
+
+// SAFETY: sound under the SPSC contract documented on the type: the producer
+// writes `head` and reads `tail`, the consumer writes `tail` and reads
+// `head`; buffer regions touched by each side are disjoint while the counter
+// invariant (head - tail <= N) holds, which both push paths maintain.
+unsafe impl<const N: usize> Sync for SpscRing<N> {}
+
+impl<const N: usize> SpscRing<N> {
+    /// An empty ring.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            buffer: UnsafeCell::new([0; N]),
+            head: AtomicUsize::new(0),
+            tail: AtomicUsize::new(0),
+        }
+    }
+
+    /// Bytes currently buffered.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.head.load(Ordering::Acquire) - self.tail.load(Ordering::Acquire)
+    }
+
+    /// Whether the ring holds no data.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Pushes as much of `data` as fits, dropping the rest (mic feed
+    /// policy: better a gap than smearing old samples into the present).
+    /// Returns the number of bytes accepted.
+    pub fn push(&self, data: &[u8]) -> usize {
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+        let free = N - (head - tail);
+        let n = data.len().min(free);
+        self.write_at(head, &data[..n]);
+        // Release: the buffer writes above must be visible before the new
+        // head is.
+        self.head.store(head + n, Ordering::Release);
+        n
+    }
+
+    /// Pushes all of `data`, discarding the oldest bytes when full
+    /// (loopback policy: loopback must track "what is playing now", and the
+    /// render engine never stops producing). Returns `data.len()`.
+    pub fn push_overwrite(&self, data: &[u8]) -> usize {
+        let head = self.head.load(Ordering::Acquire);
+        let tail = self.tail.load(Ordering::Acquire);
+        let free = N - (head - tail);
+        if data.len() > free {
+            // Advance the read index past the bytes we are about to
+            // clobber. A racing consumer may read torn audio for one
+            // period; counters stay consistent.
+            self.tail
+                .store(tail + (data.len() - free), Ordering::Release);
+        }
+        self.write_at(head, data);
+        self.head.store(head + data.len(), Ordering::Release);
+        data.len()
+    }
+
+    /// Pops up to `dst.len()` bytes; returns how many were actually read
+    /// (fewer on underrun). The remainder of `dst` is left untouched.
+    pub fn pop(&self, dst: &mut [u8]) -> usize {
+        let tail = self.tail.load(Ordering::Acquire);
+        let head = self.head.load(Ordering::Acquire);
+        let n = dst.len().min(head - tail);
+        self.read_at(tail, &mut dst[..n]);
+        // Release: the buffer reads above must complete before the new tail
+        // lets the producer reuse the space.
+        self.tail.store(tail + n, Ordering::Release);
+        n
+    }
+
+    /// Fills `dst` completely: pops what the ring has and zero-fills the
+    /// rest (silence on underrun — a capture stream must always deliver a
+    /// full period).
+    pub fn pop_or_silence(&self, dst: &mut [u8]) {
+        let n = self.pop(dst);
+        dst[n..].fill(0);
+    }
+
+    /// Discards all buffered data. Not concurrent-safe: call only while
+    /// both endpoints are idle (stream setup/teardown).
+    pub fn clear(&self) {
+        self.tail.store(0, Ordering::Relaxed);
+        self.head.store(0, Ordering::Relaxed);
+    }
+
+    /// Copies `src` into the ring starting at absolute position `pos`.
+    fn write_at(&self, pos: usize, src: &[u8]) {
+        if src.is_empty() {
+            return;
+        }
+        let off = pos % N;
+        let first = (N - off).min(src.len());
+        // SAFETY: single producer; the region [pos, pos+src.len()) mod N is
+        // inside the ring's owned space by the counter invariant.
+        unsafe {
+            let base = self.buffer.get();
+            core::ptr::copy_nonoverlapping(src.as_ptr(), (*base).as_mut_ptr().add(off), first);
+            core::ptr::copy_nonoverlapping(
+                src.as_ptr().add(first),
+                (*base).as_mut_ptr(),
+                src.len() - first,
+            );
+        }
+    }
+
+    /// Copies `dst.len()` bytes out of the ring starting at absolute
+    /// position `pos`.
+    fn read_at(&self, pos: usize, dst: &mut [u8]) {
+        if dst.is_empty() {
+            return;
+        }
+        let off = pos % N;
+        let first = (N - off).min(dst.len());
+        // SAFETY: single consumer; reads stay inside the buffer.
+        unsafe {
+            let base = self.buffer.get();
+            core::ptr::copy_nonoverlapping((*base).as_ptr().add(off), dst.as_mut_ptr(), first);
+            core::ptr::copy_nonoverlapping(
+                (*base).as_ptr(),
+                dst.as_mut_ptr().add(first),
+                dst.len() - first,
+            );
+        }
+    }
+}
+
+impl<const N: usize> Default for SpscRing<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::Wrapping;
 
     #[test]
     fn mic_format_matches_wire_format() {
@@ -734,5 +922,117 @@ mod tests {
         let mut clock = PositionClock::new(SPEAKER_FORMAT);
         clock.start(1_000_000, 10_000_000);
         assert_eq!(clock.position_at(500_000), 0); // saturating_sub
+    }
+
+    #[test]
+    fn ioctl_push_mic_matches_ctl_code_layout() {
+        // CTL_CODE(FILE_DEVICE_UNKNOWN=34, 0x800, METHOD_BUFFERED=0,
+        // FILE_ANY_ACCESS=0) = 0x22_2000. The user-mode tool must compute
+        // the same value with the Win32 CTL_CODE macro.
+        assert_eq!(IOCTL_PUSH_MIC, 0x0022_2000);
+    }
+
+    #[test]
+    fn ring_push_pop_roundtrip() {
+        let ring = SpscRing::<64>::new();
+        assert!(ring.is_empty());
+        let data: Vec<u8> = (0..32u8).collect();
+        assert_eq!(ring.push(&data), 32);
+        assert_eq!(ring.len(), 32);
+        let mut out = [0u8; 32];
+        assert_eq!(ring.pop(&mut out), 32);
+        assert_eq!(&out, &data[..]);
+        assert!(ring.is_empty());
+    }
+
+    #[test]
+    fn ring_wraps_around() {
+        let ring = SpscRing::<16>::new();
+        let a: Vec<u8> = (0..12u8).collect();
+        let b: Vec<u8> = (100..112u8).collect();
+        assert_eq!(ring.push(&a), 12);
+        let mut sink = [0u8; 8];
+        assert_eq!(ring.pop(&mut sink), 8); // head=12, tail=8
+        // This write wraps the buffer end (offset 12, 12 bytes > 16-12=4).
+        assert_eq!(ring.push(&b), 12);
+        assert_eq!(ring.len(), 16);
+        let mut out = [0u8; 16];
+        assert_eq!(ring.pop(&mut out), 16);
+        assert_eq!(&out[..4], &a[8..]);
+        assert_eq!(&out[4..], &b[..]);
+    }
+
+    #[test]
+    fn ring_push_drops_new_data_when_full() {
+        let ring = SpscRing::<8>::new();
+        let data = [7u8; 16];
+        assert_eq!(ring.push(&data), 8); // only what fits
+        assert_eq!(ring.push(&data), 0); // full: nothing accepted
+        let mut out = [0u8; 4];
+        assert_eq!(ring.pop(&mut out), 4);
+        assert_eq!(ring.push(&[1, 2, 3, 4, 5]), 4); // 4 free again
+        let mut all = [0u8; 8];
+        assert_eq!(ring.pop(&mut all), 8);
+        assert_eq!(&all[..4], &[7, 7, 7, 7]);
+        assert_eq!(&all[4..], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn ring_push_overwrite_discards_oldest() {
+        let ring = SpscRing::<8>::new();
+        assert_eq!(ring.push(&[1, 2, 3, 4, 5, 6]), 6);
+        assert_eq!(ring.push_overwrite(&[10, 11, 12, 13]), 4);
+        // 6+4 = 10 total pushed into 8 slots: oldest 2 bytes (1,2) gone.
+        assert_eq!(ring.len(), 8);
+        let mut out = [0u8; 8];
+        assert_eq!(ring.pop(&mut out), 8);
+        assert_eq!(&out, &[3, 4, 5, 6, 10, 11, 12, 13]);
+    }
+
+    #[test]
+    fn ring_pop_or_silence_zero_fills_underrun() {
+        let ring = SpscRing::<16>::new();
+        ring.push(&[1, 2, 3]);
+        let mut out = [0xAAu8; 8];
+        ring.pop_or_silence(&mut out);
+        assert_eq!(&out[..3], &[1, 2, 3]);
+        assert_eq!(&out[3..], &[0, 0, 0, 0, 0]);
+        // Fully empty ring: pure silence.
+        ring.pop_or_silence(&mut out);
+        assert_eq!(&out, &[0u8; 8]);
+    }
+
+    #[test]
+    fn ring_clear_resets_counters() {
+        let ring = SpscRing::<16>::new();
+        ring.push(&[9u8; 10]);
+        ring.clear();
+        assert!(ring.is_empty());
+        assert_eq!(ring.len(), 0);
+        // Still usable after clear.
+        assert_eq!(ring.push(&[1, 2]), 2);
+        let mut out = [0u8; 2];
+        assert_eq!(ring.pop(&mut out), 2);
+        assert_eq!(&out, &[1, 2]);
+    }
+
+    #[test]
+    fn ring_survives_alternating_load() {
+        // Long alternating push/pop session crossing many wraps; every byte
+        // must come out in order.
+        let ring = SpscRing::<256>::new();
+        let mut counter = Wrapping(0u8);
+        let mut expected = Wrapping(0u8);
+        for _ in 0..1000 {
+            let chunk: Vec<u8> = (0..37).map(|_| { counter += 1; counter.0 }).collect();
+            assert_eq!(ring.push(&chunk), 37);
+            let mut out = [0u8; 37];
+            assert_eq!(ring.pop(&mut out), 37);
+            for b in out {
+                expected += 1;
+                assert_eq!(b, expected.0);
+            }
+        }
+        assert!(ring.is_empty());
     }
 }
