@@ -326,9 +326,16 @@ unsafe extern "C" fn wave_new_stream(
             bits_per_sample: ptr::read_unaligned(ptr::addr_of!((*wf_ptr).wBitsPerSample)),
         };
         if !logic::is_format_supported(kind, pin, proposed) {
-            dlog!("NewStream: format not supported");
+            // tag << 48 | rate << 16 | channels << 8 | bits
+            let tag = u64::from(ptr::read_unaligned(ptr::addr_of!((*wf_ptr).wFormatTag)));
+            let detail = (tag << 48)
+                | (u64::from(proposed.sample_rate) << 16)
+                | (u64::from(proposed.channels) << 8)
+                | u64::from(proposed.bits_per_sample);
+            dlog!("NewStream: rejected fmt 0x%I64x", detail);
             return STATUS_INVALID_PARAMETER;
         }
+        dlog!("NewStream: accepted");
 
         let new_stream = WaveRtStream::create(kind, pin, port_stream);
         if new_stream.is_null() {
