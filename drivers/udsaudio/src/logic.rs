@@ -262,10 +262,15 @@ pub const CAPTURE_WAVE_PIN_SOURCE: u32 = 1;
 /// Render topology pin 0: wired towards the wave filter (analog in).
 pub const RENDER_TOPO_PIN_WAVE: u32 = 0;
 /// Render topology pin 1: the (virtual) speaker jack (analog out).
+/// Not referenced by the kernel glue today (only the wave side is), kept
+/// for table readability and tests.
+#[allow(dead_code)]
 pub const RENDER_TOPO_PIN_ENDPOINT: u32 = 1;
 
 // Pin indices of the capture topology filter (sides flipped vs render).
 /// Capture topology pin 0: the (virtual) microphone jack (analog in).
+/// See [`RENDER_TOPO_PIN_ENDPOINT`] for why this is `allow(dead_code)`.
+#[allow(dead_code)]
 pub const CAPTURE_TOPO_PIN_ENDPOINT: u32 = 0;
 /// Capture topology pin 1: wired towards the wave filter (analog out).
 pub const CAPTURE_TOPO_PIN_WAVE: u32 = 1;

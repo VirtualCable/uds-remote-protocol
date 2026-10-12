@@ -213,8 +213,8 @@ static RENDER_WAVE_PINS: SyncRo<[pc::PCPIN_DESCRIPTOR; 3]> = SyncRo([
 ]);
 
 static RENDER_WAVE_CONNECTIONS: [pc::KSTOPOLOGY_CONNECTION; 2] = [
-    connection(&logic::RENDER_WAVE_CONNECTIONS[0]),
-    connection(&logic::RENDER_WAVE_CONNECTIONS[1]),
+    connection(&logic::RENDER_WAVE_FILTER.connections[0]),
+    connection(&logic::RENDER_WAVE_FILTER.connections[1]),
 ];
 
 // --- capture wave filter (bridge + source) -----------------------------------------
