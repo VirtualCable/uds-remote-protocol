@@ -59,6 +59,64 @@ pub static IID_IMINIPORT_WAVE_RT_STREAM: pc::GUID = to_guid(&logic::IID_IMINIPOR
 /// `IID_IMiniportTopology`.
 pub static IID_IMINIPORT_TOPOLOGY: pc::GUID = to_guid(&logic::IID_IMINIPORT_TOPOLOGY);
 
+/// `KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE` (ksmedia.h).
+static KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE: pc::GUID = pc::GUID {
+    Data1: 0xe1f8_9eb5,
+    Data2: 0x5f46,
+    Data3: 0x419b,
+    Data4: [0x96, 0x7b, 0xff, 0x67, 0x70, 0xb9, 0x84, 0x01],
+};
+
+// --- datarange attribute list (signal processing mode) ------------------------
+//
+// Every streaming pin advertises a KSATTRIBUTE list with the audio signal
+// processing mode attribute (no payload = DEFAULT mode), like sysvad's
+// simple.h. Without it, the audio endpoint builder's PROPOSEDATAFORMAT2
+// negotiation fails on capture endpoints and they never get a device format
+// (IAudioClient::GetMixFormat then fails with AUDCLNT_E_UNSUPPORTED_FORMAT).
+
+/// `KSMULTIPLE_ITEM` (ks.h) — not in the bindgen allowlist.
+#[repr(C)]
+struct KsMultipleItem {
+    /// Total size including the attributes.
+    size: u32,
+    /// Attribute count.
+    count: u32,
+}
+
+/// `KSATTRIBUTE` (ks.h) — not in the bindgen allowlist.
+#[repr(C)]
+struct KsAttribute {
+    /// Size of the attribute including payload (none here).
+    size: u32,
+    /// Flags (none).
+    flags: u32,
+    /// Attribute GUID.
+    attribute: pc::GUID,
+}
+
+/// The mode attribute list referenced as the second "datarange" of every
+/// streaming pin (KSDATARANGE_FLAGS_ATTRIBUTES set on the real range).
+#[repr(C)]
+struct ModeAttributeList {
+    /// Header.
+    header: KsMultipleItem,
+    /// The single attribute.
+    attribute: KsAttribute,
+}
+
+static MODE_ATTRIBUTE_LIST: SyncRo<ModeAttributeList> = SyncRo(ModeAttributeList {
+    header: KsMultipleItem {
+        size: (size_of::<KsMultipleItem>() + size_of::<KsAttribute>()) as u32,
+        count: 1,
+    },
+    attribute: KsAttribute {
+        size: size_of::<KsAttribute>() as u32,
+        flags: 0,
+        attribute: KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE,
+    },
+});
+
 /// Maps a logic-table category GUID to its kernel-side static. Panics at
 /// compile time if a table references an unmapped GUID.
 const fn category_guid(g: &logic::KsGuid) -> &'static pc::GUID {
@@ -99,11 +157,12 @@ const fn data_format(
     sub: &pc::GUID,
     spec: &pc::GUID,
     format_size: u32,
+    flags: u32,
 ) -> pc::KSDATAFORMAT {
     pc::KSDATAFORMAT {
         __bindgen_anon_1: pc::KSDATAFORMAT__bindgen_ty_1 {
             FormatSize: format_size,
-            Flags: 0,
+            Flags: flags,
             SampleSize: 0,
             Reserved: 0,
             MajorFormat: *major,
@@ -113,7 +172,12 @@ const fn data_format(
     }
 }
 
-/// A streaming data range for a single fixed PCM format (min == max).
+/// `KSDATARANGE_ATTRIBUTES` (ks.h): an attribute list follows this range in
+/// the pin's datarange pointer array.
+const KSDATARANGE_ATTRIBUTES: u32 = 0x2;
+
+/// A streaming data range for a single fixed PCM format (min == max), with
+/// the mode attribute list attached.
 const fn pcm_range(format: &logic::PcmFormat) -> DataRangeAudio {
     DataRangeAudio {
         data_range: data_format(
@@ -121,6 +185,7 @@ const fn pcm_range(format: &logic::PcmFormat) -> DataRangeAudio {
             &KSDATAFORMAT_SUBTYPE_PCM,
             &KSDATAFORMAT_SPECIFIER_WAVEFORMATEX,
             size_of::<DataRangeAudio>() as u32,
+            KSDATARANGE_ATTRIBUTES,
         ),
         maximum_channels: format.channels as u32,
         minimum_bits_per_sample: format.bits_per_sample as u32,
@@ -137,6 +202,7 @@ const fn analog_range() -> pc::KSDATAFORMAT {
         &KSDATAFORMAT_SUBTYPE_ANALOG,
         &KSDATAFORMAT_SPECIFIER_NONE,
         size_of::<pc::KSDATAFORMAT>() as u32,
+        0,
     )
 }
 
@@ -146,9 +212,14 @@ static DR_SPEAKER: DataRangeAudio = pcm_range(&logic::SPEAKER_FORMAT);
 static DR_MIC: DataRangeAudio = pcm_range(&logic::MIC_FORMAT);
 static DR_BRIDGE: pc::KSDATAFORMAT = analog_range();
 
-static PTRS_SPEAKER: SyncRo<[pc::PKSDATARANGE; 1]> =
-    SyncRo([&raw const DR_SPEAKER as pc::PKSDATARANGE]);
-static PTRS_MIC: SyncRo<[pc::PKSDATARANGE; 1]> = SyncRo([&raw const DR_MIC as pc::PKSDATARANGE]);
+static PTRS_SPEAKER: SyncRo<[pc::PKSDATARANGE; 2]> = SyncRo([
+    &raw const DR_SPEAKER as pc::PKSDATARANGE,
+    &raw const MODE_ATTRIBUTE_LIST.0 as pc::PKSDATARANGE,
+]);
+static PTRS_MIC: SyncRo<[pc::PKSDATARANGE; 2]> = SyncRo([
+    &raw const DR_MIC as pc::PKSDATARANGE,
+    &raw const MODE_ATTRIBUTE_LIST.0 as pc::PKSDATARANGE,
+]);
 static PTRS_BRIDGE: SyncRo<[pc::PKSDATARANGE; 1]> =
     SyncRo([&raw const DR_BRIDGE as pc::PKSDATARANGE]);
 
