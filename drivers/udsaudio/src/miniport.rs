@@ -24,9 +24,15 @@ use crate::tables;
 
 /// Miniport object shared by both interfaces (wave + topology). The first
 /// field is always the vtable pointer of the interface PortCls asked for.
+/// Wave miniports also expose `IMiniportAudioSignalProcessing` through a
+/// secondary vtable pointer (`signal_vtbl`): its interface pointer is the
+/// address of that field, like a C++ secondary base subobject.
 #[repr(C)]
 pub struct Miniport {
     vtbl: *const VtblHeader,
+    /// `IMiniportAudioSignalProcessing` vtable (wave miniports only; null
+    /// for topology miniports, which do not support the interface).
+    signal_vtbl: *const VtblHeader,
     ref_count: AtomicU32,
     kind: FilterKind,
     /// Back-pointer to the owning port (set in `Init`; wave miniports only
@@ -41,20 +47,33 @@ struct VtblHeader {
     _private: [usize; 0],
 }
 
+/// Offset of the secondary vtable pointer: the interface pointer handed out
+/// for `IMiniportAudioSignalProcessing`.
+const SIGNAL_VTBL_OFFSET: usize = core::mem::offset_of!(Miniport, signal_vtbl);
+
 impl Miniport {
     /// Creates a boxed wave miniport with one reference (the caller's).
     pub fn create_wave(kind: FilterKind) -> *mut Self {
-        Self::create(kind, &raw const WAVE_VTBL as *const VtblHeader)
+        Self::create(
+            kind,
+            &raw const WAVE_VTBL as *const VtblHeader,
+            &raw const SIGNAL_VTBL as *const VtblHeader,
+        )
     }
 
     /// Creates a boxed topology miniport with one reference.
     pub fn create_topology(kind: FilterKind) -> *mut Self {
-        Self::create(kind, &raw const TOPO_VTBL as *const VtblHeader)
+        Self::create(kind, &raw const TOPO_VTBL as *const VtblHeader, ptr::null())
     }
 
-    fn create(kind: FilterKind, vtbl: *const VtblHeader) -> *mut Self {
+    fn create(
+        kind: FilterKind,
+        vtbl: *const VtblHeader,
+        signal_vtbl: *const VtblHeader,
+    ) -> *mut Self {
         let miniport = Box::new(Self {
             vtbl,
+            signal_vtbl,
             ref_count: AtomicU32::new(1),
             kind,
             port: ptr::null_mut(),
@@ -107,6 +126,7 @@ unsafe fn query_interface(
     interface_id: *const pc::IID,
     interface: *mut pc::PVOID,
     specific: &pc::GUID,
+    signal_processing: bool,
 ) -> i32 {
     // SAFETY: pointers per the COM contract; `this` is a live Miniport.
     unsafe {
@@ -120,6 +140,13 @@ unsafe fn query_interface(
             || guid_eq(iid, specific)
         {
             *interface = this.cast();
+            add_ref(this);
+            STATUS_SUCCESS
+        } else if signal_processing
+            && guid_eq(iid, &tables::IID_IMINIPORT_AUDIO_SIGNAL_PROCESSING)
+        {
+            // Secondary interface: the pointer is the vtable field address.
+            *interface = (this as *mut u8).add(SIGNAL_VTBL_OFFSET).cast();
             add_ref(this);
             STATUS_SUCCESS
         } else {
@@ -417,8 +444,11 @@ unsafe extern "C" fn wave_query_interface(
     interface_id: *const pc::IID,
     interface: *mut pc::PVOID,
 ) -> i32 {
-    // SAFETY: forwards to the shared helper; pointers checked there.
-    unsafe { query_interface(this, interface_id, interface, &tables::IID_IMINIPORT_WAVE_RT) }
+    // SAFETY: forwards to the shared helper; pointers checked there. Wave
+    // miniports also expose IMiniportAudioSignalProcessing.
+    unsafe {
+        query_interface(this, interface_id, interface, &tables::IID_IMINIPORT_WAVE_RT, true)
+    }
 }
 
 unsafe extern "C" fn wave_add_ref(this: *mut pc::INTERFACE) -> u32 {
@@ -570,6 +600,95 @@ static WAVE_VTBL: pc::IMiniportWaveRTVtbl = pc::IMiniportWaveRTVtbl {
     GetDeviceDescription: Some(wave_get_device_description),
 };
 
+// --- IMiniportAudioSignalProcessing (secondary interface of wave miniports) ---------
+//
+// PortCls queries the wave miniport for this interface when the audio
+// endpoint builder asks for the pin's signal processing modes
+// (KSPROPERTY_AUDIOSIGNALPROCESSING_MODES). Without it the capture endpoint
+// never gets a device format. The interface pointer is the address of the
+// `signal_vtbl` field; every method adjusts it back to the Miniport base.
+
+/// Recovers the Miniport base pointer from the signal-processing interface
+/// pointer (`this` points at the `signal_vtbl` field).
+///
+/// SAFETY: `this` must be a signal-processing interface pointer handed out
+/// by `query_interface` for a live Miniport.
+unsafe fn signal_base(this: *mut pc::INTERFACE) -> *mut Miniport {
+    (this as *mut u8).wrapping_sub(SIGNAL_VTBL_OFFSET) as *mut Miniport
+}
+
+unsafe extern "C" fn signal_query_interface(
+    this: *mut pc::INTERFACE,
+    interface_id: *const pc::IID,
+    interface: *mut pc::PVOID,
+) -> i32 {
+    // SAFETY: `this` is a signal interface pointer of a live Miniport;
+    // forwards to the shared helper with the base pointer.
+    unsafe {
+        query_interface(
+            signal_base(this) as *mut pc::INTERFACE,
+            interface_id,
+            interface,
+            &tables::IID_IMINIPORT_WAVE_RT,
+            true,
+        )
+    }
+}
+
+unsafe extern "C" fn signal_add_ref(this: *mut pc::INTERFACE) -> u32 {
+    // SAFETY: `this` is a signal interface pointer of a live Miniport.
+    unsafe { add_ref(signal_base(this) as *mut pc::INTERFACE) }
+}
+
+unsafe extern "C" fn signal_release(this: *mut pc::INTERFACE) -> u32 {
+    // SAFETY: `this` is a signal interface pointer of a Miniport owned by
+    // the caller's reference.
+    unsafe { release(signal_base(this) as *mut pc::INTERFACE) }
+}
+
+/// `IMiniportAudioSignalProcessing::GetModes` — every streaming pin supports
+/// exactly one mode, DEFAULT (sysvad semantics: invalid pin →
+/// STATUS_INVALID_PARAMETER, bridge pin → STATUS_NOT_SUPPORTED).
+unsafe extern "C" fn signal_get_modes(
+    this: *mut pc::INTERFACE,
+    pin: u32,
+    modes: *mut pc::GUID,
+    num_modes: *mut u32,
+) -> i32 {
+    // SAFETY: `this` is a signal interface pointer of a live Miniport;
+    // out pointers per the PortCls contract.
+    unsafe {
+        if num_modes.is_null() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        let miniport = &*signal_base(this);
+        if pin as usize >= miniport.kind.desc().pins.len() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        if miniport.kind.stream_format(pin).is_none() {
+            return STATUS_NOT_SUPPORTED;
+        }
+        dlog!("GetModes: 0x%I64x", ((miniport.kind as u64) << 8) | u64::from(pin));
+        if !modes.is_null() {
+            if *num_modes < 1 {
+                *num_modes = 1;
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            *modes = tables::SIGNALPROCESSING_MODE_DEFAULT;
+        }
+        *num_modes = 1;
+        STATUS_SUCCESS
+    }
+}
+
+/// The `IMiniportAudioSignalProcessing` vtable (IUnknown + GetModes).
+static SIGNAL_VTBL: pc::IMiniportAudioSignalProcessingVtbl = pc::IMiniportAudioSignalProcessingVtbl {
+    QueryInterface: Some(signal_query_interface),
+    AddRef: Some(signal_add_ref),
+    Release: Some(signal_release),
+    GetModes: Some(signal_get_modes),
+};
+
 // --- IMiniportTopology ----------------------------------------------------------
 
 unsafe extern "C" fn topo_query_interface(
@@ -579,7 +698,9 @@ unsafe extern "C" fn topo_query_interface(
 ) -> i32 {
     // SAFETY: forwards to the shared helper; the topology miniport answers
     // IUnknown, IMiniport and IMiniportTopology.
-    unsafe { query_interface(this, interface_id, interface, &tables::IID_IMINIPORT_TOPOLOGY) }
+    unsafe {
+        query_interface(this, interface_id, interface, &tables::IID_IMINIPORT_TOPOLOGY, false)
+    }
 }
 
 unsafe extern "C" fn topo_add_ref(this: *mut pc::INTERFACE) -> u32 {

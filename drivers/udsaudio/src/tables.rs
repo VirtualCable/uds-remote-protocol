@@ -58,6 +58,9 @@ pub static IID_IMINIPORT_WAVE_RT: pc::GUID = to_guid(&logic::IID_IMINIPORT_WAVE_
 pub static IID_IMINIPORT_WAVE_RT_STREAM: pc::GUID = to_guid(&logic::IID_IMINIPORT_WAVE_RT_STREAM);
 /// `IID_IMiniportTopology`.
 pub static IID_IMINIPORT_TOPOLOGY: pc::GUID = to_guid(&logic::IID_IMINIPORT_TOPOLOGY);
+/// `IID_IMiniportAudioSignalProcessing`.
+pub static IID_IMINIPORT_AUDIO_SIGNAL_PROCESSING: pc::GUID =
+    to_guid(&logic::IID_IMINIPORT_AUDIO_SIGNAL_PROCESSING);
 
 /// `KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE` (ksmedia.h).
 pub static KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE: pc::GUID = pc::GUID {
