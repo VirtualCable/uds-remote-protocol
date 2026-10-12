@@ -11,10 +11,10 @@ members = [
     "crates/testclient",
     "crates/vpx-sys",
 ]
-# The Windows kernel audio driver lives in its own workspace (driver/):
+# The Windows kernel audio driver lives in its own workspace (drivers/):
 # it needs panic="abort" profiles (workspace-wide setting), no_std, and a
 # WDK environment that only exists on Windows build machines.
-exclude = ["driver"]
+exclude = ["drivers"]
 
 [workspace.package]
 version = "0.1.0"
