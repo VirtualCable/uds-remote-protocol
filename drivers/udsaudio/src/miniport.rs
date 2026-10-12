@@ -141,28 +141,34 @@ unsafe fn get_description(this: *mut pc::INTERFACE, description: *mut pc::PPCFIL
     }
 }
 
-/// `IMiniport::DataRangeIntersection` — sysvad semantics: validate the
-/// specifier and channel count, then let the class handler do the rest
-/// (STATUS_NOT_IMPLEMENTED means "class handler takes over" here).
+/// `IMiniport::DataRangeIntersection` — single-format semantics: after
+/// validating the specifier and channel count, the intersection is always
+/// our one advertised PCM format, which we write into the resultant buffer
+/// ourselves. Deferring to the PortCls class handler (sysvad style, with
+/// STATUS_NOT_IMPLEMENTED) works for the stereo speaker but leaves the
+/// mono mic without a negotiated device format (the engine's proposal is
+/// stereo, the class handler does not downgrade channels, and
+/// `IAudioClient::GetMixFormat` then fails with
+/// AUDCLNT_E_UNSUPPORTED_FORMAT).
 unsafe fn data_range_intersection(
     this: *mut pc::INTERFACE,
     pin_id: u32,
     client_data_range: pc::PKSDATARANGE,
     _my_data_range: pc::PKSDATARANGE,
     output_buffer_length: u32,
-    _resultant_format: pc::PVOID,
+    resultant_format: pc::PVOID,
     resultant_format_length: *mut u32,
 ) -> i32 {
-    // SAFETY: all pointers are caller-owned; we only read the ranges and
-    // write the length out-param.
+    // SAFETY: all pointers are caller-owned; we only read the range and
+    // write the resultant format within the advertised output buffer size.
     unsafe {
         if client_data_range.is_null() || resultant_format_length.is_null() {
             return STATUS_INVALID_PARAMETER;
         }
         let kind = (*(this as *const Miniport)).kind;
-        if kind.stream_format(pin_id).is_none() {
+        let Some(format) = kind.stream_format(pin_id) else {
             return STATUS_INVALID_PARAMETER;
-        }
+        };
         let client = &(*client_data_range).__bindgen_anon_1;
         if !guid_eq(&client.Specifier, &tables::KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) {
             return STATUS_NOT_IMPLEMENTED;
@@ -175,16 +181,39 @@ unsafe fn data_range_intersection(
         if output_buffer_length < required {
             return STATUS_BUFFER_TOO_SMALL;
         }
-        // Exact single-format support: the client's range must allow our
-        // channel count.
-        let Some(format) = kind.stream_format(pin_id) else {
-            return STATUS_NO_MATCH;
-        };
+        if resultant_format.is_null() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        // The client's range must allow our channel count.
         let client_audio = &*(client_data_range as *const tables::DataRangeAudio);
         if client_audio.maximum_channels < format.channels as u32 {
             return STATUS_NO_MATCH;
         }
-        STATUS_NOT_IMPLEMENTED
+        // The intersection of "anything reasonable" with a single-format
+        // range is that format. KSDATAFORMAT_WAVEFORMATEX is packed: write
+        // field by field with unaligned stores.
+        let out = resultant_format as *mut pc::KSDATAFORMAT_WAVEFORMATEX;
+        let df = ptr::addr_of_mut!((*out).DataFormat.__bindgen_anon_1);
+        ptr::addr_of_mut!((*df).FormatSize).write_unaligned(required);
+        ptr::addr_of_mut!((*df).Flags).write_unaligned(0);
+        ptr::addr_of_mut!((*df).SampleSize).write_unaligned(format.frame_bytes() as u32);
+        ptr::addr_of_mut!((*df).Reserved).write_unaligned(0);
+        ptr::addr_of_mut!((*df).MajorFormat).write_unaligned(tables::KSDATAFORMAT_TYPE_AUDIO);
+        ptr::addr_of_mut!((*df).SubFormat).write_unaligned(tables::KSDATAFORMAT_SUBTYPE_PCM);
+        ptr::addr_of_mut!((*df).Specifier)
+            .write_unaligned(tables::KSDATAFORMAT_SPECIFIER_WAVEFORMATEX);
+        let wf = ptr::addr_of_mut!((*out).WaveFormatEx);
+        let frame = format.frame_bytes() as u16;
+        ptr::addr_of_mut!((*wf).wFormatTag).write_unaligned(1); // WAVE_FORMAT_PCM
+        ptr::addr_of_mut!((*wf).nChannels).write_unaligned(format.channels);
+        ptr::addr_of_mut!((*wf).nSamplesPerSec).write_unaligned(format.sample_rate);
+        ptr::addr_of_mut!((*wf).nAvgBytesPerSec)
+            .write_unaligned(format.bytes_per_sec() as u32);
+        ptr::addr_of_mut!((*wf).nBlockAlign).write_unaligned(frame);
+        ptr::addr_of_mut!((*wf).wBitsPerSample).write_unaligned(format.bits_per_sample);
+        ptr::addr_of_mut!((*wf).cbSize).write_unaligned(0);
+        *resultant_format_length = required;
+        STATUS_SUCCESS
     }
 }
 
