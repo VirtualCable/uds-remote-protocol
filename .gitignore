@@ -1,4 +1,4 @@
-/target
+target
 # Los documentos de planificación viven solo en local (fuera de git)
 /doc/plan
 # Notas de Gemini (local)

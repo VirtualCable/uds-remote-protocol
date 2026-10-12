@@ -1,0 +1,28 @@
+[package]
+name = "udsaudio"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+authors = ["Virtual Cable S.L."]
+repository = "https://github.com/VirtualCable/uds-remote-protocol"
+
+[package.metadata.wdk.driver-model]
+driver-type = "WDM"
+
+[lib]
+crate-type = ["cdylib"]
+
+# WDK crates only exist on Windows build machines (they require the WDK at
+# build time). The pure logic in src/logic.rs must stay testable on any host.
+[target.'cfg(windows)'.build-dependencies]
+wdk-build = "0.5.1"
+bindgen = "0.72"
+
+[target.'cfg(windows)'.dependencies]
+wdk = "0.4.1"
+wdk-alloc = "0.4.1"
+wdk-panic = "0.4.1"
+wdk-sys = "0.5.1"
+
+[features]
+default = []

@@ -1,0 +1,56 @@
+;
+; udsaudio.inf
+;
+; UDS Virtual Audio Device — virtual speaker + microphone for remote
+; sessions (see doc/plan/driver-audio-windows.md).
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Media
+ClassGuid={4d36e96c-e325-11ce-bfc1-08002be10318}
+Provider=%ManufacturerName%
+DriverVer=10/12/2026,0.1.0.0
+CatalogFile=udsaudio.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir=13
+
+[SourceDisksNames]
+1=%DiskName%,,,""
+
+[SourceDisksFiles]
+udsaudio.sys=1
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64.10.0...16299
+
+[Standard.NTamd64.10.0...16299]
+%DeviceName%=udsaudio_Device, Root\udsaudio
+
+[udsaudio_Device.NT]
+CopyFiles=DriversCopyFiles
+
+[DriversCopyFiles]
+udsaudio.sys
+
+[udsaudio_Device.NT.Services]
+AddService=udsaudio,%SPSVCINST_ASSOCSERVICE%,udsaudio_Service_Inst
+
+[udsaudio_Service_Inst]
+DisplayName=%SvcDesc%
+ServiceType=%SERVICE_KERNEL_DRIVER%
+StartType=%SERVICE_DEMAND_START%
+ErrorControl=%SERVICE_ERROR_NORMAL%
+ServiceBinary=%13%\udsaudio.sys
+
+[Strings]
+ManufacturerName="VirtualCable"
+DiskName="udsaudio Source Disk"
+DeviceName="UDS Virtual Audio Device"
+SvcDesc="UDS Virtual Audio Device"
+SPSVCINST_ASSOCSERVICE=0x00000002
+SERVICE_KERNEL_DRIVER=1
+SERVICE_DEMAND_START=3
+SERVICE_ERROR_NORMAL=1

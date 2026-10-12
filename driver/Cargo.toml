@@ -1,0 +1,11 @@
+[workspace]
+members = ["udsaudio"]
+
+# The kernel driver needs its own workspace: panic=abort is a workspace-wide
+# profile setting and must not leak into the user-mode crates.
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
