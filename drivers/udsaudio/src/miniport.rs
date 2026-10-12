@@ -314,6 +314,14 @@ unsafe fn propose_format_impl(request: pc::PPCPROPERTY_REQUEST, with_attributes:
             return STATUS_INVALID_PARAMETER;
         }
         let req = &mut *request;
+        // Packed: v2<<56 | verb<<48 | instance_size<<24 | value_size.
+        dlog!(
+            "propose_format enter: 0x%I64x",
+            (u64::from(with_attributes as u8) << 56)
+                | (u64::from(req.Verb) << 48)
+                | (u64::from(req.InstanceSize & 0xFF_FFFF) << 24)
+                | u64::from(req.ValueSize & 0xFF_FFFF)
+        );
         let miniport = req.MajorTarget as *const Miniport;
         if miniport.is_null() {
             return STATUS_INVALID_PARAMETER;
@@ -549,6 +557,10 @@ unsafe extern "C" fn wave_new_stream(
                 | (u64::from(proposed.channels) << 8)
                 | u64::from(proposed.bits_per_sample);
             dlog!("NewStream: rejected fmt 0x%I64x", detail);
+            dlog!(
+                "NewStream: rejected pin 0x%I64x",
+                ((kind as u64) << 8) | u64::from(pin)
+            );
             return STATUS_INVALID_PARAMETER;
         }
         dlog!("NewStream: accepted");
