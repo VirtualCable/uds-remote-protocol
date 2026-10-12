@@ -77,9 +77,11 @@ pub unsafe fn driver_entry(
         (*driver).DriverUnload = Some(driver_unload);
     }
     // PcInitializeAdapterDriver pointed every MajorFunction at
-    // PcDispatchIrp. Take over the three entries the control device needs;
-    // our dispatchers forward anything not aimed at the control device
-    // straight back to PortCls.
+    // PcDispatchIrp. Take over the four entries we need: three for the
+    // control device, plus PNP so we can tear the control device down when
+    // the adapter is removed (a live device object would pin the driver
+    // image and block unload forever). Our dispatchers forward anything not
+    // meant for us straight back to PortCls.
     // SAFETY: `driver` is valid; replacing MajorFunction entries is the
     // documented way to intercept IRPs.
     unsafe {
@@ -87,6 +89,7 @@ pub unsafe fn driver_entry(
         major[wdk_sys::IRP_MJ_CREATE as usize] = Some(control::dispatch_create_close);
         major[wdk_sys::IRP_MJ_CLOSE as usize] = Some(control::dispatch_create_close);
         major[wdk_sys::IRP_MJ_DEVICE_CONTROL as usize] = Some(control::dispatch_device_control);
+        major[wdk_sys::IRP_MJ_PNP as usize] = Some(control::dispatch_pnp);
     }
     dlog!("DriverEntry ok");
     STATUS_SUCCESS
@@ -258,6 +261,11 @@ unsafe extern "C" fn start_device(
     resources: pc::PRESOURCELIST,
 ) -> i32 {
     dlog!("StartDevice");
+
+    // Remember the adapter FDO: the PnP dispatcher uses it to recognize
+    // IRP_MN_REMOVE_DEVICE and delete the control device in time for the
+    // driver image to unload.
+    control::set_adapter_device(device as wdk_sys::PDEVICE_OBJECT);
 
     // Speaker pair.
     let topo_speaker = match install_subdevice(

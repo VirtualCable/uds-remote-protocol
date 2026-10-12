@@ -8,10 +8,15 @@
 //!
 //! The device is created once per driver load in `AddDevice` (the adapter
 //! FDO is a named portcls device — user mode cannot `CreateFile` it) and
-//! removed in `DriverUnload`. `PcInitializeAdapterDriver` points every
-//! `MajorFunction` at `PcDispatchIrp`, so we install our own dispatchers
-//! for CREATE/CLOSE/DEVICE_CONTROL *after* it; each of them forwards any
-//! IRP not aimed at the control device back to PortCls untouched.
+//! removed when the adapter FDO gets `IRP_MN_REMOVE_DEVICE`. Deleting it on
+//! remove (not in `DriverUnload`) matters: a live device object pins the
+//! driver image, so with the device deleted only at unload the image could
+//! never unload — `DriverUnload` would be dead code and devcon would report
+//! "Driver did not unload" / require a reboot for every reinstall.
+//! `PcInitializeAdapterDriver` points every `MajorFunction` at
+//! `PcDispatchIrp`, so we install our own dispatchers for
+//! CREATE/CLOSE/DEVICE_CONTROL/PNP *after* it; each of them forwards any IRP
+//! not aimed at the control device back to PortCls untouched.
 //!
 //! All IOCTL handling runs at PASSIVE_LEVEL in the caller's thread context.
 
@@ -24,7 +29,7 @@ use wdk_sys::ntddk::{
 };
 use wdk_sys::{
     DEVICE_OBJECT, DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, FILE_DEVICE_UNKNOWN, IO_NO_INCREMENT,
-    NTSTATUS, PDEVICE_OBJECT, PDRIVER_OBJECT, PIRP, UNICODE_STRING,
+    IRP_MN_REMOVE_DEVICE, NTSTATUS, PDEVICE_OBJECT, PDRIVER_OBJECT, PIRP, UNICODE_STRING,
 };
 
 use crate::common::{
@@ -40,8 +45,13 @@ use crate::portcls as pc;
 static MIC_RING: MicRing = SpscRing::new();
 
 /// The control device object (null until `create` succeeds). Only ever
-/// transitions null -> device (AddDevice) -> null (DriverUnload).
+/// transitions null -> device (AddDevice) -> null (PnP remove / unload).
 static CONTROL_DEVICE: AtomicPtr<DEVICE_OBJECT> = AtomicPtr::new(ptr::null_mut());
+
+/// The adapter FDO (set in `StartDevice`). Used by the PnP dispatcher to
+/// recognize `IRP_MN_REMOVE_DEVICE` for the adapter and tear the control
+/// device down while the driver can still unload.
+static ADAPTER_DEVICE: AtomicPtr<DEVICE_OBJECT> = AtomicPtr::new(ptr::null_mut());
 
 // NT device name and DOS symlink for the control channel.
 static NT_NAME: [u16; 20] = adapter_wide(b"\\Device\\UDSAudioCtl");
@@ -67,6 +77,11 @@ pub fn mic_ring() -> &'static MicRing {
 /// The live control device, if created.
 fn control_device() -> PDEVICE_OBJECT {
     CONTROL_DEVICE.load(Ordering::Acquire)
+}
+
+/// Records the adapter FDO so the PnP dispatcher can spot its removal.
+pub fn set_adapter_device(device: PDEVICE_OBJECT) {
+    ADAPTER_DEVICE.store(device, Ordering::Release);
 }
 
 /// Creates the control device and its DOS symlink. Idempotent: the second
@@ -114,8 +129,9 @@ pub fn create(driver: PDRIVER_OBJECT) -> NTSTATUS {
     }
 }
 
-/// Deletes the control device and its symlink. Called from DriverUnload
-/// before chaining to PortCls so no new IRP can arrive afterwards.
+/// Deletes the control device and its symlink. Called from the PnP remove
+/// path (the adapter FDO's `IRP_MN_REMOVE_DEVICE`) and again, harmlessly,
+/// from `DriverUnload` — it is idempotent.
 pub fn delete() {
     let device = CONTROL_DEVICE.swap(ptr::null_mut(), Ordering::AcqRel);
     if device.is_null() {
@@ -214,4 +230,33 @@ pub unsafe extern "C" fn dispatch_device_control(device: PDEVICE_OBJECT, irp: PI
         let consumed = MIC_RING.push(pcm);
         complete(irp, STATUS_SUCCESS, consumed)
     }
+}
+
+/// IRP_MJ_PNP: watches the adapter FDO for `IRP_MN_REMOVE_DEVICE` and
+/// deletes the control device before PortCls unwinds the adapter. Deleting
+/// it here (instead of only in `DriverUnload`) is what lets the driver
+/// image actually unload: a live device object pins it, and the control
+/// device is ours, not PortCls's, so nothing else would ever delete it.
+/// Every other PnP IRP goes straight to PortCls.
+///
+/// SAFETY: installed in the driver's MajorFunction table; the I/O manager
+/// guarantees valid device/irp pointers.
+pub unsafe extern "C" fn dispatch_pnp(device: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
+    // SAFETY: `irp` is valid for the duration of the dispatch; the stack
+    // location belongs to this IRP.
+    unsafe {
+        if !irp.is_null()
+            && !device.is_null()
+            && device == ADAPTER_DEVICE.load(Ordering::Acquire)
+        {
+            // IoGetCurrentIrpStackLocation is a macro: this is its expansion.
+            let stack =
+                (*irp).Tail.Overlay.__bindgen_anon_2.__bindgen_anon_1.CurrentStackLocation;
+            if !stack.is_null() && (*stack).MinorFunction == IRP_MN_REMOVE_DEVICE as u8 {
+                dlog!("adapter remove: deleting control device");
+                delete();
+            }
+        }
+    }
+    forward_to_portcls(device, irp)
 }
