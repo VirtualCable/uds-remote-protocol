@@ -149,7 +149,10 @@ unsafe fn get_description(this: *mut pc::INTERFACE, description: *mut pc::PPCFIL
 /// mono mic without a negotiated device format (the engine's proposal is
 /// stereo, the class handler does not downgrade channels, and
 /// `IAudioClient::GetMixFormat` then fails with
-/// AUDCLNT_E_UNSUPPORTED_FORMAT).
+/// AUDCLNT_E_UNSUPPORTED_FORMAT). When the client's range carries an
+/// attribute list (PROPOSEDATAFORMAT2 with a signal-processing mode), the
+/// list is echoed after the format — the engine discards attribute-less
+/// answers to attributed requests.
 unsafe fn data_range_intersection(
     this: *mut pc::INTERFACE,
     pin_id: u32,
@@ -166,19 +169,39 @@ unsafe fn data_range_intersection(
             return STATUS_INVALID_PARAMETER;
         }
         let kind = (*(this as *const Miniport)).kind;
+        let client = &(*client_data_range).__bindgen_anon_1;
+        // Packed: flags<<40 | fmtsize<<16 | kind<<8 | pin.
         dlog!(
-            "DRI: kind 0x%I64x",
-            ((kind as u64) << 32) | u64::from(pin_id)
+            "DRI: 0x%I64x",
+            (u64::from(client.Flags) << 40)
+                | (u64::from(client.FormatSize) << 16)
+                | ((kind as u64) << 8)
+                | u64::from(pin_id & 0xff)
         );
         let Some(format) = kind.stream_format(pin_id) else {
             return STATUS_INVALID_PARAMETER;
         };
-        let client = &(*client_data_range).__bindgen_anon_1;
         if !guid_eq(&client.Specifier, &tables::KSDATAFORMAT_SPECIFIER_WAVEFORMATEX) {
             dlog!("DRI: specifier mismatch");
             return STATUS_NOT_IMPLEMENTED;
         }
-        let required = size_of::<pc::KSDATAFORMAT_WAVEFORMATEX>() as u32;
+        // KSDATARANGE_ATTRIBUTES: an attribute list (KSMULTIPLE_ITEM + the
+        // mode attribute) follows the client's range in memory. When the
+        // client sends one (PROPOSEDATAFORMAT2), the resultant format must
+        // echo it or the audio engine discards the negotiated format.
+        let mut attr_len = 0usize;
+        let mut attr_src = ptr::null::<u8>();
+        if client.Flags & tables::KSDATARANGE_ATTRIBUTES != 0 {
+            // Sanity: the list header must fit and claim a bounded size.
+            let list = (client_data_range as *const u8).add(client.FormatSize as usize);
+            let list_len = (list as *const u32).read_unaligned() as usize;
+            if (8..=4096).contains(&list_len) {
+                attr_len = list_len;
+                attr_src = list;
+            }
+        }
+        let format_len = size_of::<pc::KSDATAFORMAT_WAVEFORMATEX>() as u32;
+        let required = format_len + attr_len as u32;
         if output_buffer_length == 0 {
             *resultant_format_length = required;
             return STATUS_BUFFER_OVERFLOW;
@@ -201,8 +224,9 @@ unsafe fn data_range_intersection(
         // field by field with unaligned stores.
         let out = resultant_format as *mut pc::KSDATAFORMAT_WAVEFORMATEX;
         let df = ptr::addr_of_mut!((*out).DataFormat.__bindgen_anon_1);
-        ptr::addr_of_mut!((*df).FormatSize).write_unaligned(required);
-        ptr::addr_of_mut!((*df).Flags).write_unaligned(0);
+        ptr::addr_of_mut!((*df).FormatSize).write_unaligned(format_len);
+        ptr::addr_of_mut!((*df).Flags)
+            .write_unaligned(if attr_len > 0 { tables::KSDATARANGE_ATTRIBUTES } else { 0 });
         ptr::addr_of_mut!((*df).SampleSize).write_unaligned(format.frame_bytes() as u32);
         ptr::addr_of_mut!((*df).Reserved).write_unaligned(0);
         ptr::addr_of_mut!((*df).MajorFormat).write_unaligned(tables::KSDATAFORMAT_TYPE_AUDIO);
@@ -219,6 +243,14 @@ unsafe fn data_range_intersection(
         ptr::addr_of_mut!((*wf).nBlockAlign).write_unaligned(frame);
         ptr::addr_of_mut!((*wf).wBitsPerSample).write_unaligned(format.bits_per_sample);
         ptr::addr_of_mut!((*wf).cbSize).write_unaligned(0);
+        // Echo the client's attribute list right after the format.
+        if attr_len > 0 {
+            ptr::copy_nonoverlapping(
+                attr_src,
+                (resultant_format as *mut u8).add(format_len as usize),
+                attr_len,
+            );
+        }
         *resultant_format_length = required;
         STATUS_SUCCESS
     }

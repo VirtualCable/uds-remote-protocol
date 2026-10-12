@@ -197,7 +197,7 @@ const fn data_format(
 
 /// `KSDATARANGE_ATTRIBUTES` (ks.h): an attribute list follows this range in
 /// the pin's datarange pointer array.
-const KSDATARANGE_ATTRIBUTES: u32 = 0x2;
+pub const KSDATARANGE_ATTRIBUTES: u32 = 0x2;
 
 /// A streaming data range for a single fixed PCM format (min == max), with
 /// the mode attribute list attached.
