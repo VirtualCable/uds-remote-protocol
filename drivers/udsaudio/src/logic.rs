@@ -417,6 +417,12 @@ pub static RENDER_WAVE_CONNECTIONS: [Connection; 2] = [
 ];
 
 /// Capture wave filter: bridge + source (apps).
+///
+/// The streaming pin's communication kind is SINK — not SOURCE — matching
+/// sysvad's capture pin (micinwavtable.h): all host pins are sinks from the
+/// filter's point of view. With SOURCE the audio endpoint builder never
+/// finishes the capture endpoint (no device format, GetMixFormat fails with
+/// AUDCLNT_E_UNSUPPORTED_FORMAT).
 pub static CAPTURE_WAVE_PINS: [PinDesc; 2] = [
     PinDesc {
         data_flow: DataFlow::In,
@@ -427,7 +433,7 @@ pub static CAPTURE_WAVE_PINS: [PinDesc; 2] = [
     },
     PinDesc {
         data_flow: DataFlow::Out,
-        communication: Communication::Source,
+        communication: Communication::Sink,
         category: &KSCATEGORY_AUDIO,
         range: DataRange::Pcm(MIC_FORMAT),
         max_instances: MAX_CAPTURE_STREAMS,
