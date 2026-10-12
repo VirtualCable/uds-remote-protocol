@@ -16,6 +16,8 @@ pub const STATUS_NOT_SUPPORTED: i32 = 0xC000_00BB_u32 as i32;
 pub const STATUS_NOINTERFACE: i32 = 0xC000_02B9_u32 as i32;
 pub const STATUS_BUFFER_OVERFLOW: i32 = 0x8000_0005_u32 as i32;
 pub const STATUS_BUFFER_TOO_SMALL: i32 = 0xC000_0023_u32 as i32;
+pub const STATUS_INVALID_DEVICE_REQUEST: i32 = 0xC000_0010_u32 as i32;
+pub const STATUS_INVALID_BUFFER_SIZE: i32 = 0xC000_0206_u32 as i32;
 
 /// Byte-wise GUID comparison (the bindgen GUID derives no PartialEq).
 pub fn guid_eq(a: &pc::GUID, b: &pc::GUID) -> bool {

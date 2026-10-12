@@ -1,12 +1,22 @@
-//! `IMiniportWaveRTStream` implementation: a virtual DMA stream. The render
-//! sink discards whatever apps write; the capture/loopback sources return
-//! silence (the mapped buffer is zeroed on allocation and nobody writes to
-//! it). The position clock is simulated from the performance counter — the
-//! pure math lives in [`crate::logic::PositionClock`].
+//! `IMiniportWaveRTStream` implementation: a virtual DMA stream plus the M4
+//! data plumbing:
+//!
+//! - mic source stream: on every `GetPosition` the newly exposed buffer
+//!   region is filled from the mic ring (fed by the session agent via
+//!   `\\.\UDSAudioCtl`); underrun reads as silence;
+//! - render sink stream: the newly written region is copied into the
+//!   loopback ring (only the first running sink stream feeds it);
+//! - loopback source stream: its buffer is filled from that ring, so WASAPI
+//!   loopback capture hears what the apps render.
+//!
+//! The position clock is simulated from the performance counter — the pure
+//! math lives in [`crate::logic::PositionClock`]; the rings are
+//! [`crate::logic::SpscRing`]. Everything here runs lock-free at up to
+//! DISPATCH_LEVEL.
 
 use core::mem::size_of;
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use alloc::boxed::Box;
 
@@ -14,8 +24,9 @@ use crate::common::{
     STATUS_INVALID_PARAMETER, STATUS_NOINTERFACE, STATUS_NOT_IMPLEMENTED, STATUS_NOT_SUPPORTED,
     STATUS_SUCCESS, STATUS_UNSUCCESSFUL, guid_eq,
 };
+use crate::control;
 use crate::dbg::dlog;
-use crate::logic::{self, FilterKind, PositionClock};
+use crate::logic::{self, FilterKind, LoopbackRing, PositionClock, RingRef, SpscRing};
 use crate::portcls as pc;
 use crate::tables;
 
@@ -30,6 +41,33 @@ const KSSTATE_STOP: i32 = 0;
 const KSSTATE_ACQUIRE: i32 = 1;
 const KSSTATE_PAUSE: i32 = 2;
 const KSSTATE_RUN: i32 = 3;
+
+/// The render→loopback ring. Producer: the feeding render sink stream's
+/// `GetPosition`; consumer: the loopback stream's `GetPosition`.
+static LOOPBACK_RING: LoopbackRing = SpscRing::new();
+
+/// Whether some render sink stream currently feeds the loopback ring.
+/// Only one feeder is allowed: two render streams writing into the same
+/// ring would interleave their audio.
+static LOOPBACK_FEEDER_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// What a stream does with its ring on `GetPosition`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamRole {
+    /// No ring attached (should not happen for streaming pins today).
+    None,
+    /// Mic source: ring -> buffer (silence on underrun).
+    MicSource,
+    /// Render sink: buffer -> ring, but only while `is_feeder`.
+    LoopbackSink,
+    /// Loopback source: ring -> buffer (silence on underrun).
+    LoopbackSource,
+}
+
+/// The render→loopback ring, for the miniport wiring.
+pub fn loopback_ring() -> &'static LoopbackRing {
+    &LOOPBACK_RING
+}
 
 /// A WaveRT stream. The first field is the vtable pointer so that the
 /// struct address is directly usable as `PMINIPORTWAVERTSTREAM` /
@@ -49,6 +87,14 @@ pub struct WaveRtStream {
     /// Kernel mapping of the audio buffer (we zero capture buffers).
     audio_buffer: *mut u8,
     audio_buffer_size: u32,
+    /// The ring this stream exchanges data with (mic feed or loopback).
+    ring: Option<RingRef>,
+    /// What `pump` does with the ring.
+    role: StreamRole,
+    /// Render sink only: we won the loopback-feeder claim.
+    is_feeder: bool,
+    /// Stream byte position handled by the last `pump` call.
+    last_pos: u64,
 }
 
 impl WaveRtStream {
@@ -62,6 +108,20 @@ impl WaveRtStream {
         let Some(format) = kind.stream_format(pin) else {
             return ptr::null_mut();
         };
+        let (ring, role) = match (kind, pin) {
+            (FilterKind::CaptureWave, logic::CAPTURE_WAVE_PIN_SOURCE) => {
+                (Some(RingRef::Mic(control::mic_ring())), StreamRole::MicSource)
+            }
+            (FilterKind::RenderWave, logic::RENDER_WAVE_PIN_SINK) => (
+                Some(RingRef::Loopback(loopback_ring())),
+                StreamRole::LoopbackSink,
+            ),
+            (FilterKind::RenderWave, logic::RENDER_WAVE_PIN_LOOPBACK) => (
+                Some(RingRef::Loopback(loopback_ring())),
+                StreamRole::LoopbackSource,
+            ),
+            _ => (None, StreamRole::None),
+        };
         let stream = Box::new(Self {
             vtbl: &raw const STREAM_VTBL,
             ref_count: AtomicU32::new(1),
@@ -74,8 +134,73 @@ impl WaveRtStream {
             audio_mdl: ptr::null_mut(),
             audio_buffer: ptr::null_mut(),
             audio_buffer_size: 0,
+            ring,
+            role,
+            is_feeder: false,
+            last_pos: 0,
         });
         Box::into_raw(stream)
+    }
+
+    /// Moves the PCM the engine exposed since the last position query
+    /// between the audio buffer and the ring. Direction depends on
+    /// [`StreamRole`]. Lock-free; safe at any IRQL.
+    fn pump(&mut self, byte_pos: u64) {
+        let Some(ring) = self.ring else { return; };
+        if self.role == StreamRole::LoopbackSink && !self.is_feeder {
+            return; // another render stream owns the loopback ring
+        }
+        if self.audio_buffer.is_null() || self.audio_buffer_size == 0 {
+            return;
+        }
+        let size = u64::from(self.audio_buffer_size);
+        if byte_pos <= self.last_pos {
+            return;
+        }
+        // A long stall (paused engine, missed queries) can put the position
+        // more than one buffer ahead; only the newest buffer-worth matters.
+        let mut span = byte_pos - self.last_pos;
+        if span > size {
+            span = size;
+        }
+        let start = (byte_pos - span) % size;
+        let first_len = span.min(size - start);
+        let rest = span - first_len;
+        // SAFETY: start < size and first_len <= size - start, so the first
+        // chunk is inside the mapped buffer; the second chunk is
+        // [0, rest) with rest <= start <= size, also inside.
+        unsafe {
+            let base = self.audio_buffer;
+            match self.role {
+                StreamRole::MicSource | StreamRole::LoopbackSource => {
+                    let first =
+                        core::slice::from_raw_parts_mut(base.add(start as usize), first_len as usize);
+                    ring.pop_or_silence(first);
+                    if rest > 0 {
+                        let second = core::slice::from_raw_parts_mut(base, rest as usize);
+                        ring.pop_or_silence(second);
+                    }
+                }
+                StreamRole::LoopbackSink => {
+                    let first =
+                        core::slice::from_raw_parts(base.add(start as usize), first_len as usize);
+                    ring.push_overwrite(first);
+                    if rest > 0 {
+                        let second = core::slice::from_raw_parts(base, rest as usize);
+                        ring.push_overwrite(second);
+                    }
+                }
+                StreamRole::None => {}
+            }
+        }
+    }
+
+    /// Releases the loopback-feeder claim if this stream holds it.
+    fn release_feeder(&mut self) {
+        if self.is_feeder {
+            self.is_feeder = false;
+            LOOPBACK_FEEDER_ACTIVE.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -117,9 +242,10 @@ unsafe extern "C" fn stream_release(this: *mut pc::INTERFACE) -> u32 {
     let stream = this as *mut WaveRtStream;
     let prev = unsafe { &*stream }.ref_count.fetch_sub(1, Ordering::AcqRel);
     if prev == 1 {
+        // SAFETY: refcount hit zero, no other reference exists; safe to
+        // touch the stream mutably and drop the Box exactly once here.
+        unsafe { &mut *stream }.release_feeder();
         dlog!("stream dropped");
-        // SAFETY: refcount hit zero, no other reference exists; the Box was
-        // created by `create` and is dropped exactly once here.
         drop(unsafe { Box::from_raw(stream) });
         0
     } else {
@@ -166,6 +292,7 @@ unsafe extern "C" fn stream_set_format(
         }
         stream.format = proposed;
         stream.clock = PositionClock::new(proposed);
+        stream.last_pos = 0;
         STATUS_SUCCESS
     }
 }
@@ -190,15 +317,40 @@ unsafe extern "C" fn stream_set_state(this: *mut pc::INTERFACE, state: i32) -> i
                 if !stream.clock.is_running() {
                     stream.clock.start(now, freq);
                 }
+                match stream.role {
+                    StreamRole::MicSource | StreamRole::LoopbackSource => {
+                        // Drop whatever the ring holds from before this run:
+                        // stale audio is worse than a gap.
+                        if let Some(ring) = stream.ring {
+                            ring.drain();
+                        }
+                    }
+                    StreamRole::LoopbackSink => {
+                        // First running sink stream becomes the feeder.
+                        if !stream.is_feeder {
+                            stream.is_feeder =
+                                !LOOPBACK_FEEDER_ACTIVE.swap(true, Ordering::AcqRel);
+                        }
+                        if stream.is_feeder {
+                            if let Some(ring) = stream.ring {
+                                ring.drain();
+                            }
+                        }
+                    }
+                    StreamRole::None => {}
+                }
             }
             KSSTATE_PAUSE | KSSTATE_ACQUIRE => {
                 if stream.state == KSSTATE_RUN {
                     stream.clock.stop(now);
                 }
+                stream.release_feeder();
             }
             KSSTATE_STOP => {
                 stream.clock.stop(now);
                 stream.clock.reset();
+                stream.release_feeder();
+                stream.last_pos = 0;
             }
             _ => {
                 dlog!("SetState: unknown state 0x%I64x", state as u64);
@@ -223,6 +375,12 @@ unsafe extern "C" fn stream_get_position(
         let stream = &mut *(this as *mut WaveRtStream);
         let (now, _freq) = qpc();
         let byte_pos = stream.clock.position_at(now);
+        // Exchange the bytes the engine exposed since the last query. For
+        // capture this fills the region before the engine reads it (it only
+        // consumes up to the position we report); for render it harvests
+        // what the engine wrote after our previous report.
+        stream.pump(byte_pos);
+        stream.last_pos = byte_pos;
         let pos = &mut *position;
         pos.PlayOffset = byte_pos;
         pos.WriteOffset = byte_pos;

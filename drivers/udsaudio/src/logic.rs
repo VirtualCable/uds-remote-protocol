@@ -669,11 +669,13 @@ impl<const N: usize> SpscRing<N> {
         dst[n..].fill(0);
     }
 
-    /// Discards all buffered data. Not concurrent-safe: call only while
-    /// both endpoints are idle (stream setup/teardown).
-    pub fn clear(&self) {
-        self.tail.store(0, Ordering::Relaxed);
-        self.head.store(0, Ordering::Relaxed);
+    /// Discards all buffered data, keeping the counters monotonic (the read
+    /// index jumps to the current write index). Safe against a concurrent
+    /// producer: at worst the bytes of an in-flight push are skipped, the
+    /// `head >= tail` invariant can never break.
+    pub fn drain(&self) {
+        let head = self.head.load(Ordering::Acquire);
+        self.tail.store(head, Ordering::Release);
     }
 
     /// Copies `src` into the ring starting at absolute position `pos`.
@@ -720,6 +722,48 @@ impl<const N: usize> SpscRing<N> {
 impl<const N: usize> Default for SpscRing<N> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The mic feed ring (control IOCTL pushes, capture stream pops).
+pub type MicRing = SpscRing<MIC_RING_CAPACITY>;
+
+/// The render→loopback ring (render sink pushes, loopback stream pops).
+pub type LoopbackRing = SpscRing<LOOPBACK_RING_CAPACITY>;
+
+/// A statically dispatched reference to one of the driver rings, so a
+/// stream can carry "its ring" without const-generic sprawl.
+#[derive(Clone, Copy)]
+pub enum RingRef {
+    /// The mic feed ring.
+    Mic(&'static MicRing),
+    /// The render→loopback ring.
+    Loopback(&'static LoopbackRing),
+}
+
+impl RingRef {
+    /// Forwards to the ring's [`SpscRing::pop_or_silence`].
+    pub fn pop_or_silence(self, dst: &mut [u8]) {
+        match self {
+            Self::Mic(ring) => ring.pop_or_silence(dst),
+            Self::Loopback(ring) => ring.pop_or_silence(dst),
+        }
+    }
+
+    /// Forwards to the ring's [`SpscRing::push_overwrite`].
+    pub fn push_overwrite(self, data: &[u8]) -> usize {
+        match self {
+            Self::Mic(ring) => ring.push_overwrite(data),
+            Self::Loopback(ring) => ring.push_overwrite(data),
+        }
+    }
+
+    /// Forwards to the ring's [`SpscRing::drain`].
+    pub fn drain(self) {
+        match self {
+            Self::Mic(ring) => ring.drain(),
+            Self::Loopback(ring) => ring.drain(),
+        }
     }
 }
 
@@ -1003,13 +1047,13 @@ mod tests {
     }
 
     #[test]
-    fn ring_clear_resets_counters() {
+    fn ring_drain_drops_pending_data() {
         let ring = SpscRing::<16>::new();
         ring.push(&[9u8; 10]);
-        ring.clear();
+        ring.drain();
         assert!(ring.is_empty());
         assert_eq!(ring.len(), 0);
-        // Still usable after clear.
+        // Counters stay monotonic: the ring keeps working across the drain.
         assert_eq!(ring.push(&[1, 2]), 2);
         let mut out = [0u8; 2];
         assert_eq!(ring.pop(&mut out), 2);

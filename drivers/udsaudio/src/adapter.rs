@@ -11,6 +11,7 @@ use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::common::{STATUS_INSUFFICIENT_RESOURCES, STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
+use crate::control;
 use crate::dbg::dlog;
 use crate::logic::{self, FilterKind};
 use crate::miniport::Miniport;
@@ -75,6 +76,18 @@ pub unsafe fn driver_entry(
     unsafe {
         (*driver).DriverUnload = Some(driver_unload);
     }
+    // PcInitializeAdapterDriver pointed every MajorFunction at
+    // PcDispatchIrp. Take over the three entries the control device needs;
+    // our dispatchers forward anything not aimed at the control device
+    // straight back to PortCls.
+    // SAFETY: `driver` is valid; replacing MajorFunction entries is the
+    // documented way to intercept IRPs.
+    unsafe {
+        let major = &mut (*driver).MajorFunction;
+        major[wdk_sys::IRP_MJ_CREATE as usize] = Some(control::dispatch_create_close);
+        major[wdk_sys::IRP_MJ_CLOSE as usize] = Some(control::dispatch_create_close);
+        major[wdk_sys::IRP_MJ_DEVICE_CONTROL as usize] = Some(control::dispatch_device_control);
+    }
     dlog!("DriverEntry ok");
     STATUS_SUCCESS
 }
@@ -86,6 +99,9 @@ pub unsafe fn driver_entry(
 /// level).
 unsafe extern "C" fn driver_unload(driver: wdk_sys::PDRIVER_OBJECT) {
     dlog!("DriverUnload");
+    // Delete the control device first so no new IOCTL can arrive while
+    // PortCls unwinds the audio devices.
+    control::delete();
     let previous = PREVIOUS_UNLOAD.load(Ordering::Relaxed);
     if !previous.is_null() {
         // SAFETY: the pointer came from the DriverUnload field PortCls set
@@ -96,7 +112,9 @@ unsafe extern "C" fn driver_unload(driver: wdk_sys::PDRIVER_OBJECT) {
 }
 
 /// PnP AddDevice: PortCls creates the functional device object and takes
-/// over PnP/power dispatch for it.
+/// over PnP/power dispatch for it. Also creates the user-mode control
+/// device (mic feed IOCTL channel); a failure there is logged but does not
+/// fail audio device creation.
 unsafe extern "C" fn add_device(
     driver: *mut pc::_DRIVER_OBJECT,
     physical_device: *mut pc::_DEVICE_OBJECT,
@@ -108,7 +126,11 @@ unsafe extern "C" fn add_device(
     };
     if status != STATUS_SUCCESS {
         dlog!("PcAddAdapterDevice failed 0x%I64x", status as u32 as u64);
+        return status;
     }
+    // The driver object is the same one DriverEntry got; wdk-sys and our
+    // bindgen bindings type it differently but it is the same pointer.
+    control::create(driver as wdk_sys::PDRIVER_OBJECT);
     status
 }
 

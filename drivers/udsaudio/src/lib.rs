@@ -2,9 +2,11 @@
 //!
 //! Provides two virtual audio endpoints for remote sessions:
 //! - a virtual speaker (render), used as the audio-out capture source
-//!   (WASAPI loopback works on it like on any render endpoint);
-//! - a virtual microphone (capture), fed by the session agent via IOCTL
-//!   (M4; currently produces silence).
+//!   (WASAPI loopback works on it like on any render endpoint; the sink
+//!   stream copies rendered PCM into the loopback ring);
+//! - a virtual microphone (capture), fed by the session agent through the
+//!   `\Device\UDSAudioCtl` control device (`IOCTL_PUSH_MIC`); silence when
+//!   the ring is empty.
 //!
 //! All policy lives in user mode; the driver only moves PCM buffers.
 //! See doc/plan/driver-audio-windows.md for the spike plan.
@@ -15,6 +17,8 @@
 mod adapter;
 #[cfg(windows)]
 mod common;
+#[cfg(windows)]
+mod control;
 #[cfg(windows)]
 mod dbg;
 // The pure logic tables are consumed by the Windows-only kernel modules;
