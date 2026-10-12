@@ -13,8 +13,8 @@ use alloc::boxed::Box;
 
 use crate::common::{
     STATUS_BUFFER_OVERFLOW, STATUS_BUFFER_TOO_SMALL, STATUS_INSUFFICIENT_RESOURCES,
-    STATUS_INVALID_PARAMETER, STATUS_NOINTERFACE, STATUS_NO_MATCH, STATUS_NOT_IMPLEMENTED,
-    STATUS_SUCCESS, guid_eq,
+    STATUS_INVALID_DEVICE_REQUEST, STATUS_INVALID_PARAMETER, STATUS_NOINTERFACE, STATUS_NO_MATCH,
+    STATUS_NOT_IMPLEMENTED, STATUS_NOT_SUPPORTED, STATUS_SUCCESS, guid_eq,
 };
 use crate::dbg::dlog;
 use crate::logic::{self, FilterKind};
@@ -144,15 +144,9 @@ unsafe fn get_description(this: *mut pc::INTERFACE, description: *mut pc::PPCFIL
 /// `IMiniport::DataRangeIntersection` — single-format semantics: after
 /// validating the specifier and channel count, the intersection is always
 /// our one advertised PCM format, which we write into the resultant buffer
-/// ourselves. Deferring to the PortCls class handler (sysvad style, with
-/// STATUS_NOT_IMPLEMENTED) works for the stereo speaker but leaves the
-/// mono mic without a negotiated device format (the engine's proposal is
-/// stereo, the class handler does not downgrade channels, and
-/// `IAudioClient::GetMixFormat` then fails with
-/// AUDCLNT_E_UNSUPPORTED_FORMAT). When the client's range carries an
-/// attribute list (PROPOSEDATAFORMAT2 with a signal-processing mode), the
-/// list is echoed after the format — the engine discards attribute-less
-/// answers to attributed requests.
+/// ourselves. When the client's range carries an attribute list (the
+/// KSDATARANGE_ATTRIBUTES flag), the list is echoed after the format, as
+/// attributed requests expect attributed answers.
 unsafe fn data_range_intersection(
     this: *mut pc::INTERFACE,
     pin_id: u32,
@@ -253,6 +247,166 @@ unsafe fn data_range_intersection(
         }
         *resultant_format_length = required;
         STATUS_SUCCESS
+    }
+}
+
+// --- filter property handlers (default device format) -----------------------------
+
+/// `KSPROPERTY_PIN_PROPOSEDATAFORMAT` handler (wave filter automation).
+/// Answers with the pin's single default PCM format as a
+/// KSDATAFORMAT_WAVEFORMATEXTENSIBLE blob. The audio endpoint builder stores
+/// the answer as the endpoint's device format (`GetMixFormat`).
+///
+/// SAFETY: called by PortCls with a valid property request.
+pub unsafe extern "C" fn propose_format(request: pc::PPCPROPERTY_REQUEST) -> i32 {
+    // SAFETY: forwards to the shared implementation.
+    unsafe { propose_format_impl(request, false) }
+}
+
+/// `KSPROPERTY_PIN_PROPOSEDATAFORMAT2` handler (wave filter automation).
+/// Same as [`propose_format`], but the request carries a
+/// signal-processing-mode attribute list (a KSMULTIPLE_ITEM after the
+/// KSP_PIN tail) which is validated and echoed after the output format, per
+/// sysvad's `PropertyHandlerProposedFormat2`.
+///
+/// SAFETY: called by PortCls with a valid property request.
+pub unsafe extern "C" fn propose_format2(request: pc::PPCPROPERTY_REQUEST) -> i32 {
+    // SAFETY: forwards to the shared implementation.
+    unsafe { propose_format_impl(request, true) }
+}
+
+/// Shared implementation of the two proposed-format property handlers,
+/// mirroring sysvad's `PropertyHandlerProposedFormat[2]` semantics for a
+/// driver with exactly one format per streaming pin and only the DEFAULT
+/// signal processing mode.
+unsafe fn propose_format_impl(request: pc::PPCPROPERTY_REQUEST, with_attributes: bool) -> i32 {
+    // SAFETY: all pointers are validated before use; the request and its
+    // buffers are owned by PortCls for the duration of the call.
+    unsafe {
+        if request.is_null() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        let req = &mut *request;
+        let miniport = req.MajorTarget as *const Miniport;
+        if miniport.is_null() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        let kind = (*miniport).kind;
+
+        // The instance data holds the KSP_PIN fields past the KSPROPERTY
+        // header (PinId + Reserved/Flags), then the attribute list for v2.
+        let pin_tail = size_of::<pc::KSP_PIN>() - size_of::<pc::KSIDENTIFIER>();
+        if (req.InstanceSize as usize) < pin_tail || req.Instance.is_null() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        let pin_id = (req.Instance as *const u32).read_unaligned();
+        if pin_id as usize >= kind.desc().pins.len() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        // Only streaming pins have a default format (bridge pins are not
+        // supported, as in sysvad).
+        let Some(format) = kind.stream_format(pin_id) else {
+            return STATUS_NOT_SUPPORTED;
+        };
+
+        // Basic support query: report KSPROPERTY_TYPE_GET (portcls does not
+        // export PropertyHandler_BasicSupport; ks.lib is not linked).
+        if req.Verb & logic::KSPROPERTY_TYPE_BASICSUPPORT != 0 {
+            if req.ValueSize == 0 {
+                req.ValueSize = size_of::<u32>() as u32;
+                return STATUS_BUFFER_OVERFLOW;
+            }
+            if req.ValueSize < size_of::<u32>() as u32 || req.Value.is_null() {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            (req.Value as *mut u32).write_unaligned(logic::KSPROPERTY_TYPE_GET);
+            req.ValueSize = size_of::<u32>() as u32;
+            return STATUS_SUCCESS;
+        }
+
+        // v2: extract and validate the signal processing mode; only DEFAULT
+        // is supported. The attribute list is echoed after the output format.
+        let format_len = logic::DEFAULT_FORMAT_BLOB_SIZE;
+        let mut attr_src = ptr::null::<u8>();
+        let mut attr_len = 0usize;
+        let mut total = format_len;
+        if with_attributes {
+            attr_src = (req.Instance as *const u8).add(pin_tail);
+            attr_len = req.InstanceSize as usize - pin_tail;
+            match extract_signal_processing_mode(attr_src, attr_len) {
+                Ok(mode) if guid_eq(&mode, &tables::SIGNALPROCESSING_MODE_DEFAULT) => {}
+                Ok(_) => return STATUS_NOT_SUPPORTED,
+                Err(status) => return status,
+            }
+            total += attr_len;
+        }
+
+        if req.ValueSize == 0 {
+            req.ValueSize = total as u32;
+            return STATUS_BUFFER_OVERFLOW;
+        }
+        if (req.ValueSize as usize) < total {
+            return STATUS_BUFFER_TOO_SMALL;
+        }
+        if req.Verb & logic::KSPROPERTY_TYPE_GET == 0 {
+            return STATUS_INVALID_DEVICE_REQUEST;
+        }
+        if req.Value.is_null() {
+            return STATUS_INVALID_PARAMETER;
+        }
+        // Packed: v2<<16 | kind<<8 | pin.
+        dlog!(
+            "propose_format: 0x%I64x",
+            (u64::from(with_attributes as u8) << 16) | ((kind as u64) << 8) | u64::from(pin_id)
+        );
+        let blob = logic::default_format_blob(&format);
+        ptr::copy_nonoverlapping(blob.as_ptr(), req.Value as *mut u8, format_len);
+        if with_attributes {
+            // The output format is followed by the echoed attribute list.
+            ((req.Value as *mut u8).add(4) as *mut u32)
+                .write_unaligned(tables::KSDATARANGE_ATTRIBUTES);
+            ptr::copy_nonoverlapping(attr_src, (req.Value as *mut u8).add(format_len), attr_len);
+        }
+        req.ValueSize = total as u32;
+        STATUS_SUCCESS
+    }
+}
+
+/// Extracts the signal processing mode from a v2 request's attribute list
+/// (a KSMULTIPLE_ITEM followed by QWORD-aligned KSATTRIBUTEs), mirroring
+/// sysvad's `GetAttributesFromAttributeList`: unknown attributes are
+/// NOT_SUPPORTED, and a list without a mode attribute means DEFAULT.
+unsafe fn extract_signal_processing_mode(list: *const u8, size: usize) -> Result<pc::GUID, i32> {
+    // SAFETY: `list`/`size` describe the tail of the PortCls instance
+    // buffer, validated by the caller.
+    unsafe {
+        if list.is_null() || size < size_of::<pc::KSMULTIPLE_ITEM>() {
+            return Err(STATUS_INVALID_PARAMETER);
+        }
+        let count = (list as *const u32).add(1).read_unaligned();
+        let mut remaining = size - size_of::<pc::KSMULTIPLE_ITEM>();
+        let mut attr = list.add(size_of::<pc::KSMULTIPLE_ITEM>());
+        let mut mode = tables::SIGNALPROCESSING_MODE_DEFAULT;
+        for _ in 0..count {
+            if remaining < size_of::<pc::KSATTRIBUTE>() {
+                return Err(STATUS_INVALID_PARAMETER);
+            }
+            let attr_size = (attr as *const u32).read_unaligned() as usize;
+            let attr_guid = (attr.add(8) as *const pc::GUID).read_unaligned();
+            if !guid_eq(&attr_guid, &tables::KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE) {
+                return Err(STATUS_NOT_SUPPORTED);
+            }
+            // The mode attribute carries the mode GUID as payload.
+            let with_payload = size_of::<pc::KSATTRIBUTE>() + size_of::<pc::GUID>();
+            if attr_size != with_payload || remaining < with_payload {
+                return Err(STATUS_INVALID_PARAMETER);
+            }
+            mode = (attr.add(size_of::<pc::KSATTRIBUTE>()) as *const pc::GUID).read_unaligned();
+            let stride = (attr_size + 7) & !7;
+            attr = attr.add(stride);
+            remaining = remaining.saturating_sub(stride);
+        }
+        Ok(mode)
     }
 }
 

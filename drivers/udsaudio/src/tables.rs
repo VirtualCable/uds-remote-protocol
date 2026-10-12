@@ -60,7 +60,7 @@ pub static IID_IMINIPORT_WAVE_RT_STREAM: pc::GUID = to_guid(&logic::IID_IMINIPOR
 pub static IID_IMINIPORT_TOPOLOGY: pc::GUID = to_guid(&logic::IID_IMINIPORT_TOPOLOGY);
 
 /// `KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE` (ksmedia.h).
-static KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE: pc::GUID = pc::GUID {
+pub static KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE: pc::GUID = pc::GUID {
     Data1: 0xe1f8_9eb5,
     Data2: 0x5f46,
     Data3: 0x419b,
@@ -68,76 +68,40 @@ static KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE: pc::GUID = pc::GUID {
 };
 
 /// `AUDIO_SIGNALPROCESSING_MODE_DEFAULT` (ksmedia.h).
-static SIGNALPROCESSING_MODE_DEFAULT: pc::GUID = pc::GUID {
+pub static SIGNALPROCESSING_MODE_DEFAULT: pc::GUID = pc::GUID {
     Data1: 0xc18e_2f7e,
     Data2: 0x933d,
     Data3: 0x4965,
     Data4: [0xb7, 0xd1, 0x1e, 0xef, 0x22, 0x8d, 0x2a, 0xf3],
 };
 
+/// `KSPROPSETID_Pin` (ks.h) — property set of the pin properties.
+pub static KSPROPSETID_PIN: pc::GUID = to_guid(&logic::KSPROPSETID_PIN);
+
 // --- datarange attribute list (signal processing mode) ------------------------
 //
 // Every streaming pin advertises a KSATTRIBUTE list with the audio signal
-// processing mode attribute, like sysvad's simple.h. Without it the audio
-// endpoint builder's PROPOSEDATAFORMAT2 negotiation fails on capture
-// endpoints and they never get a device format (IAudioClient::GetMixFormat
-// then fails with AUDCLNT_E_UNSUPPORTED_FORMAT). The payload GUID matters:
-// the builder matches the requested mode against it, so a bare header
-// without payload still fails the negotiation.
+// processing mode attribute, exactly like sysvad's simple.h: a bare
+// KSATTRIBUTE (no mode payload — that side of the negotiation lives in the
+// PROPOSEDATAFORMAT2 handler) and a KSATTRIBUTE_LIST holding an array of
+// pointers to it. Without it the audio endpoint builder's format negotiation
+// fails on capture endpoints and they never get a device format
+// (IAudioClient::GetMixFormat then fails with AUDCLNT_E_UNSUPPORTED_FORMAT).
 
-/// `KSMULTIPLE_ITEM` (ks.h) — not in the bindgen allowlist.
-#[repr(C)]
-struct KsMultipleItem {
-    /// Total size including the attributes.
-    size: u32,
-    /// Attribute count.
-    count: u32,
-}
+static MODE_ATTRIBUTE: SyncRo<pc::KSATTRIBUTE> = SyncRo(pc::KSATTRIBUTE {
+    Size: size_of::<pc::KSATTRIBUTE>() as u32,
+    Flags: 0,
+    Attribute: KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE,
+});
 
-/// `KSATTRIBUTE` (ks.h) — not in the bindgen allowlist.
-#[repr(C)]
-struct KsAttribute {
-    /// Size of the attribute including payload (none here).
-    size: u32,
-    /// Flags (none).
-    flags: u32,
-    /// Attribute GUID.
-    attribute: pc::GUID,
-}
-
-/// `KSATTRIBUTE_AUDIOSIGNALPROCESSING_MODE` (ksmedia.h): the attribute
-/// header plus the signal-processing-mode GUID payload.
-#[repr(C)]
-struct ModeAttribute {
-    /// Attribute header.
-    header: KsAttribute,
-    /// The mode this range supports (payload).
-    mode: pc::GUID,
-}
+static MODE_ATTRIBUTE_PTRS: SyncRo<[pc::PKSATTRIBUTE; 1]> =
+    SyncRo([&raw const MODE_ATTRIBUTE.0 as pc::PKSATTRIBUTE]);
 
 /// The mode attribute list referenced as the second "datarange" of every
 /// streaming pin (KSDATARANGE_FLAGS_ATTRIBUTES set on the real range).
-#[repr(C)]
-struct ModeAttributeList {
-    /// Header.
-    header: KsMultipleItem,
-    /// The single attribute (with payload).
-    attribute: ModeAttribute,
-}
-
-static MODE_ATTRIBUTE_LIST: SyncRo<ModeAttributeList> = SyncRo(ModeAttributeList {
-    header: KsMultipleItem {
-        size: (size_of::<KsMultipleItem>() + size_of::<ModeAttribute>()) as u32,
-        count: 1,
-    },
-    attribute: ModeAttribute {
-        header: KsAttribute {
-            size: size_of::<ModeAttribute>() as u32,
-            flags: 0,
-            attribute: KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE,
-        },
-        mode: SIGNALPROCESSING_MODE_DEFAULT,
-    },
+static MODE_ATTRIBUTE_LIST: SyncRo<pc::KSATTRIBUTE_LIST> = SyncRo(pc::KSATTRIBUTE_LIST {
+    Count: 1,
+    Attributes: MODE_ATTRIBUTE_PTRS.0.as_ptr() as *mut pc::PKSATTRIBUTE,
 });
 
 /// Maps a logic-table category GUID to its kernel-side static. Panics at
@@ -336,15 +300,55 @@ static CAPTURE_TOPO_PINS: SyncRo<[pc::PCPIN_DESCRIPTOR; 2]> = SyncRo([
 static TOPO_CONNECTIONS: [pc::KSTOPOLOGY_CONNECTION; 1] =
     [connection(&logic::TOPO_CONNECTIONS[0])];
 
+// --- wave filter automation (default device format properties) ----------------
+//
+// The audio endpoint builder queries KSPROPERTY_PIN_PROPOSEDATAFORMAT[2] on
+// the wave FILTER to learn the default device format, and stores the answer
+// as PKEY_AudioEngine_DeviceFormat (what IAudioClient::GetMixFormat
+// returns). PortCls routes filter properties through the filter descriptor's
+// automation table; with AutomationTable = NULL the request never reaches
+// the miniport and the capture endpoint ends up without a device format
+// (GetMixFormat fails with AUDCLNT_E_UNSUPPORTED_FORMAT). sysvad registers
+// the same two items (minwavert.cpp, PropertyHandler_WaveFilter).
+
+static WAVE_FILTER_PROPERTIES: SyncRo<[pc::PCPROPERTY_ITEM; 2]> = SyncRo([
+    pc::PCPROPERTY_ITEM {
+        Set: &raw const KSPROPSETID_PIN,
+        Id: pc::KSPROPERTY_PIN_KSPROPERTY_PIN_PROPOSEDATAFORMAT as u32,
+        Flags: logic::KSPROPERTY_TYPE_GET | logic::KSPROPERTY_TYPE_BASICSUPPORT,
+        Handler: Some(crate::miniport::propose_format),
+    },
+    pc::PCPROPERTY_ITEM {
+        Set: &raw const KSPROPSETID_PIN,
+        Id: pc::KSPROPERTY_PIN_KSPROPERTY_PIN_PROPOSEDATAFORMAT2 as u32,
+        Flags: logic::KSPROPERTY_TYPE_GET | logic::KSPROPERTY_TYPE_BASICSUPPORT,
+        Handler: Some(crate::miniport::propose_format2),
+    },
+]);
+
+static WAVE_FILTER_AUTOMATION: SyncRo<pc::PCAUTOMATION_TABLE> = SyncRo(pc::PCAUTOMATION_TABLE {
+    PropertyItemSize: size_of::<pc::PCPROPERTY_ITEM>() as u32,
+    PropertyCount: WAVE_FILTER_PROPERTIES.0.len() as u32,
+    Properties: WAVE_FILTER_PROPERTIES.0.as_ptr(),
+    MethodItemSize: 0,
+    MethodCount: 0,
+    Methods: ptr::null(),
+    EventItemSize: 0,
+    EventCount: 0,
+    Events: ptr::null(),
+    Reserved: 0,
+});
+
 // --- filter descriptors -----------------------------------------------------------------
 
 const fn filter_desc(
     pins: &'static [pc::PCPIN_DESCRIPTOR],
     connections: &'static [pc::KSTOPOLOGY_CONNECTION],
+    automation: *const pc::PCAUTOMATION_TABLE,
 ) -> pc::PCFILTER_DESCRIPTOR {
     pc::PCFILTER_DESCRIPTOR {
         Version: 0,
-        AutomationTable: ptr::null(),
+        AutomationTable: automation,
         PinSize: size_of::<pc::PCPIN_DESCRIPTOR>() as u32,
         PinCount: pins.len() as u32,
         Pins: pins.as_ptr(),
@@ -358,14 +362,26 @@ const fn filter_desc(
     }
 }
 
-static RENDER_WAVE_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> =
-    SyncRo(filter_desc(&RENDER_WAVE_PINS.0, &RENDER_WAVE_CONNECTIONS));
-static CAPTURE_WAVE_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> =
-    SyncRo(filter_desc(&CAPTURE_WAVE_PINS.0, &CAPTURE_WAVE_CONNECTIONS));
-static RENDER_TOPO_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> =
-    SyncRo(filter_desc(&RENDER_TOPO_PINS.0, &TOPO_CONNECTIONS));
-static CAPTURE_TOPO_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> =
-    SyncRo(filter_desc(&CAPTURE_TOPO_PINS.0, &TOPO_CONNECTIONS));
+static RENDER_WAVE_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> = SyncRo(filter_desc(
+    &RENDER_WAVE_PINS.0,
+    &RENDER_WAVE_CONNECTIONS,
+    &raw const WAVE_FILTER_AUTOMATION.0,
+));
+static CAPTURE_WAVE_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> = SyncRo(filter_desc(
+    &CAPTURE_WAVE_PINS.0,
+    &CAPTURE_WAVE_CONNECTIONS,
+    &raw const WAVE_FILTER_AUTOMATION.0,
+));
+static RENDER_TOPO_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> = SyncRo(filter_desc(
+    &RENDER_TOPO_PINS.0,
+    &TOPO_CONNECTIONS,
+    ptr::null(),
+));
+static CAPTURE_TOPO_FILTER: SyncRo<pc::PCFILTER_DESCRIPTOR> = SyncRo(filter_desc(
+    &CAPTURE_TOPO_PINS.0,
+    &TOPO_CONNECTIONS,
+    ptr::null(),
+));
 
 /// The static filter descriptor for a miniport kind. Returned from
 /// `IMiniport::GetDescription`; PortCls reads it, never frees it.

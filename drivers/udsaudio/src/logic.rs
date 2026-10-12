@@ -147,6 +147,95 @@ pub const KSDATAFORMAT_SPECIFIER_WAVEFORMATEX: KsGuid =
 pub const KSDATAFORMAT_SPECIFIER_NONE: KsGuid =
     ks_guid(0x0f64_17d6, 0xc318, 0x11d0, [0xa4, 0x3f, 0x00, 0xa0, 0xc9, 0x22, 0x31, 0x96]);
 
+/// `KSPROPSETID_Pin` (ks.h) — property set of the pin properties.
+pub const KSPROPSETID_PIN: KsGuid =
+    ks_guid(0x8c13_4960, 0x51ad, 0x11cf, [0x87, 0x8a, 0x94, 0xf8, 0x01, 0xc1, 0x00, 0x00]);
+
+// --- Default device format blob ------------------------------------------------
+
+/// `KSPROPERTY_TYPE_GET` (ks.h).
+pub const KSPROPERTY_TYPE_GET: u32 = 0x1;
+
+/// `KSPROPERTY_TYPE_BASICSUPPORT` (ks.h).
+pub const KSPROPERTY_TYPE_BASICSUPPORT: u32 = 0x200;
+
+/// `WAVE_FORMAT_EXTENSIBLE` (mmreg.h).
+pub const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+
+/// `SPEAKER_FRONT_LEFT | SPEAKER_FRONT_RIGHT` channel mask (ksmedia.h).
+pub const SPEAKER_STEREO_MASK: u32 = 0x3;
+
+/// `KSAUDIO_SPEAKER_MONO` (`SPEAKER_FRONT_CENTER`) channel mask (ksmedia.h).
+pub const SPEAKER_MONO_MASK: u32 = 0x4;
+
+/// Byte size of the default device format blob: `KSDATAFORMAT` (64) +
+/// `WAVEFORMATEXTENSIBLE` (40).
+pub const DEFAULT_FORMAT_BLOB_SIZE: usize = 104;
+
+/// Builds the `KSDATAFORMAT_WAVEFORMATEXTENSIBLE` blob the driver reports as
+/// the default device format of a streaming pin — the
+/// `KSPROPERTY_PIN_PROPOSEDATAFORMAT[2]` answer the audio endpoint builder
+/// stores as `PKEY_AudioEngine_DeviceFormat` (what `IAudioClient::GetMixFormat`
+/// returns). Byte layout matches the packed C structs; GUIDs are encoded
+/// field by field, little-endian.
+#[must_use]
+pub const fn default_format_blob(format: &PcmFormat) -> [u8; DEFAULT_FORMAT_BLOB_SIZE] {
+    let mut b = [0u8; DEFAULT_FORMAT_BLOB_SIZE];
+    let frame = format.frame_bytes() as u32;
+    // KSDATAFORMAT header. Flags stays 0: the PROPOSEDATAFORMAT2 handler
+    // sets KSDATAFORMAT_ATTRIBUTES on the output copy itself.
+    put_u32(&mut b, 0, DEFAULT_FORMAT_BLOB_SIZE as u32); // FormatSize
+    put_u32(&mut b, 8, frame); // SampleSize
+    put_guid(&mut b, 16, &KSDATAFORMAT_TYPE_AUDIO);
+    put_guid(&mut b, 32, &KSDATAFORMAT_SUBTYPE_PCM);
+    put_guid(&mut b, 48, &KSDATAFORMAT_SPECIFIER_WAVEFORMATEX);
+    // WAVEFORMATEXTENSIBLE.
+    put_u16(&mut b, 64, WAVE_FORMAT_EXTENSIBLE);
+    put_u16(&mut b, 66, format.channels);
+    put_u32(&mut b, 68, format.sample_rate);
+    put_u32(&mut b, 72, format.bytes_per_sec() as u32);
+    put_u16(&mut b, 76, frame as u16);
+    put_u16(&mut b, 78, format.bits_per_sample);
+    put_u16(&mut b, 80, 22); // cbSize
+    put_u16(&mut b, 82, format.bits_per_sample); // wValidBitsPerSample
+    put_u32(
+        &mut b,
+        84,
+        if format.channels == 1 {
+            SPEAKER_MONO_MASK
+        } else {
+            SPEAKER_STEREO_MASK
+        },
+    );
+    put_guid(&mut b, 88, &KSDATAFORMAT_SUBTYPE_PCM);
+    b
+}
+
+const fn put_u16(b: &mut [u8], off: usize, v: u16) {
+    let le = v.to_le_bytes();
+    b[off] = le[0];
+    b[off + 1] = le[1];
+}
+
+const fn put_u32(b: &mut [u8], off: usize, v: u32) {
+    let le = v.to_le_bytes();
+    b[off] = le[0];
+    b[off + 1] = le[1];
+    b[off + 2] = le[2];
+    b[off + 3] = le[3];
+}
+
+const fn put_guid(b: &mut [u8], off: usize, g: &KsGuid) {
+    put_u32(b, off, g.data1);
+    put_u16(b, off + 4, g.data2);
+    put_u16(b, off + 6, g.data3);
+    let mut i = 0;
+    while i < 8 {
+        b[off + 8 + i] = g.data4[i];
+        i += 1;
+    }
+}
+
 // --- Pin / filter tables -----------------------------------------------------
 
 /// `KSPIN_DATAFLOW` values (ks.h).
@@ -977,6 +1066,53 @@ mod tests {
         // FILE_ANY_ACCESS=0) = 0x22_2000. The user-mode tool must compute
         // the same value with the Win32 CTL_CODE macro.
         assert_eq!(IOCTL_PUSH_MIC, 0x0022_2000);
+    }
+
+    #[test]
+    fn default_format_blob_mic_layout() {
+        let blob = default_format_blob(&MIC_FORMAT);
+        assert_eq!(blob.len(), 104);
+        // KSDATAFORMAT: FormatSize, Flags, SampleSize, Reserved.
+        assert_eq!(u32::from_le_bytes(blob[0..4].try_into().unwrap()), 104);
+        assert_eq!(u32::from_le_bytes(blob[4..8].try_into().unwrap()), 0);
+        assert_eq!(u32::from_le_bytes(blob[8..12].try_into().unwrap()), 2); // frame bytes
+        assert_eq!(u32::from_le_bytes(blob[12..16].try_into().unwrap()), 0);
+        // MajorFormat = KSDATAFORMAT_TYPE_AUDIO (LE field by field).
+        assert_eq!(&blob[16..20], &0x7364_7561u32.to_le_bytes());
+        assert_eq!(&blob[32..36], &1u32.to_le_bytes()); // SubFormat = PCM
+        assert_eq!(&blob[48..52], &0x0558_9f81u32.to_le_bytes()); // Specifier
+        // WAVEFORMATEXTENSIBLE.
+        assert_eq!(u16::from_le_bytes(blob[64..66].try_into().unwrap()), 0xFFFE);
+        assert_eq!(u16::from_le_bytes(blob[66..68].try_into().unwrap()), 1); // mono
+        assert_eq!(u32::from_le_bytes(blob[68..72].try_into().unwrap()), 48_000);
+        assert_eq!(u32::from_le_bytes(blob[72..76].try_into().unwrap()), 96_000);
+        assert_eq!(u16::from_le_bytes(blob[76..78].try_into().unwrap()), 2); // align
+        assert_eq!(u16::from_le_bytes(blob[78..80].try_into().unwrap()), 16); // bits
+        assert_eq!(u16::from_le_bytes(blob[80..82].try_into().unwrap()), 22); // cbSize
+        assert_eq!(u16::from_le_bytes(blob[82..84].try_into().unwrap()), 16); // valid bits
+        assert_eq!(u32::from_le_bytes(blob[84..88].try_into().unwrap()), 0x4); // mono mask
+        assert_eq!(&blob[88..92], &1u32.to_le_bytes()); // SubFormat GUID = PCM
+    }
+
+    #[test]
+    fn default_format_blob_speaker_layout() {
+        let blob = default_format_blob(&SPEAKER_FORMAT);
+        assert_eq!(u32::from_le_bytes(blob[8..12].try_into().unwrap()), 4); // frame bytes
+        assert_eq!(u16::from_le_bytes(blob[66..68].try_into().unwrap()), 2); // stereo
+        assert_eq!(u32::from_le_bytes(blob[72..76].try_into().unwrap()), 192_000);
+        assert_eq!(u32::from_le_bytes(blob[84..88].try_into().unwrap()), 0x3); // stereo mask
+    }
+
+    #[test]
+    fn pin_property_set_guid_matches_ks_h() {
+        // KSPROPSETID_Pin = {8C134960-51AD-11CF-878A-94F801C10000} (ks.h).
+        assert_eq!(KSPROPSETID_PIN.data1, 0x8c13_4960);
+        assert_eq!(KSPROPSETID_PIN.data2, 0x51ad);
+        assert_eq!(KSPROPSETID_PIN.data3, 0x11cf);
+        assert_eq!(
+            KSPROPSETID_PIN.data4,
+            [0x87, 0x8a, 0x94, 0xf8, 0x01, 0xc1, 0x00, 0x00]
+        );
     }
 
     #[test]
