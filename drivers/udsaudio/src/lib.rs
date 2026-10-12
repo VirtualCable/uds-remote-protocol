@@ -17,6 +17,9 @@ mod adapter;
 mod common;
 #[cfg(windows)]
 mod dbg;
+// The pure logic tables are consumed by the Windows-only kernel modules;
+// on other hosts only the tests touch them.
+#[cfg_attr(not(windows), allow(dead_code))]
 mod logic;
 #[cfg(windows)]
 mod miniport;
