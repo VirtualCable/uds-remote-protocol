@@ -67,13 +67,23 @@ static KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE: pc::GUID = pc::GUID {
     Data4: [0x96, 0x7b, 0xff, 0x67, 0x70, 0xb9, 0x84, 0x01],
 };
 
+/// `AUDIO_SIGNALPROCESSING_MODE_DEFAULT` (ksmedia.h).
+static SIGNALPROCESSING_MODE_DEFAULT: pc::GUID = pc::GUID {
+    Data1: 0xc18e_2f7e,
+    Data2: 0x933d,
+    Data3: 0x4965,
+    Data4: [0xb7, 0xd1, 0x1e, 0xef, 0x22, 0x8d, 0x2a, 0xf3],
+};
+
 // --- datarange attribute list (signal processing mode) ------------------------
 //
 // Every streaming pin advertises a KSATTRIBUTE list with the audio signal
-// processing mode attribute (no payload = DEFAULT mode), like sysvad's
-// simple.h. Without it, the audio endpoint builder's PROPOSEDATAFORMAT2
-// negotiation fails on capture endpoints and they never get a device format
-// (IAudioClient::GetMixFormat then fails with AUDCLNT_E_UNSUPPORTED_FORMAT).
+// processing mode attribute, like sysvad's simple.h. Without it the audio
+// endpoint builder's PROPOSEDATAFORMAT2 negotiation fails on capture
+// endpoints and they never get a device format (IAudioClient::GetMixFormat
+// then fails with AUDCLNT_E_UNSUPPORTED_FORMAT). The payload GUID matters:
+// the builder matches the requested mode against it, so a bare header
+// without payload still fails the negotiation.
 
 /// `KSMULTIPLE_ITEM` (ks.h) — not in the bindgen allowlist.
 #[repr(C)]
@@ -95,25 +105,38 @@ struct KsAttribute {
     attribute: pc::GUID,
 }
 
+/// `KSATTRIBUTE_AUDIOSIGNALPROCESSING_MODE` (ksmedia.h): the attribute
+/// header plus the signal-processing-mode GUID payload.
+#[repr(C)]
+struct ModeAttribute {
+    /// Attribute header.
+    header: KsAttribute,
+    /// The mode this range supports (payload).
+    mode: pc::GUID,
+}
+
 /// The mode attribute list referenced as the second "datarange" of every
 /// streaming pin (KSDATARANGE_FLAGS_ATTRIBUTES set on the real range).
 #[repr(C)]
 struct ModeAttributeList {
     /// Header.
     header: KsMultipleItem,
-    /// The single attribute.
-    attribute: KsAttribute,
+    /// The single attribute (with payload).
+    attribute: ModeAttribute,
 }
 
 static MODE_ATTRIBUTE_LIST: SyncRo<ModeAttributeList> = SyncRo(ModeAttributeList {
     header: KsMultipleItem {
-        size: (size_of::<KsMultipleItem>() + size_of::<KsAttribute>()) as u32,
+        size: (size_of::<KsMultipleItem>() + size_of::<ModeAttribute>()) as u32,
         count: 1,
     },
-    attribute: KsAttribute {
-        size: size_of::<KsAttribute>() as u32,
-        flags: 0,
-        attribute: KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE,
+    attribute: ModeAttribute {
+        header: KsAttribute {
+            size: size_of::<ModeAttribute>() as u32,
+            flags: 0,
+            attribute: KSATTRIBUTEID_AUDIOSIGNALPROCESSING_MODE,
+        },
+        mode: SIGNALPROCESSING_MODE_DEFAULT,
     },
 });
 
