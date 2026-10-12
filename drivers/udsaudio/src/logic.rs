@@ -209,11 +209,17 @@ pub const CAPTURE_WAVE_PIN_BRIDGE: u32 = 0;
 /// Capture wave pin 1: system stream source (apps capture here).
 pub const CAPTURE_WAVE_PIN_SOURCE: u32 = 1;
 
-// Pin indices of the topology filters (identical layout for both).
-/// Topology pin wired towards the wave filter.
-pub const TOPO_PIN_WAVE_SIDE: u32 = 0;
-/// Topology pin wired towards the (virtual) physical endpoint.
-pub const TOPO_PIN_ENDPOINT_SIDE: u32 = 1;
+// Pin indices of the render topology filter.
+/// Render topology pin 0: wired towards the wave filter (analog in).
+pub const RENDER_TOPO_PIN_WAVE: u32 = 0;
+/// Render topology pin 1: the (virtual) speaker jack (analog out).
+pub const RENDER_TOPO_PIN_ENDPOINT: u32 = 1;
+
+// Pin indices of the capture topology filter (sides flipped vs render).
+/// Capture topology pin 0: the (virtual) microphone jack (analog in).
+pub const CAPTURE_TOPO_PIN_ENDPOINT: u32 = 0;
+/// Capture topology pin 1: wired towards the wave filter (analog out).
+pub const CAPTURE_TOPO_PIN_WAVE: u32 = 1;
 
 /// Maximum simultaneous render streams on the speaker sink pin.
 pub const MAX_RENDER_STREAMS: u32 = 6;
@@ -326,11 +332,12 @@ pub static CAPTURE_TOPO_PINS: [PinDesc; 2] = [
 ];
 
 /// Topology filter connections (identical for both): pin 0 -> pin 1.
+/// Render: wave-side in -> speaker out. Capture: mic in -> wave-side out.
 pub static TOPO_CONNECTIONS: [Connection; 1] = [Connection {
     from_node: PCFILTER_NODE,
-    from_pin: TOPO_PIN_WAVE_SIDE,
+    from_pin: 0,
     to_node: PCFILTER_NODE,
-    to_pin: TOPO_PIN_ENDPOINT_SIDE,
+    to_pin: 1,
 }];
 
 /// Render wave filter descriptor.

@@ -4,6 +4,10 @@
 ; UDS Virtual Audio Device — virtual speaker + microphone for remote
 ; sessions (see doc/plan/driver-audio-windows.md).
 ;
+; Root-enumerated PortCls adapter. Four subdevices are registered by the
+; driver (PcRegisterSubdevice), each matching one interface reference
+; string below: UDSWaveSpeaker / UDSTopoSpeaker / UDSWaveMic / UDSTopoMic.
+;
 
 [Version]
 Signature="$WINDOWS NT$"
@@ -45,6 +49,51 @@ StartType=%SERVICE_DEMAND_START%
 ErrorControl=%SERVICE_ERROR_NORMAL%
 ServiceBinary=%13%\udsaudio.sys
 
+; =========================================================
+; Device interfaces (audio endpoint builder picks these up)
+; =========================================================
+[udsaudio_Device.NT.Interfaces]
+; Speaker render endpoint
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_WaveSpeaker%,UDSAUDIO.I.WaveSpeaker
+AddInterface=%KSCATEGORY_RENDER%,%KSNAME_WaveSpeaker%,UDSAUDIO.I.WaveSpeaker
+AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_WaveSpeaker%,UDSAUDIO.I.WaveSpeaker
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_TopoSpeaker%,UDSAUDIO.I.TopoSpeaker
+AddInterface=%KSCATEGORY_TOPOLOGY%,%KSNAME_TopoSpeaker%,UDSAUDIO.I.TopoSpeaker
+; Microphone capture endpoint
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_WaveMic%,UDSAUDIO.I.WaveMic
+AddInterface=%KSCATEGORY_CAPTURE%,%KSNAME_WaveMic%,UDSAUDIO.I.WaveMic
+AddInterface=%KSCATEGORY_REALTIME%,%KSNAME_WaveMic%,UDSAUDIO.I.WaveMic
+AddInterface=%KSCATEGORY_AUDIO%,%KSNAME_TopoMic%,UDSAUDIO.I.TopoMic
+AddInterface=%KSCATEGORY_TOPOLOGY%,%KSNAME_TopoMic%,UDSAUDIO.I.TopoMic
+
+[UDSAUDIO.I.WaveSpeaker]
+AddReg=UDSAUDIO.I.WaveSpeaker.AddReg
+
+[UDSAUDIO.I.WaveSpeaker.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%UDSAUDIO.WaveSpeaker.szPname%
+
+[UDSAUDIO.I.TopoSpeaker]
+AddReg=UDSAUDIO.I.TopoSpeaker.AddReg
+
+[UDSAUDIO.I.TopoSpeaker.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%UDSAUDIO.TopoSpeaker.szPname%
+
+[UDSAUDIO.I.WaveMic]
+AddReg=UDSAUDIO.I.WaveMic.AddReg
+
+[UDSAUDIO.I.WaveMic.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%UDSAUDIO.WaveMic.szPname%
+
+[UDSAUDIO.I.TopoMic]
+AddReg=UDSAUDIO.I.TopoMic.AddReg
+
+[UDSAUDIO.I.TopoMic.AddReg]
+HKR,,CLSID,,%Proxy.CLSID%
+HKR,,FriendlyName,,%UDSAUDIO.TopoMic.szPname%
+
 [Strings]
 ManufacturerName="VirtualCable"
 DiskName="udsaudio Source Disk"
@@ -54,3 +103,24 @@ SPSVCINST_ASSOCSERVICE=0x00000002
 SERVICE_KERNEL_DRIVER=1
 SERVICE_DEMAND_START=3
 SERVICE_ERROR_NORMAL=1
+
+; Interface class GUIDs (ksmedia.h / ks.h)
+KSCATEGORY_AUDIO="{6994AD04-93EF-11D0-A3CC-00A0C9223196}"
+KSCATEGORY_RENDER="{65E8773E-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_CAPTURE="{65E8773D-8F56-11D0-A3B9-00A0C9223196}"
+KSCATEGORY_REALTIME="{EB115FFC-10C8-4964-831D-6DCB02E6F23F}"
+KSCATEGORY_TOPOLOGY="{DDA54A40-1E4C-11D1-A050-405705C10000}"
+Proxy.CLSID="{17CCA71B-ECD7-11D0-B908-00A0C9223196}"
+
+; Interface reference strings — must match the PcRegisterSubdevice names
+; in src/adapter.rs.
+KSNAME_WaveSpeaker="UDSWaveSpeaker"
+KSNAME_TopoSpeaker="UDSTopoSpeaker"
+KSNAME_WaveMic="UDSWaveMic"
+KSNAME_TopoMic="UDSTopoMic"
+
+; Friendly names shown in the Sound control panel
+UDSAUDIO.WaveSpeaker.szPname="UDS Virtual Speaker"
+UDSAUDIO.TopoSpeaker.szPname="UDS Virtual Speaker"
+UDSAUDIO.WaveMic.szPname="UDS Virtual Mic"
+UDSAUDIO.TopoMic.szPname="UDS Virtual Mic"
