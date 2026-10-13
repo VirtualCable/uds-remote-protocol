@@ -56,12 +56,11 @@ mod win {
 
         // IddCx.h refuses to compile unless WDFAPI is defined, which the UMDF
         // wdf.h provides; it also pulls in Opmapi.h, Dxgi.h and d3d11_4.h
-        // from the um/ directory.
-        const WRAPPER: &str = r"
-#include <windows.h>
-#include <wdf.h>
-#include <iddcx/1.7/IddCx.h>
-";
+        // from the um/ directory. The versioned path must match
+        // IDDCX_VERSION_DIR (and the -DIDDCX_VERSION_* defines below).
+        let wrapper = format!(
+            "#include <windows.h>\n#include <wdf.h>\n#include <iddcx/{IDDCX_VERSION_DIR}/IddCx.h>\n"
+        );
 
         let wdf_umdf_include = PathBuf::from(KITS_ROOT)
             .join("Include")
@@ -75,7 +74,7 @@ mod win {
         );
 
         let bindings = bindgen::Builder::default()
-            .header_contents("iddcx_wrapper.h", WRAPPER)
+            .header_contents("iddcx_wrapper.h", &wrapper)
             .clang_arg(format!("-I{}", include.join("um").display()))
             .clang_arg(format!("-I{}", include.join("shared").display()))
             .clang_arg(format!("-I{}", include.join("ucrt").display()))
@@ -84,6 +83,16 @@ mod win {
             // clang --target is not enough: ntdef.h errors with "No Target
             // Architecture" otherwise).
             .clang_arg("-D_AMD64_=1")
+            // IddCx.h is C++ (it uses IDARG_* names without the struct
+            // keyword) and IddCxFuncEnum.h requires the client to declare
+            // the IddCx version it builds against; both must match the
+            // versioned header dir in the wrapper include.
+            .clang_args(["-x", "c++", "-std=c++17"])
+            .clang_arg("-DIDDCX_VERSION_MAJOR=1")
+            .clang_arg(format!(
+                "-DIDDCX_VERSION_MINOR={}",
+                IDDCX_VERSION_DIR.split('.').next_back().unwrap()
+            ))
             .clang_arg("-fms-extensions")
             .clang_arg("--target=x86_64-pc-windows-msvc")
             // IddCx entry points are FORCEINLINE shims over the IddFunctions[]
