@@ -1,0 +1,35 @@
+[package]
+name = "udsdisp"
+description = "UDS Virtual Display — IddCx indirect display driver (Windows UMDF)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+# UMDF 2.33 is shipped inbox by Windows 11 21H2 and Windows Server 2022 (our
+# minimum target OS), and drivers targeting it run on both — see
+# https://learn.microsoft.com/windows-hardware/drivers/wdf/umdf-version-history
+[package.metadata.wdk.driver-model]
+driver-type = "UMDF"
+umdf-version-major = 2
+target-umdf-version-minor = 33
+
+[lib]
+crate-type = ["cdylib"]
+
+# The WDK crates only exist on Windows build machines (they require the WDK
+# at build time), so every dependency is gated to Windows and the crate
+# compiles to an empty library elsewhere — the workspace must stay
+# buildable and testable on Linux.
+[target.'cfg(windows)'.build-dependencies]
+wdk-build = "0.5.1"
+bindgen = "0.73.2"
+
+[target.'cfg(windows)'.dependencies]
+wdk = "0.4.1"
+wdk-sys = "0.5.1"
+
+[lints]
+workspace = true

@@ -1,0 +1,84 @@
+;
+; udsdisp.inf
+;
+; UDS Virtual Display — IddCx indirect display adapter (UMDF, user mode).
+;
+; Root-enumerated device (Root\udsdisp). Virtual monitors are created and
+; removed on demand by the UDS agent via IOCTL; see
+; doc/plan/iddcx-pantalla-virtual.md.
+;
+; Modeled on the IddSampleDriver INF from microsoft/Windows-driver-samples.
+;
+
+[Version]
+Signature="$WINDOWS NT$"
+Class=Display
+ClassGuid={4D36E968-E325-11CE-BFC1-08002BE10318}
+Provider=%ManufacturerName%
+DriverVer=10/14/2026,0.1.0.0
+CatalogFile=udsdisp.cat
+PnpLockdown=1
+
+[DestinationDirs]
+UMDriverCopy=12,UMDF ; copy to drivers\UMDF
+
+[SourceDisksNames]
+1=%DiskName%,,,""
+
+[SourceDisksFiles]
+udsdisp.dll=1
+
+[Manufacturer]
+; The ...16299 decoration sets the minimum build (Windows 10 1709); the
+; cargo-wdk UMDF template uses ...22000, which would exclude Windows Server
+; 2022 (build 20348).
+%ManufacturerName%=Standard,NTamd64.10.0...16299
+
+[Standard.NTamd64.10.0...16299]
+%DeviceName%=udsdisp_Device, Root\udsdisp
+
+; =================== UMDF Device ==================================
+
+[udsdisp_Device.NT]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
+CopyFiles=UMDriverCopy
+
+[udsdisp_Device.NT.hw]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+AddReg=udsdisp_HardwareDeviceSettings
+
+[udsdisp_HardwareDeviceSettings]
+; IndirectKmd is the inbox kernel-side bridge every indirect display device
+; needs between the UMDF driver and dxgkrnl.
+HKR,, "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
+; Unique group: the driver gets its own dedicated WUDFHost process.
+HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "UdsVirtualDisplayGroup"
+
+[udsdisp_Device.NT.Services]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
+
+[udsdisp_Device.NT.Wdf]
+UmdfService=udsdisp,udsdisp_Install
+UmdfServiceOrder=udsdisp
+; IndirectKmd talks to the driver from kernel mode.
+UmdfKernelModeClientPolicy=AllowKernelModeClients
+
+[udsdisp_Install]
+UmdfLibraryVersion=2.33
+ServiceBinary=%12%\UMDF\udsdisp.dll
+UmdfExtensions=IddCx0102
+
+[UMDriverCopy]
+udsdisp.dll
+
+; =================== Generic ======================================
+
+[Strings]
+ManufacturerName="Virtual Cable S.L."
+DiskName="UDS Virtual Display Installation Disk"
+DeviceName="UDS Virtual Display"
+REG_MULTI_SZ=0x00010000
+REG_SZ=0x00000000
