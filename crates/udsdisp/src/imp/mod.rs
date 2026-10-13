@@ -92,6 +92,16 @@ extern "C" fn evt_driver_device_add(
             SIZE as u32
         }
     };
+    // IddCxDeviceInitConfig rejects a config without the core callback set
+    // (STATUS_INVALID_PARAMETER). These are logging stubs until M2.
+    idd_config.EvtIddCxAdapterInitFinished = Some(evt_idd_cx_adapter_init_finished);
+    idd_config.EvtIddCxAdapterCommitModes = Some(evt_idd_cx_adapter_commit_modes);
+    idd_config.EvtIddCxParseMonitorDescription = Some(evt_idd_cx_parse_monitor_description);
+    idd_config.EvtIddCxMonitorGetDefaultDescriptionModes =
+        Some(evt_idd_cx_monitor_get_default_description_modes);
+    idd_config.EvtIddCxMonitorQueryTargetModes = Some(evt_idd_cx_monitor_query_target_modes);
+    idd_config.EvtIddCxMonitorAssignSwapChain = Some(evt_idd_cx_monitor_assign_swapchain);
+    idd_config.EvtIddCxMonitorUnassignSwapChain = Some(evt_idd_cx_monitor_unassign_swapchain);
     // SAFETY: `device_init` comes from the framework and is valid; the config
     // is zeroed except for its size, exactly like IDD_CX_CLIENT_CONFIG_INIT.
     let status = unsafe { iddcx::device_init_config(device_init, &mut idd_config) };
@@ -131,6 +141,69 @@ extern "C" fn evt_driver_device_add(
 
 extern "C" fn evt_driver_unload(_driver: WDFDRIVER) {
     log_line("DriverUnload");
+}
+
+// ---------------------------------------------------------------------------
+// IddCx callbacks (logging stubs until M2 implements adapter/monitors)
+// ---------------------------------------------------------------------------
+
+use iddcx::bindings;
+
+unsafe extern "C" fn evt_idd_cx_adapter_init_finished(
+    _adapter: bindings::IDDCX_ADAPTER,
+    _in_args: *const bindings::IDARG_IN_ADAPTER_INIT_FINISHED,
+) -> NTSTATUS {
+    log_line("EvtIddCxAdapterInitFinished");
+    0
+}
+
+unsafe extern "C" fn evt_idd_cx_adapter_commit_modes(
+    _adapter: bindings::IDDCX_ADAPTER,
+    _in_args: *const bindings::IDARG_IN_COMMITMODES,
+) -> NTSTATUS {
+    log_line("EvtIddCxAdapterCommitModes");
+    0
+}
+
+unsafe extern "C" fn evt_idd_cx_parse_monitor_description(
+    _in_args: *const bindings::IDARG_IN_PARSEMONITORDESCRIPTION,
+    _out_args: *mut bindings::IDARG_OUT_PARSEMONITORDESCRIPTION,
+) -> NTSTATUS {
+    log_line("EvtIddCxParseMonitorDescription");
+    0
+}
+
+unsafe extern "C" fn evt_idd_cx_monitor_get_default_description_modes(
+    _monitor: bindings::IDDCX_MONITOR,
+    _in_args: *const bindings::IDARG_IN_GETDEFAULTDESCRIPTIONMODES,
+    _out_args: *mut bindings::IDARG_OUT_GETDEFAULTDESCRIPTIONMODES,
+) -> NTSTATUS {
+    log_line("EvtIddCxMonitorGetDefaultDescriptionModes");
+    0
+}
+
+unsafe extern "C" fn evt_idd_cx_monitor_query_target_modes(
+    _monitor: bindings::IDDCX_MONITOR,
+    _in_args: *const bindings::IDARG_IN_QUERYTARGETMODES,
+    _out_args: *mut bindings::IDARG_OUT_QUERYTARGETMODES,
+) -> NTSTATUS {
+    log_line("EvtIddCxMonitorQueryTargetModes");
+    0
+}
+
+unsafe extern "C" fn evt_idd_cx_monitor_assign_swapchain(
+    _monitor: bindings::IDDCX_MONITOR,
+    _in_args: *const bindings::IDARG_IN_SETSWAPCHAIN,
+) -> NTSTATUS {
+    log_line("EvtIddCxMonitorAssignSwapChain");
+    0
+}
+
+unsafe extern "C" fn evt_idd_cx_monitor_unassign_swapchain(
+    _monitor: bindings::IDDCX_MONITOR,
+) -> NTSTATUS {
+    log_line("EvtIddCxMonitorUnassignSwapChain");
+    0
 }
 
 #[cfg(test)]
