@@ -1,33 +1,29 @@
 //! Test client for the uds-rp protocol.
 //!
 //! Minimal development binary to exercise the framework end to end
-//! (direct connection, no gateway). Renders the display channel with
-//! minifb, plays the audio channel (§9) through the default output device
-//! (feature `audio`, on by default), or runs `--headless` to validate the
-//! pipeline without a GUI.
+//! (direct connection, no gateway). It is the reference *consumer* of the
+//! `client` crate event/command API (§15.3): the session (connection,
+//! decoding, A/V sync, audio, mic, probing) runs on its own task, and this
+//! binary only renders damage rects from the shared framebuffer into a
+//! minifb window, paints the remote cursor locally, and forwards window
+//! input as `ClientCommand`s. `--headless` validates the pipeline without
+//! a GUI.
 //!
 //! Usage: `testclient --key <hex64> --ticket <hex96> [--addr host:port]
 //!                     [--headless] [--max-frames N] [--no-audio]
 //!                     [--mic] [--mic-test-tone FREQ]`
 
-mod audio;
-mod mic;
-
-use std::collections::{HashMap, VecDeque};
-use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use client::avsync;
-use codec::{VideoCodecType, VideoDecoder};
-use protocol::fragment::Reassembler;
-use protocol::{self, ControlMessage, CursorMessage, InputMessage, PointerButton, channel};
+use client::mic::MicMode;
+use client::{ClientCommand, ClientConfig, ClientEvent, Displays, Rect, Session};
+use protocol::{self, InputMessage, PointerButton};
 use tracing::{info, warn};
-use transport::{Connector, DirectConnector, EncryptedStream, ReliableTransport, Target, udp_detect};
 
 struct Args {
-    addr: SocketAddr,
+    addr: std::net::SocketAddr,
     key: [u8; 32],
     ticket: [u8; protocol::TICKET_LENGTH],
     headless: bool,
@@ -39,7 +35,7 @@ struct Args {
     audio: bool,
     /// Mic capture (§9.2): off by default, `--mic` captures the default
     /// input device, `--mic-test-tone FREQ` sends a synthetic sine instead.
-    mic: mic::MicMode,
+    mic: MicMode,
 }
 
 /// One scripted input action for `--selftest-input`.
@@ -98,7 +94,7 @@ fn parse_args() -> Result<Args> {
         max_frames: None,
         selftest_input: false,
         audio: true,
-        mic: mic::MicMode::Off,
+        mic: MicMode::Off,
     };
     let mut key_seen = false;
     let mut ticket_seen = false;
@@ -117,7 +113,7 @@ fn parse_args() -> Result<Args> {
             continue;
         }
         if arg == "--mic" {
-            args.mic = mic::MicMode::Device;
+            args.mic = MicMode::Device;
             continue;
         }
         let value = it.next().context(format!("missing value for {arg}"))?;
@@ -133,7 +129,7 @@ fn parse_args() -> Result<Args> {
             }
             "--max-frames" => args.max_frames = Some(value.parse().context("bad --max-frames")?),
             "--mic-test-tone" => {
-                args.mic = mic::MicMode::Tone(value.parse().context("bad --mic-test-tone")?);
+                args.mic = MicMode::Tone(value.parse().context("bad --mic-test-tone")?);
             }
             other => bail!("unknown argument: {other}"),
         }
@@ -144,10 +140,6 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-fn micros_since(start: Instant) -> u64 {
-    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
-}
-
 /// Last cursor state received from the server (§10): the client paints the
 /// cursor locally at the pointer position it injects.
 struct ClientCursor {
@@ -155,7 +147,7 @@ struct ClientCursor {
     shape: Option<CursorShape>,
 }
 
-/// One cursor shape in RGBA (as decoded from the wire).
+/// One cursor shape in RGBA (as delivered by `ClientEvent::CursorShape`).
 struct CursorShape {
     width: u16,
     height: u16,
@@ -167,26 +159,6 @@ struct CursorShape {
 impl ClientCursor {
     fn new() -> Self {
         Self { visible: true, shape: None }
-    }
-
-    /// Applies one cursor message from the wire.
-    fn apply(&mut self, msg: CursorMessage) {
-        match msg {
-            CursorMessage::Visibility { visible } => {
-                self.visible = visible;
-                info!(visible, "cursor visibility");
-            }
-            CursorMessage::Shape { width, height, hot_x, hot_y, pixels } => {
-                info!(width, height, "cursor shape");
-                self.shape = Some(CursorShape {
-                    width,
-                    height,
-                    hot_x,
-                    hot_y,
-                    rgba: pixels,
-                });
-            }
-        }
     }
 }
 
@@ -239,27 +211,24 @@ fn overlay_cursor(
     }
 }
 
-/// Renders decoded frames, either to a minifb window or to the log
-/// (headless).
-struct Sink {
+/// minifb renderer for display 0 (multi-monitor arrives later, §8.3): keeps
+/// the window and a persistent `0x00RRGGBB` pixel buffer that damage rects
+/// are copied into.
+struct Gui {
     window: Option<minifb::Window>,
-    frames: u64,
-    start: Instant,
-    headless: bool,
     pixels: Vec<u32>,
-    /// Size of the last decoded frame (for window→display coord mapping).
+    /// Size of the display-0 framebuffer (for window→display coord mapping).
     frame_size: (u32, u32),
+    headless: bool,
 }
 
-impl Sink {
+impl Gui {
     fn new(headless: bool) -> Self {
         Self {
             window: None,
-            frames: 0,
-            start: Instant::now(),
-            headless,
             pixels: Vec::new(),
             frame_size: (0, 0),
+            headless,
         }
     }
 
@@ -272,19 +241,32 @@ impl Sink {
         }
     }
 
-    fn push(&mut self, frame: &codec::DecodedFrame, cursor: &ClientCursor) -> Result<bool> {
-        self.frames += 1;
-        self.frame_size = (frame.width, frame.height);
-        if self.frames % 30 == 1 {
-            let elapsed = self.start.elapsed().as_secs_f64();
-            #[allow(clippy::cast_precision_loss)] // frame counts are tiny
-            let fps = self.frames as f64 / elapsed.max(0.001);
-            info!(frames = self.frames, fps, "display");
+    /// True while the window is open and Escape is not pressed (always true
+    /// headless).
+    fn alive(&mut self) -> bool {
+        match &mut self.window {
+            Some(window) => window.is_open() && !window.is_key_down(minifb::Key::Escape),
+            None => true,
         }
+    }
+
+    /// Copies the dirty rects of display 0 from the shared framebuffer into
+    /// the window buffer and presents, with the cursor overlaid at the local
+    /// pointer position (§10). No-op headless beyond bookkeeping.
+    fn render(&mut self, displays: &Displays, rects: &[Rect], cursor: &ClientCursor) -> Result<()> {
+        let Some(display) = displays.get(0) else { return Ok(()) };
+        let (w, h) = {
+            let guard = display.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (guard.width(), guard.height())
+        };
+        if w == 0 || h == 0 {
+            return Ok(());
+        }
+        self.frame_size = (w, h);
         if self.headless {
-            return Ok(true);
+            return Ok(());
         }
-        let (w, h) = (frame.width as usize, frame.height as usize);
+        let (w, h) = (w as usize, h as usize);
         if self.window.is_none() {
             let window = minifb::Window::new(
                 "uds-rp testclient",
@@ -295,18 +277,17 @@ impl Sink {
             .context("window creation")?;
             self.window = Some(window);
         }
-        let window = self.window.as_mut().expect("just created");
-        self.pixels.clear();
-        self.pixels.extend(
-            frame
-                .data
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|&[b, g, r, _]| u32::from_le_bytes([b, g, r, 0])),
-        );
+        self.pixels.resize(w * h, 0);
+        {
+            let guard = display.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let fb = guard.pixels();
+            for rect in rects {
+                blit_rect(fb, w, h, *rect, &mut self.pixels);
+            }
+        }
         // Local cursor rendering (§10): painted at the local pointer
         // position, which is what we inject into the remote session.
+        let window = self.window.as_mut().expect("just created");
         if cursor.visible
             && let Some(shape) = &cursor.shape
             && let Some((mx, my)) = window.get_mouse_pos(minifb::MouseMode::Clamp)
@@ -324,389 +305,37 @@ impl Sink {
             }
         }
         window.update_with_buffer(&self.pixels, w, h).context("render")?;
-        Ok(window.is_open() && !window.is_key_down(minifb::Key::Escape))
+        Ok(())
     }
 }
 
-/// A decoded frame waiting for the audio clock to catch up (§9.1).
-struct HeldFrame {
-    /// Present when `audio_now` reaches this capture timestamp (ms).
-    hold_until: u32,
-    frame: codec::DecodedFrame,
-}
-
-/// Presentation queue for held frames (§9.1): at most `MAX_HELD_FRAMES`;
-/// on overflow the oldest is dropped — stale video is worse than a skipped
-/// frame.
-struct PresentQueue {
-    frames: VecDeque<HeldFrame>,
-}
-
-/// Maximum frames waiting for presentation (§9.1: "a couple of frames").
-const MAX_HELD_FRAMES: usize = 3;
-
-impl PresentQueue {
-    fn new() -> Self {
-        Self {
-            frames: VecDeque::new(),
+/// Copies one damage rect from the tight-BGRA framebuffer into the minifb
+/// `0x00RRGGBB` buffer, clipped to the frame.
+// Pixel math mixes signed rect origins with unsigned frame indices; rects
+// are bounds-checked before indexing. Short names follow the x/y
+// pixel-loop convention.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::many_single_char_names
+)]
+fn blit_rect(fb: &[u8], w: usize, h: usize, rect: Rect, pixels: &mut [u32]) {
+    let x0 = rect.x.max(0) as usize;
+    let y0 = rect.y.max(0) as usize;
+    let x1 = (rect.x.saturating_add(rect.w as i32)).max(0) as usize;
+    let y1 = (rect.y.saturating_add(rect.h as i32)).max(0) as usize;
+    let (x1, y1) = (x1.min(w), y1.min(h));
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    for row in y0..y1 {
+        for col in x0..x1 {
+            let p = (row * w + col) * 4;
+            let (b, g, r) = (fb[p], fb[p + 1], fb[p + 2]);
+            pixels[row * w + col] = u32::from_le_bytes([b, g, r, 0]);
         }
     }
-
-    /// Holds a frame until the audio clock reaches `hold_until`.
-    fn hold(&mut self, hold_until: u32, frame: codec::DecodedFrame, stats: &mut avsync::SyncStats) {
-        stats.record_hold();
-        if self.frames.len() >= MAX_HELD_FRAMES {
-            self.frames.pop_front();
-            stats.record_overflow_drop();
-        }
-        self.frames.push_back(HeldFrame { hold_until, frame });
-    }
-
-    /// Presents every due frame; `audio_now` of `None` (audio clock gone)
-    /// flushes everything so video never stalls. Returns `false` when the
-    /// window was closed.
-    fn flush(
-        &mut self,
-        audio_now: Option<u32>,
-        sink: &mut Sink,
-        cursor: &ClientCursor,
-        stats: &mut avsync::SyncStats,
-    ) -> Result<bool> {
-        while let Some(front) = self.frames.front() {
-            let due = match audio_now {
-                Some(now) => front.hold_until <= now,
-                None => true,
-            };
-            if !due {
-                break;
-            }
-            let held = self.frames.pop_front().expect("front checked");
-            if let Some(now) = audio_now {
-                stats.record_present(i64::from(held.hold_until) - i64::from(now));
-            }
-            if !sink.push(&held.frame, cursor)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-}
-
-/// Applies the A/V sync decision (§9.1) to one freshly decoded frame.
-/// Returns `false` when the window was closed.
-fn present_or_hold(
-    frame: codec::DecodedFrame,
-    video_ts_ms: u32,
-    audio_client: &audio::AudioClient,
-    queue: &mut PresentQueue,
-    sink: &mut Sink,
-    cursor: &ClientCursor,
-    stats: &mut avsync::SyncStats,
-) -> Result<bool> {
-    let audio_now = audio_client.audio_now_ms();
-    match avsync::decide(video_ts_ms, audio_now.unwrap_or(0), audio_now.is_some()) {
-        avsync::PresentDecision::PresentNow => {
-            if let Some(now) = audio_now {
-                stats.record_present(i64::from(video_ts_ms) - i64::from(now));
-            }
-            sink.push(&frame, cursor)
-        }
-        avsync::PresentDecision::HoldUntil(ts) => {
-            queue.hold(ts, frame, stats);
-            Ok(true)
-        }
-        avsync::PresentDecision::Drop => {
-            stats.record_stale_drop();
-            Ok(true)
-        }
-    }
-}
-
-/// Presentation-queue pump (§9.1), driven by the input tick: presents due
-/// held frames and logs the sync stats every 5 s. Returns `false` when the
-/// window was closed.
-fn pump_avsync(
-    queue: &mut PresentQueue,
-    audio_client: &audio::AudioClient,
-    sink: &mut Sink,
-    cursor: &ClientCursor,
-    stats: &mut avsync::SyncStats,
-    last_log: &mut Instant,
-) -> Result<bool> {
-    let audio_now = audio_client.audio_now_ms();
-    if !queue.flush(audio_now, sink, cursor, stats)? {
-        info!("window closed");
-        return Ok(false);
-    }
-    if last_log.elapsed() >= Duration::from_secs(5) {
-        info!(
-            mode = if audio_now.is_some() { "audio" } else { "no-audio" },
-            presented = stats.presented,
-            held = stats.held,
-            dropped_stale = stats.dropped_stale,
-            dropped_overflow = stats.dropped_overflow,
-            skew_avg_ms = stats.skew_avg_ms(),
-            skew_max_abs_ms = stats.skew_max_abs_ms(),
-            "avsync"
-        );
-        stats.reset();
-        *last_log = Instant::now();
-    }
-    Ok(true)
-}
-
-#[tokio::main]
-async fn main() -> ExitCode {
-    match Box::pin(run()).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("testclient: {e:#}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-async fn run() -> Result<()> {
-    tracing_subscriber::fmt::init();
-    let args = parse_args()?;
-
-    let target = Target::new(args.addr, args.ticket, args.key);
-    let (raw, _) = DirectConnector::new().connect(&target).await?;
-    let mut stream: EncryptedStream<Box<dyn ReliableTransport>> =
-        EncryptedStream::client_handshake(raw, &args.ticket, &args.key).await?;
-    info!("handshake done");
-
-    let clock_start = Instant::now();
-    let clock = || micros_since(clock_start);
-    let leg = udp_detect(
-        &mut stream,
-        args.addr.ip(),
-        &args.ticket,
-        &args.key,
-        clock,
-        3,
-        Duration::from_millis(500),
-    )
-    .await?;
-    if let Some(leg) = &leg {
-        info!(rtt_micros = leg.initial_rtt_micros, "display leg: UDP");
-    } else {
-        warn!("UDP detection failed, display leg: TCP fallback");
-    }
-
-    if let Some(leg) = leg {
-        return Box::pin(udp_session(leg, stream, clock_start, &args)).await;
-    }
-    // TCP fallback: everything (control + display) on the reliable stream.
-    let mut sink = Sink::new(args.headless);
-    let mut reasm = Reassembler::new();
-    // One decoder per display (§8.3); created from DisplayInfo
-    // announcements, or Raw on first frame for servers that do not
-    // announce (§8.4 compat).
-    let mut decoders: HashMap<u8, Box<dyn VideoDecoder>> = HashMap::new();
-    // Sized for the largest stream record (~64 KiB): cursor shapes (§10)
-    // can be a few KiB; datagrams on this buffer stay MTU-sized anyway.
-    let mut buf = vec![0u8; 65_536];
-    let mut recovery = DecodeRecovery::default();
-    let mut cursor = ClientCursor::new();
-    let mut input = InputPoll::new();
-    let mut audio_client = audio::AudioClient::new(args.audio);
-    let mut mic_client = mic::MicClient::new(args.mic, clock_start);
-    let mut present_queue = PresentQueue::new();
-    let mut avsync_stats = avsync::SyncStats::default();
-    let mut avsync_log = Instant::now();
-    let mut selftest = args.selftest_input.then(SelfTest::new);
-    let mut input_tick = tokio::time::interval(Duration::from_millis(8));
-    loop {
-        tokio::select! {
-            res = stream.recv_into(&mut buf) => {
-                let (ch, n) = res?;
-                if !handle_packet(ch, &buf[..n], 0, &args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client, &mut mic_client, &mut present_queue, &mut avsync_stats)? {
-                    return Ok(());
-                }
-            }
-            msg = mic_client.recv() => {
-                if let Some(payload) = msg {
-                    // TCP fallback session: audio-in goes over the reliable
-                    // stream (like the server's audio-out fallback, §9).
-                    stream.send(channel::AUDIO_IN, &payload).await?;
-                } else {
-                    warn!("mic thread ended; audio-in disabled for this session");
-                    mic_client.disable();
-                }
-            }
-            _ = input_tick.tick() => {
-                // Present video frames whose audio-clock time has come (§9.1).
-                if !pump_avsync(&mut present_queue, &audio_client, &mut sink, &cursor, &mut avsync_stats, &mut avsync_log)? {
-                    return Ok(());
-                }
-                sink.pump_events();
-                for msg in input.poll(&sink) {
-                    let (buf, n) = msg.encode();
-                    stream.send(channel::INPUT, &buf[..n]).await?;
-                }
-                if let Some(st) = &mut selftest {
-                    for msg in st.due() {
-                        info!(?msg, "selftest input");
-                        let (buf, n) = msg.encode();
-                        stream.send(channel::INPUT, &buf[..n]).await?;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// UDP display leg session (§4.2): receives display traffic while running
-/// continuous probing (§12.1) — one probe per second; answered ones feed
-/// the RTT/jitter EWMAs, and once per second a MetricsReport goes to the
-/// server over the reliable control stream (§12.2). Unrecoverable frame
-/// loss triggers a rate-limited `RequestKeyframe`.
-// Select loop over display + probing + mic send; splitting it further
-// would only scatter the session state.
-#[allow(clippy::too_many_lines)]
-async fn udp_session(
-    leg: transport::UdpLeg<transport::UdpTransport>,
-    mut stream: EncryptedStream<Box<dyn ReliableTransport>>,
-    clock_start: Instant,
-    args: &Args,
-) -> Result<()> {
-    let clock = || micros_since(clock_start);
-    let mut leg = leg;
-    let mut sink = Sink::new(args.headless);
-    let mut reasm = Reassembler::new();
-    let mut decoders: HashMap<u8, Box<dyn VideoDecoder>> = HashMap::new();
-    // Sized for the largest stream record (~64 KiB): cursor shapes (§10)
-    // can be a few KiB; datagrams on this buffer stay MTU-sized anyway.
-    let mut buf = vec![0u8; 65_536];
-
-    let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
-    let mut rtt_ewma: Option<f64> = None;
-    let mut jitter_ewma = 0.0_f64;
-    // The first ack is delayed by the server's session bring-up (capture
-    // thread, encoder init), so it is discarded as warm-up and never feeds
-    // the EWMA/baseline.
-    let mut warmup_acks = 1u8;
-    let mut prev_lost = 0u64;
-    let mut prev_received = 0u64;
-    // Keyframe requests on unrecoverable frame loss (§12.2): rate-limited
-    // to 1 per 500 ms (riesgos §2.1).
-    let mut prev_dropped = 0u64;
-    let mut last_key_req: Option<Instant> = None;
-    let mut recovery = DecodeRecovery::default();
-    let mut cursor = ClientCursor::new();
-    let mut input = InputPoll::new();
-    let mut audio_client = audio::AudioClient::new(args.audio);
-    let mut mic_client = mic::MicClient::new(args.mic, clock_start);
-    let mut present_queue = PresentQueue::new();
-    let mut avsync_stats = avsync::SyncStats::default();
-    let mut avsync_log = Instant::now();
-    let mut selftest = args.selftest_input.then(SelfTest::new);
-    let mut input_tick = tokio::time::interval(Duration::from_millis(8));
-    loop {
-        tokio::select! {
-            res = leg.dgram.recv_into(&mut buf) => {
-                let (ch, n) = res?;
-                if ch == channel::CONTROL
-                    && let Ok(ack) = protocol::ProbeAck::decode(&buf[..n])
-                {
-                    let rtt = protocol::compute_rtt(ack.t1, ack.t2, ack.t3, clock());
-                    #[allow(clippy::cast_precision_loss)] // micros fit in f64
-                    let rtt = rtt as f64;
-                    if warmup_acks > 0 {
-                        warmup_acks -= 1;
-                        continue;
-                    }
-                    let prev = rtt_ewma.unwrap_or(rtt);
-                    jitter_ewma += 0.25 * ((rtt - prev).abs() - jitter_ewma);
-                    rtt_ewma = Some(prev + 0.25 * (rtt - prev));
-                    continue;
-                }
-                let lost = leg.dgram.lost_estimate();
-                if !handle_packet(ch, &buf[..n], lost, args, &mut reasm, &mut decoders, &mut sink, &mut recovery, &mut cursor, &mut audio_client, &mut mic_client, &mut present_queue, &mut avsync_stats)? {
-                    return Ok(());
-                }
-                // Ask for a keyframe when the stream is broken (decode
-                // errors) or a frame was evicted incomplete; the rate limit
-                // re-asks every 500 ms while the stream stays broken.
-                let dropped = reasm.dropped_frames();
-                if (dropped > prev_dropped || recovery.awaiting)
-                    && last_key_req.is_none_or(|t| t.elapsed() >= Duration::from_millis(500))
-                {
-                    info!(dropped, awaiting = recovery.awaiting, "stream broken; requesting keyframe");
-                    let req = ControlMessage::RequestKeyframe { display_id: 0 };
-                    stream.send(channel::CONTROL, &req.encode()?).await?;
-                    last_key_req = Some(Instant::now());
-                }
-                prev_dropped = dropped;
-            }
-            _ = probe_tick.tick() => {
-                leg.dgram
-                    .send(channel::CONTROL, &protocol::Probe { t1: clock() }.encode())
-                    .await?;
-                let Some(rtt) = rtt_ewma else { continue };
-                let lost = leg.dgram.lost_estimate();
-                let received = leg.dgram.received();
-                let dlost = lost - prev_lost;
-                let drecv = received - prev_received;
-                prev_lost = lost;
-                prev_received = received;
-                let denom = dlost + drecv;
-                #[allow(clippy::cast_precision_loss)] // counters fit in f64
-                let loss_rate = if denom == 0 { 0.0 } else { dlost as f64 / denom as f64 };
-                // Rates and micros are non-negative and small; the casts
-                // cannot lose sign or meaningful precision.
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let report = ControlMessage::MetricsReport {
-                    rtt_micros: rtt as u64,
-                    jitter_micros: jitter_ewma as u64,
-                    loss_permille: (loss_rate * 1000.0) as u16,
-                };
-                stream.send(channel::CONTROL, &report.encode()?).await?;
-            }
-            msg = mic_client.recv() => {
-                if let Some(payload) = msg {
-                    // Audio-in goes over the UDP leg (lossy is fine: the
-                    // server's jitter buffer conceals gaps), like probes do.
-                    leg.dgram.send(channel::AUDIO_IN, &payload).await?;
-                } else {
-                    warn!("mic thread ended; audio-in disabled for this session");
-                    mic_client.disable();
-                }
-            }
-            _ = input_tick.tick() => {
-                // Present video frames whose audio-clock time has come (§9.1).
-                if !pump_avsync(&mut present_queue, &audio_client, &mut sink, &cursor, &mut avsync_stats, &mut avsync_log)? {
-                    return Ok(());
-                }
-                // Input channel (§10): poll the window, send the diffs on
-                // the reliable stream. Events must be pumped even when the
-                // desktop is static (no frames → no render → no event pump).
-                sink.pump_events();
-                for msg in input.poll(&sink) {
-                    let (buf, n) = msg.encode();
-                    stream.send(channel::INPUT, &buf[..n]).await?;
-                }
-                if let Some(st) = &mut selftest {
-                    for msg in st.due() {
-                        info!(?msg, "selftest input");
-                        let (buf, n) = msg.encode();
-                        stream.send(channel::INPUT, &buf[..n]).await?;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Decode-error recovery state (§12.2): when a predictive decoder errors
-/// (a lost delta frame breaks the reference chain), the client asks for a
-/// keyframe and tolerates decode errors until the stream decodes again
-/// instead of dying on the first broken frame.
-#[derive(Default)]
-struct DecodeRecovery {
-    /// True while the stream is known-broken and a keyframe is awaited.
-    awaiting: bool,
 }
 
 /// Input event capture over the minifb window (§10): polls at ~125 Hz and
@@ -723,10 +352,10 @@ impl InputPoll {
     }
 
     /// Collects the input events since the last poll.
-    fn poll(&mut self, sink: &Sink) -> Vec<InputMessage> {
+    fn poll(&mut self, gui: &Gui) -> Vec<InputMessage> {
         let mut out = Vec::new();
-        let Some(window) = &sink.window else { return out };
-        let (fw, fh) = sink.frame_size;
+        let Some(window) = &gui.window else { return out };
+        let (fw, fh) = gui.frame_size;
         if fw == 0 || fh == 0 {
             return out;
         }
@@ -899,155 +528,112 @@ fn set1_scancode(key: minifb::Key) -> Option<(u16, bool)> {
     Some((code, ext))
 }
 
-/// Handles one received packet; returns `false` when the session should end.
-// One dispatch arm per channel; the packet kinds are the structure.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn handle_packet(
-    ch: u16,
-    packet: &[u8],
-    lost: u64,
-    args: &Args,
-    reasm: &mut Reassembler,
-    decoders: &mut HashMap<u8, Box<dyn VideoDecoder>>,
-    sink: &mut Sink,
-    recovery: &mut DecodeRecovery,
-    cursor: &mut ClientCursor,
-    audio_client: &mut audio::AudioClient,
-    mic_client: &mut mic::MicClient,
-    present_queue: &mut PresentQueue,
-    avsync_stats: &mut avsync::SyncStats,
-) -> Result<bool> {
-    if ch == channel::CURSOR {
-        match CursorMessage::decode(packet) {
-            Ok(msg) => cursor.apply(msg),
-            Err(e) => warn!("bad cursor message: {e}"),
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("testclient: {e:#}");
+            ExitCode::FAILURE
         }
-        return Ok(true);
     }
-    if ch == channel::AUDIO_OUT {
-        // Audio (§9): the audio thread owns jitter buffer, decoder and
-        // playback; the receive loop only forwards raw payloads.
-        audio_client.feed(packet);
-        return Ok(true);
-    }
-    if ch == channel::CONTROL {
-        match ControlMessage::decode(packet) {
-            Ok(ControlMessage::DisplayInfo {
-                display_id,
-                width,
-                height,
-                codec,
-            }) => {
-                match VideoCodecType::from_wire_id(codec)
-                    .map(codec::build_decoder)
-                    .transpose()
-                {
-                    Ok(Some(dec)) => {
-                        info!(display_id, width, height, codec, "display announced");
-                        decoders.insert(display_id, dec);
+}
+
+/// Consumer loop (§15.3): the session runs on its own task; this loop
+/// receives events, renders damage rects, and forwards window input as
+/// commands until the session ends or the window closes.
+// One match arm per event kind; the variants are the structure.
+#[allow(clippy::too_many_lines)]
+async fn run() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    let args = parse_args()?;
+
+    let config = ClientConfig {
+        addr: args.addr,
+        ticket: args.ticket,
+        key: args.key,
+        audio: args.audio,
+        mic: args.mic,
+    };
+    let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);
+    let (session, commands, displays) = Session::new(config, events_tx);
+    let session_task = tokio::spawn(session.run());
+
+    let mut gui = Gui::new(args.headless);
+    let mut cursor = ClientCursor::new();
+    let mut input = InputPoll::new();
+    let mut selftest = args.selftest_input.then(SelfTest::new);
+    let mut frames = 0u64;
+    let start = Instant::now();
+    let mut close_sent = false;
+    let mut input_tick = tokio::time::interval(Duration::from_millis(8));
+    loop {
+        tokio::select! {
+            event = events_rx.recv_async() => {
+                let Ok(event) = event else {
+                    info!("event channel closed");
+                    break;
+                };
+                match event {
+                    ClientEvent::Connected { udp } => info!(udp, "session connected"),
+                    ClientEvent::DisplayInfo { display_id, width, height, codec } => {
+                        info!(display_id, width, height, ?codec, "display announced");
                     }
-                    Ok(None) => warn!(codec, "unknown codec id; frames will be dropped"),
-                    Err(e) => warn!(codec, "cannot build decoder: {e}"),
+                    ClientEvent::FrameDirty { display_id, rects } => {
+                        if display_id == 0 {
+                            frames += 1;
+                            if frames % 30 == 1 {
+                                let elapsed = start.elapsed().as_secs_f64();
+                                #[allow(clippy::cast_precision_loss)] // frame counts are tiny
+                                let fps = frames as f64 / elapsed.max(0.001);
+                                info!(frames, fps, "display");
+                            }
+                            gui.render(&displays, &rects, &cursor)?;
+                        }
+                        if args.max_frames.is_some_and(|max| frames >= max) && !close_sent {
+                            info!(frames, "done");
+                            close_sent = true;
+                            let _ = commands.try_send(ClientCommand::Close);
+                        }
+                    }
+                    ClientEvent::CursorVisibility { visible } => {
+                        info!(visible, "cursor visibility");
+                        cursor.visible = visible;
+                    }
+                    ClientEvent::CursorShape { width, height, hot_x, hot_y, rgba } => {
+                        info!(width, height, "cursor shape");
+                        cursor.shape = Some(CursorShape { width, height, hot_x, hot_y, rgba });
+                    }
+                    ClientEvent::Error(e) => warn!("session error: {e}"),
+                    ClientEvent::Disconnected => {
+                        info!("session disconnected");
+                        break;
+                    }
                 }
             }
-            Ok(ControlMessage::AudioConfig {
-                codec,
-                sample_rate,
-                channels,
-                bitrate_kbps,
-                frame_ms,
-                fec,
-            }) => {
-                audio_client.configure(audio::AudioSpec {
-                    codec,
-                    sample_rate,
-                    channels,
-                    bitrate_kbps,
-                    frame_ms,
-                    fec,
-                });
-            }
-            Ok(ControlMessage::AudioInConfig {
-                codec,
-                sample_rate,
-                channels,
-                bitrate_kbps,
-                frame_ms,
-                fec,
-            }) => {
-                // Audio-in support (§9.2): the server has a real mic sink;
-                // capture starts now (no packets are sent before this).
-                mic_client.enable(&audio::AudioSpec {
-                    codec,
-                    sample_rate,
-                    channels,
-                    bitrate_kbps,
-                    frame_ms,
-                    fec,
-                });
-            }
-            _ => {}
-        }
-        return Ok(true);
-    }
-    if ch == channel::DISPLAY
-        && let Some(complete) = reasm.push(packet)?
-    {
-        let decoder = match decoders.entry(complete.display_id) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                if complete.display_id == 0 {
-                    warn!("no DisplayInfo received; assuming raw codec");
-                    e.insert(codec::build_decoder(VideoCodecType::Raw)?)
-                } else {
-                    warn!(
-                        display_id = complete.display_id,
-                        "frame for unknown display; dropped"
-                    );
-                    return Ok(true);
-                }
-            }
-        };
-        match decoder.decode(&codec::EncodedPacket {
-            data: complete.data,
-            keyframe: true,
-        }) {
-            Ok(frame) => {
-                recovery.awaiting = false;
-                // Only display 0 is rendered (multi-monitor arrives later,
-                // §8.3); other displays are still decoded to exercise the
-                // pipeline. Display 0 goes through the A/V sync decision
-                // (§9.1): present, hold for the audio clock, or drop.
-                if complete.display_id == 0
-                    && !present_or_hold(
-                        frame,
-                        complete.capture_ts_ms,
-                        audio_client,
-                        present_queue,
-                        sink,
-                        cursor,
-                        avsync_stats,
-                    )?
-                {
+            _ = input_tick.tick() => {
+                // Events must be pumped even when the desktop is static (no
+                // frames → no render → no event pump, §10).
+                gui.pump_events();
+                if !gui.alive() && !close_sent {
                     info!("window closed");
-                    return Ok(false);
+                    close_sent = true;
+                    let _ = commands.try_send(ClientCommand::Close);
+                }
+                for msg in input.poll(&gui) {
+                    let _ = commands.try_send(ClientCommand::Input(msg));
+                }
+                if let Some(st) = &mut selftest {
+                    for msg in st.due() {
+                        info!(?msg, "selftest input");
+                        let _ = commands.try_send(ClientCommand::Input(msg));
+                    }
                 }
             }
-            Err(e) => {
-                // A lost fragment breaks the predictive chain: tolerate the
-                // error and let the caller ask for a keyframe (§12.2).
-                if !recovery.awaiting {
-                    warn!("decode failed ({e}); awaiting keyframe");
-                }
-                recovery.awaiting = true;
-            }
-        }
-        if args.max_frames.is_some_and(|max| sink.frames >= max) {
-            info!(frames = sink.frames, lost, "done");
-            return Ok(false);
         }
     }
-    Ok(true)
+    drop(commands);
+    session_task.await.context("session task")?
 }
 
 #[cfg(test)]
@@ -1085,5 +671,18 @@ mod tests {
         let mut px = vec![0u32; 4]; // 2x2
         overlay_cursor(&mut px, 2, 2, &shape_1px(255, 255, 255, 255), -1, 5);
         assert_eq!(px, vec![0u32; 4]);
+    }
+
+    #[test]
+    fn blit_converts_bgra_and_clips() {
+        // 2x1 BGRA framebuffer: pixel 0 = red, pixel 1 = green.
+        let fb: [u8; 8] = [0, 0, 255, 0, 0, 255, 0, 0];
+        let mut px = vec![0u32; 2];
+        blit_rect(&fb, 2, 1, Rect { x: 0, y: 0, w: 2, h: 1 }, &mut px);
+        assert_eq!(px, vec![0x00FF_0000, 0x0000_FF00]);
+        // A rect entirely outside leaves the buffer untouched.
+        px.fill(7);
+        blit_rect(&fb, 2, 1, Rect { x: 5, y: 0, w: 2, h: 1 }, &mut px);
+        assert_eq!(px, vec![7, 7]);
     }
 }

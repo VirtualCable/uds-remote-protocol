@@ -11,19 +11,17 @@ workspace = true
 
 [features]
 default = ["audio"]
-vp9 = ["codec/codec-vp9"]
-vp8 = ["codec/codec-vp8"]
-jpeg = ["codec/codec-jpeg"]
-audio = ["codec/codec-opus", "dep:cpal"]
+vp9 = ["client/vp9"]
+vp8 = ["client/vp8"]
+jpeg = ["client/jpeg"]
+audio = ["client/audio"]
 
 [dependencies]
 client.workspace = true
-transport.workspace = true
 protocol.workspace = true
-codec.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-cpal = { workspace = true, optional = true }
+flume.workspace = true
 minifb = "0.28"

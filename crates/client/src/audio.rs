@@ -23,8 +23,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use client::jitter::{JitterBuffer, JitterOutput};
-use codec::{AudioCodecType, AudioPreset};
+use crate::jitter::{JitterBuffer, JitterOutput};use codec::{AudioCodecType, AudioPreset};
 use tracing::{info, warn};
 
 /// Live device stream handle. Without the `audio` feature there is no cpal,
@@ -178,6 +177,12 @@ impl PlaybackBuffer {
     #[must_use]
     pub fn len(&self) -> usize {
         self.samples.len()
+    }
+
+    /// True when no samples are buffered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
     }
 
     /// Absolute play position: samples already played, skipped by drains or
@@ -719,7 +724,7 @@ mod tests {
         assert!(drained > 0);
         assert_eq!(buf.play_pos(), 1 + drained, "drained samples skip the cursor");
         // Underrun: empty the buffer, then pop silence.
-        while buf.len() > 0 {
+        while !buf.is_empty() {
             buf.pop_or_silence();
         }
         let pos = buf.play_pos();

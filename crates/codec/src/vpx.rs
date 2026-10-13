@@ -386,6 +386,14 @@ impl VideoDecoder for VpxDecoder {
 /// VP9 encoder (libvpx, realtime profile).
 pub struct Vp9Encoder(VpxEncoder);
 
+// SAFETY: the libvpx codec context is !Send only because it holds raw
+// pointers; libvpx contexts are single-threaded but movable — every access
+// goes through `&mut self` trait methods, so ownership transfer across
+// threads can never alias a live use (the trait requires `Send`, §15.3).
+unsafe impl Send for VpxEncoder {}
+// SAFETY: same argument as `VpxEncoder` above.
+unsafe impl Send for VpxDecoder {}
+
 impl Vp9Encoder {
     /// Creates a VP9 encoder for `width`x`height` at `kbps` target bitrate.
     pub fn new(width: u32, height: u32, kbps: u32) -> Result<Self> {

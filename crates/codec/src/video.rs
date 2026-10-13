@@ -93,7 +93,11 @@ pub struct DecodedFrame {
 }
 
 /// Video encoder: BGRA frame in → bitstream packet out.
-pub trait VideoEncoder {
+///
+/// `Send` (like the audio traits): the server runs the encoder on its
+/// capture thread and the client session may live on any task/thread
+/// (§15.3). Each encoder is still used from a single thread at a time.
+pub trait VideoEncoder: Send {
     /// Encodes one frame.
     fn encode(&mut self, frame: &VideoFrame<'_>) -> crate::Result<EncodedPacket>;
 
@@ -119,7 +123,11 @@ pub trait VideoEncoder {
 }
 
 /// Video decoder: bitstream packet in → BGRA frame out.
-pub trait VideoDecoder {
+///
+/// `Send` (like the audio traits): the client session owns its decoders and
+/// may run on any task/thread (§15.3). Each decoder is still used from a
+/// single thread at a time.
+pub trait VideoDecoder: Send {
     /// Decodes one packet.
     fn decode(&mut self, packet: &EncodedPacket) -> crate::Result<DecodedFrame>;
 

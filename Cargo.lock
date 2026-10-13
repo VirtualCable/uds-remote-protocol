@@ -195,9 +195,14 @@ dependencies = [
 name = "client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "codec",
+ "cpal",
  "crypt",
+ "flume",
  "protocol",
+ "tokio",
+ "tracing",
  "transport",
 ]
 
@@ -442,12 +447,27 @@ name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
+dependencies = [
+ "getrandom 0.4.3",
+]
 
 [[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+
+[[package]]
+name = "flume"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e139bc46ca777eb5efaf62df0ab8cc5fd400866427e56c68b22e414e53bd3be"
+dependencies = [
+ "fastrand",
+ "futures-core",
+ "futures-sink",
+ "spin",
+]
 
 [[package]]
 name = "futures"
@@ -562,9 +582,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1529,14 +1551,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "client",
- "codec",
- "cpal",
+ "flume",
  "minifb",
  "protocol",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "transport",
 ]
 
 [[package]]

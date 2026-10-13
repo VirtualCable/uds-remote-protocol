@@ -1,6 +1,6 @@
 [package]
 name = "client"
-description = "Client side of the protocol: session, decoding, rendering and local input capture"
+description = "Client side of the protocol: session, decoding and the event/command API (no GUI)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,8 +9,20 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+vp9 = ["codec/codec-vp9"]
+vp8 = ["codec/codec-vp8"]
+jpeg = ["codec/codec-jpeg"]
+audio = ["codec/codec-opus", "dep:cpal"]
+
 [dependencies]
 protocol.workspace = true
 transport.workspace = true
 crypt.workspace = true
 codec.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+flume.workspace = true
+cpal = { workspace = true, optional = true }

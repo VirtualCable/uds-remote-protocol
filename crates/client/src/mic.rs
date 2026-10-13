@@ -292,6 +292,11 @@ pub struct MicClient {
     clock_start: Instant,
     /// Receives encoded datagram payloads once the pipeline is running.
     rx: Option<mpsc::Receiver<Vec<u8>>>,
+    /// Last announced audio-in format, kept to restart capture after a
+    /// runtime toggle (`ClientCommand::SetMic`).
+    spec: Option<AudioSpec>,
+    /// Consumer toggle (§15.3): capture only runs while allowed.
+    allowed: bool,
 }
 
 impl MicClient {
@@ -302,6 +307,8 @@ impl MicClient {
             mode,
             clock_start,
             rx: None,
+            spec: None,
+            allowed: true,
         }
     }
 
@@ -309,7 +316,8 @@ impl MicClient {
     /// for the announced format and starts the capture thread. A second
     /// announcement while running is ignored (the PoC format is fixed).
     pub fn enable(&mut self, spec: &AudioSpec) {
-        if self.rx.is_some() || self.mode == MicMode::Off {
+        self.spec = Some(*spec);
+        if self.rx.is_some() || self.mode == MicMode::Off || !self.allowed {
             return;
         }
         let Some(codec_type) = AudioCodecType::from_wire_id(spec.codec) else {
@@ -375,6 +383,26 @@ impl MicClient {
     /// announcement re-enables it.
     pub fn disable(&mut self) {
         self.rx = None;
+    }
+
+    /// Consumer toggle (§15.3, `ClientCommand::SetMic`): `false` stops the
+    /// capture thread, `true` restarts it from the last announced format
+    /// (if any and the mode is not off).
+    pub fn set_allowed(&mut self, allowed: bool) {
+        if self.allowed == allowed {
+            return;
+        }
+        self.allowed = allowed;
+        if allowed {
+            let spec = self.spec;
+            if let Some(spec) = spec {
+                self.enable(&spec);
+            }
+        } else {
+            // Dropping the receiver closes the channel; the capture thread
+            // exits on its next tick (`tx.is_closed`).
+            self.rx = None;
+        }
     }
 }
 

@@ -1,0 +1,727 @@
+//! Client session: connection, decoding and the event/command pumps (§15.3).
+//!
+//! A [`Session`] owns the whole protocol side of a connection — handshake,
+//! UDP detection, reassembly, decoding, A/V presentation sync, audio and
+//! mic pipelines, probing/metrics and input forwarding — and talks to its
+//! consumer exclusively through the injected [`flume::Sender<ClientEvent>`]
+//! and the returned [`CommandSender`]. Decoded pixels live in the shared
+//! [`Displays`] framebuffers; the consumer runs [`Session::run`] on its own
+//! task/thread and renders damage rects as they arrive.
+
+use std::collections::{HashMap, VecDeque};
+use std::net::SocketAddr;
+use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use codec::{EncodedPacket, VideoCodecType, VideoDecoder};
+use protocol::fragment::Reassembler;
+use protocol::{self, ControlMessage, CursorMessage, channel};
+use tracing::{debug, info, warn};
+use transport::{
+    Connector, DirectConnector, EncryptedStream, ReliableTransport, Target, UdpLeg, UdpTransport,
+    udp_detect,
+};
+
+use crate::audio::{AudioClient, AudioSpec};
+use crate::avsync::{self, SyncStats};
+use crate::command::{COMMAND_CHANNEL_CAPACITY, ClientCommand, CommandReceiver, CommandSender};
+use crate::events::ClientEvent;
+use crate::framebuffer::Displays;
+use crate::mic::{MicClient, MicMode};
+
+/// Keyframe requests on unrecoverable frame loss are rate-limited to one
+/// per this interval (riesgos §2.1).
+const KEYFRAME_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Presentation-queue pump cadence (§9.1): held frames are presented when
+/// the audio clock reaches their timestamp.
+const PRESENT_TICK: Duration = Duration::from_millis(8);
+
+/// A/V sync statistics are logged with this cadence.
+const SYNC_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Static configuration of one client session.
+#[derive(Debug, Clone)]
+pub struct ClientConfig {
+    /// Server address (direct, or the launcher's local tunnel endpoint).
+    pub addr: SocketAddr,
+    /// Session ticket delivered out of band (§6.3.1).
+    pub ticket: [u8; protocol::TICKET_LENGTH],
+    /// Shared secret delivered out of band (§6.3.1).
+    pub key: [u8; 32],
+    /// Audio playback (§9); when false, audio packets are dropped.
+    pub audio: bool,
+    /// Mic capture mode (§9.2); off by default.
+    pub mic: MicMode,
+}
+
+/// One client session (§15.3). Build with [`Session::new`], then drive it
+/// with [`Session::run`] on a dedicated task.
+pub struct Session {
+    config: ClientConfig,
+    events: flume::Sender<ClientEvent>,
+    command_rx: CommandReceiver,
+    displays: Displays,
+}
+
+impl Session {
+    /// Creates a session. The consumer injects the (ideally bounded, see
+    /// [`crate::events::EVENT_CHANNEL_CAPACITY`]) event channel and receives
+    /// the command sender plus the shared framebuffer registry.
+    #[must_use]
+    pub fn new(
+        config: ClientConfig,
+        events: flume::Sender<ClientEvent>,
+    ) -> (Self, CommandSender, Displays) {
+        let (command_tx, command_rx) = flume::bounded(COMMAND_CHANNEL_CAPACITY);
+        let displays = Displays::default();
+        (
+            Self {
+                config,
+                events,
+                command_rx,
+                displays: displays.clone(),
+            },
+            command_tx,
+            displays,
+        )
+    }
+
+    /// Runs the session until it ends (close command, peer disconnect or
+    /// fatal error). Always emits [`ClientEvent::Disconnected`] as the last
+    /// event (unless the consumer is already gone).
+    pub async fn run(mut self) -> Result<()> {
+        let result = self.run_inner().await;
+        let _ = self.events.try_send(ClientEvent::Disconnected);
+        result
+    }
+
+    async fn run_inner(&mut self) -> Result<()> {
+        let target = Target::new(self.config.addr, self.config.ticket, self.config.key);
+        let (raw, _) = DirectConnector::new().connect(&target).await?;
+        let mut stream: EncryptedStream<Box<dyn ReliableTransport>> =
+            EncryptedStream::client_handshake(raw, &self.config.ticket, &self.config.key).await?;
+        info!("handshake done");
+
+        let clock_start = Instant::now();
+        let clock = || micros_since(clock_start);
+        let leg = udp_detect(
+            &mut stream,
+            self.config.addr.ip(),
+            &self.config.ticket,
+            &self.config.key,
+            clock,
+            3,
+            Duration::from_millis(500),
+        )
+        .await?;
+        if let Some(leg) = &leg {
+            info!(rtt_micros = leg.initial_rtt_micros, "display leg: UDP");
+        } else {
+            warn!("UDP detection failed, display leg: TCP fallback");
+        }
+        if !emit(&self.events, ClientEvent::Connected { udp: leg.is_some() }) {
+            return Ok(());
+        }
+
+        let mut core = Core::new(
+            self.events.clone(),
+            self.displays.clone(),
+            &self.config,
+            clock_start,
+        );
+        match leg {
+            Some(leg) => self.udp_loop(leg, stream, clock_start, &mut core).await,
+            None => self.tcp_loop(stream, &mut core).await,
+        }
+    }
+
+    /// Reliable-stream-only session (§4.1 fallback): control, display,
+    /// audio and input all share the encrypted stream.
+    async fn tcp_loop(
+        &mut self,
+        mut stream: EncryptedStream<Box<dyn ReliableTransport>>,
+        core: &mut Core,
+    ) -> Result<()> {
+        // Sized for the largest stream record (~64 KiB): cursor shapes (§10)
+        // can be a few KiB; datagrams on this buffer stay MTU-sized anyway.
+        let mut buf = vec![0u8; 65_536];
+        let mut present_tick = tokio::time::interval(PRESENT_TICK);
+        loop {
+            tokio::select! {
+                res = stream.recv_into(&mut buf) => {
+                    let (ch, n) = res?;
+                    if !core.handle_packet(ch, &buf[..n])? {
+                        return Ok(());
+                    }
+                }
+                msg = core.mic.recv() => {
+                    if let Some(payload) = msg {
+                        // TCP fallback session: audio-in goes over the
+                        // reliable stream (like the server's audio-out
+                        // fallback, §9).
+                        stream.send(channel::AUDIO_IN, &payload).await?;
+                    } else {
+                        warn!("mic thread ended; audio-in disabled for this session");
+                        core.mic.disable();
+                    }
+                }
+                cmd = self.command_rx.recv_async() => {
+                    if !Self::handle_command(cmd, &mut stream, core).await? {
+                        return Ok(());
+                    }
+                }
+                _ = present_tick.tick() => {
+                    if !core.avsync_tick() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// UDP display leg session (§4.2): receives display traffic while
+    /// running continuous probing (§12.1) — one probe per second; answered
+    /// ones feed the RTT/jitter EWMAs, and once per second a MetricsReport
+    /// goes to the server over the reliable control stream (§12.2).
+    /// Unrecoverable frame loss triggers a rate-limited `RequestKeyframe`.
+    ///
+    /// The reliable stream is read too: cursor messages always travel on it
+    /// (§10 — a lost shape would leave a stale cursor), along with any
+    /// reliable S→C control traffic.
+    ///
+    /// Select loop over display + stream + probing + mic + commands;
+    /// splitting it further would only scatter the session state.
+    #[allow(clippy::too_many_lines)]
+    async fn udp_loop(
+        &mut self,
+        leg: UdpLeg<UdpTransport>,
+        mut stream: EncryptedStream<Box<dyn ReliableTransport>>,
+        clock_start: Instant,
+        core: &mut Core,
+    ) -> Result<()> {
+        let clock = || micros_since(clock_start);
+        let mut leg = leg;
+        let mut buf = vec![0u8; 65_536];
+        let mut sbuf = vec![0u8; 65_536];
+
+        let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut rtt_ewma: Option<f64> = None;
+        let mut jitter_ewma = 0.0_f64;
+        // The first ack is delayed by the server's session bring-up (capture
+        // thread, encoder init), so it is discarded as warm-up and never
+        // feeds the EWMA/baseline.
+        let mut warmup_acks = 1u8;
+        let mut prev_lost = 0u64;
+        let mut prev_received = 0u64;
+        let mut present_tick = tokio::time::interval(PRESENT_TICK);
+        loop {
+            tokio::select! {
+                res = leg.dgram.recv_into(&mut buf) => {
+                    let (ch, n) = res?;
+                    if ch == channel::CONTROL
+                        && let Ok(ack) = protocol::ProbeAck::decode(&buf[..n])
+                    {
+                        let rtt = protocol::compute_rtt(ack.t1, ack.t2, ack.t3, clock());
+                        #[allow(clippy::cast_precision_loss)] // micros fit in f64
+                        let rtt = rtt as f64;
+                        if warmup_acks > 0 {
+                            warmup_acks -= 1;
+                            continue;
+                        }
+                        let prev = rtt_ewma.unwrap_or(rtt);
+                        jitter_ewma += 0.25 * ((rtt - prev).abs() - jitter_ewma);
+                        rtt_ewma = Some(prev + 0.25 * (rtt - prev));
+                        continue;
+                    }
+                    if !core.handle_packet(ch, &buf[..n])? {
+                        return Ok(());
+                    }
+                    // Ask for a keyframe when the stream is broken (decode
+                    // errors) or a frame was evicted incomplete; the rate
+                    // limit re-asks every 500 ms while the stream stays
+                    // broken.
+                    let dropped = core.reasm.dropped_frames();
+                    if (dropped > core.prev_dropped || core.recovery.awaiting)
+                        && core.last_key_req.is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_MIN_INTERVAL)
+                    {
+                        info!(dropped, awaiting = core.recovery.awaiting, "stream broken; requesting keyframe");
+                        let req = ControlMessage::RequestKeyframe { display_id: 0 };
+                        stream.send(channel::CONTROL, &req.encode()?).await?;
+                        core.last_key_req = Some(Instant::now());
+                    }
+                    core.prev_dropped = dropped;
+                }
+                res = stream.recv_into(&mut sbuf) => {
+                    // Reliable S→C traffic while the UDP leg is up: cursor
+                    // messages (§10) and any control announcements.
+                    let (ch, n) = res?;
+                    if !core.handle_packet(ch, &sbuf[..n])? {
+                        return Ok(());
+                    }
+                }
+                _ = probe_tick.tick() => {
+                    leg.dgram
+                        .send(channel::CONTROL, &protocol::Probe { t1: clock() }.encode())
+                        .await?;
+                    let Some(rtt) = rtt_ewma else { continue };
+                    let lost = leg.dgram.lost_estimate();
+                    let received = leg.dgram.received();
+                    let dlost = lost - prev_lost;
+                    let drecv = received - prev_received;
+                    prev_lost = lost;
+                    prev_received = received;
+                    let denom = dlost + drecv;
+                    #[allow(clippy::cast_precision_loss)] // counters fit in f64
+                    let loss_rate = if denom == 0 { 0.0 } else { dlost as f64 / denom as f64 };
+                    // Rates and micros are non-negative and small; the casts
+                    // cannot lose sign or meaningful precision.
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let report = ControlMessage::MetricsReport {
+                        rtt_micros: rtt as u64,
+                        jitter_micros: jitter_ewma as u64,
+                        loss_permille: (loss_rate * 1000.0) as u16,
+                    };
+                    stream.send(channel::CONTROL, &report.encode()?).await?;
+                }
+                msg = core.mic.recv() => {
+                    if let Some(payload) = msg {
+                        // Audio-in goes over the UDP leg (lossy is fine: the
+                        // server's jitter buffer conceals gaps), like probes
+                        // do.
+                        leg.dgram.send(channel::AUDIO_IN, &payload).await?;
+                    } else {
+                        warn!("mic thread ended; audio-in disabled for this session");
+                        core.mic.disable();
+                    }
+                }
+                cmd = self.command_rx.recv_async() => {
+                    if !Self::handle_command(cmd, &mut stream, core).await? {
+                        return Ok(());
+                    }
+                }
+                _ = present_tick.tick() => {
+                    if !core.avsync_tick() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Applies one consumer command; returns `false` when the session must
+    /// end (close requested or command channel shut down).
+    async fn handle_command(
+        cmd: std::result::Result<ClientCommand, flume::RecvError>,
+        stream: &mut EncryptedStream<Box<dyn ReliableTransport>>,
+        core: &mut Core,
+    ) -> Result<bool> {
+        match cmd {
+            Ok(ClientCommand::Input(msg)) => {
+                let (buf, n) = msg.encode();
+                stream.send(channel::INPUT, &buf[..n]).await?;
+            }
+            Ok(ClientCommand::SetMic(on)) => core.mic.set_allowed(on),
+            Ok(ClientCommand::Resize { width, height }) => {
+                warn!(
+                    width,
+                    height,
+                    "remote display-mode change not supported by the protocol yet (§15.2); ignored"
+                );
+            }
+            Ok(ClientCommand::RequestKeyframe { display_id }) => {
+                if core
+                    .last_key_req
+                    .is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_MIN_INTERVAL)
+                {
+                    let req = ControlMessage::RequestKeyframe { display_id };
+                    stream.send(channel::CONTROL, &req.encode()?).await?;
+                    core.last_key_req = Some(Instant::now());
+                }
+            }
+            Ok(ClientCommand::Close) => {
+                info!("close requested by the consumer");
+                return Ok(false);
+            }
+            Err(_) => {
+                info!("command channel closed; ending session");
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Sends one event without blocking (§15.3): a full channel drops the
+/// notification (pixels are never lost, they stay in the framebuffer); a
+/// disconnected channel means the consumer is gone and ends the session.
+fn emit(tx: &flume::Sender<ClientEvent>, event: ClientEvent) -> bool {
+    match tx.try_send(event) {
+        Ok(()) => true,
+        Err(flume::TrySendError::Full(event)) => {
+            debug!(?event, "event channel full; notification dropped");
+            true
+        }
+        Err(flume::TrySendError::Disconnected(_)) => false,
+    }
+}
+
+fn micros_since(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+/// Decode-error recovery state (§12.2): when a predictive decoder errors
+/// (a lost delta frame breaks the reference chain), the client asks for a
+/// keyframe and tolerates decode errors until the stream decodes again
+/// instead of dying on the first broken frame.
+#[derive(Default)]
+struct DecodeRecovery {
+    /// True while the stream is known-broken and a keyframe is awaited.
+    awaiting: bool,
+}
+
+/// A decoded frame waiting for the audio clock to catch up (§9.1).
+struct HeldFrame {
+    display_id: u8,
+    /// Present when `audio_now` reaches this capture timestamp (ms).
+    hold_until: u32,
+    frame: codec::DecodedFrame,
+}
+
+/// Presentation queue for held frames (§9.1): at most `MAX_HELD_FRAMES`;
+/// on overflow the oldest is dropped — stale video is worse than a skipped
+/// frame.
+struct PresentQueue {
+    frames: VecDeque<HeldFrame>,
+}
+
+/// Maximum frames waiting for presentation (§9.1: "a couple of frames").
+const MAX_HELD_FRAMES: usize = 3;
+
+impl PresentQueue {
+    fn new() -> Self {
+        Self {
+            frames: VecDeque::new(),
+        }
+    }
+
+    /// Holds a frame until the audio clock reaches `hold_until`.
+    fn hold(&mut self, display_id: u8, hold_until: u32, frame: codec::DecodedFrame, stats: &mut SyncStats) {
+        stats.record_hold();
+        if self.frames.len() >= MAX_HELD_FRAMES {
+            self.frames.pop_front();
+            stats.record_overflow_drop();
+        }
+        self.frames.push_back(HeldFrame {
+            display_id,
+            hold_until,
+            frame,
+        });
+    }
+}
+
+/// Mutable state shared by the two session loops.
+struct Core {
+    events: flume::Sender<ClientEvent>,
+    displays: Displays,
+    reasm: Reassembler,
+    /// One decoder per display (§8.3); created from DisplayInfo
+    /// announcements, or Raw on first frame for servers that do not
+    /// announce (§8.4 compat).
+    decoders: HashMap<u8, Box<dyn VideoDecoder>>,
+    recovery: DecodeRecovery,
+    audio: AudioClient,
+    mic: MicClient,
+    present_queue: PresentQueue,
+    avsync_stats: SyncStats,
+    avsync_log: Instant,
+    /// Rate-limit state for keyframe requests (riesgos §2.1).
+    last_key_req: Option<Instant>,
+    prev_dropped: u64,
+}
+
+impl Core {
+    fn new(
+        events: flume::Sender<ClientEvent>,
+        displays: Displays,
+        config: &ClientConfig,
+        clock_start: Instant,
+    ) -> Self {
+        Self {
+            events,
+            displays,
+            reasm: Reassembler::new(),
+            decoders: HashMap::new(),
+            recovery: DecodeRecovery::default(),
+            audio: AudioClient::new(config.audio),
+            mic: MicClient::new(config.mic, clock_start),
+            present_queue: PresentQueue::new(),
+            avsync_stats: SyncStats::default(),
+            avsync_log: Instant::now(),
+            last_key_req: None,
+            prev_dropped: 0,
+        }
+    }
+
+    /// Writes one decoded frame into the shared framebuffer and notifies
+    /// the consumer (§15.3). Returns `false` when the consumer is gone.
+    fn present(&mut self, display_id: u8, frame: &codec::DecodedFrame) -> bool {
+        let Some(display) = self.displays.get_or_insert(display_id) else {
+            return true; // registry poisoned: keep the session, lose the frame
+        };
+        let rect = {
+            let mut guard = display.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.write_frame(frame);
+            guard.full_rect()
+        };
+        emit(
+            &self.events,
+            ClientEvent::FrameDirty {
+                display_id,
+                rects: vec![rect],
+            },
+        )
+    }
+
+    /// Applies the A/V sync decision (§9.1) to one freshly decoded frame.
+    /// Returns `false` when the consumer is gone.
+    fn present_or_hold(&mut self, display_id: u8, frame: codec::DecodedFrame, video_ts_ms: u32) -> bool {
+        let audio_now = self.audio.audio_now_ms();
+        match avsync::decide(video_ts_ms, audio_now.unwrap_or(0), audio_now.is_some()) {
+            avsync::PresentDecision::PresentNow => {
+                if let Some(now) = audio_now {
+                    self.avsync_stats
+                        .record_present(i64::from(video_ts_ms) - i64::from(now));
+                }
+                self.present(display_id, &frame)
+            }
+            avsync::PresentDecision::HoldUntil(ts) => {
+                self.present_queue
+                    .hold(display_id, ts, frame, &mut self.avsync_stats);
+                true
+            }
+            avsync::PresentDecision::Drop => {
+                self.avsync_stats.record_stale_drop();
+                true
+            }
+        }
+    }
+
+    /// Presentation-queue pump (§9.1): presents due held frames (an absent
+    /// audio clock flushes everything so video never stalls) and logs the
+    /// sync stats periodically. Returns `false` when the consumer is gone.
+    fn avsync_tick(&mut self) -> bool {
+        let audio_now = self.audio.audio_now_ms();
+        while let Some(front) = self.present_queue.frames.front() {
+            let due = match audio_now {
+                Some(now) => front.hold_until <= now,
+                None => true,
+            };
+            if !due {
+                break;
+            }
+            let held = self.present_queue.frames.pop_front().expect("front checked");
+            if let Some(now) = audio_now {
+                self.avsync_stats
+                    .record_present(i64::from(held.hold_until) - i64::from(now));
+            }
+            if !self.present(held.display_id, &held.frame) {
+                return false;
+            }
+        }
+        if self.avsync_log.elapsed() >= SYNC_LOG_INTERVAL {
+            info!(
+                mode = if audio_now.is_some() { "audio" } else { "no-audio" },
+                presented = self.avsync_stats.presented,
+                held = self.avsync_stats.held,
+                dropped_stale = self.avsync_stats.dropped_stale,
+                dropped_overflow = self.avsync_stats.dropped_overflow,
+                skew_avg_ms = self.avsync_stats.skew_avg_ms(),
+                skew_max_abs_ms = self.avsync_stats.skew_max_abs_ms(),
+                "avsync"
+            );
+            self.avsync_stats.reset();
+            self.avsync_log = Instant::now();
+        }
+        true
+    }
+
+    /// Handles one received packet; returns `false` when the session should
+    /// end (consumer gone).
+    // One dispatch arm per channel; the packet kinds are the structure.
+    #[allow(clippy::too_many_lines)]
+    fn handle_packet(&mut self, ch: u16, packet: &[u8]) -> Result<bool> {
+        if ch == channel::CURSOR {
+            match CursorMessage::decode(packet) {
+                Ok(CursorMessage::Visibility { visible }) => {
+                    info!(visible, "cursor visibility");
+                    if !emit(&self.events, ClientEvent::CursorVisibility { visible }) {
+                        return Ok(false);
+                    }
+                }
+                Ok(CursorMessage::Shape {
+                    width,
+                    height,
+                    hot_x,
+                    hot_y,
+                    pixels,
+                }) => {
+                    info!(width, height, "cursor shape");
+                    if !emit(
+                        &self.events,
+                        ClientEvent::CursorShape {
+                            width,
+                            height,
+                            hot_x,
+                            hot_y,
+                            rgba: pixels,
+                        },
+                    ) {
+                        return Ok(false);
+                    }
+                }
+                Err(e) => warn!("bad cursor message: {e}"),
+            }
+            return Ok(true);
+        }
+        if ch == channel::AUDIO_OUT {
+            // Audio (§9): the audio thread owns jitter buffer, decoder and
+            // playback; the receive loop only forwards raw payloads.
+            self.audio.feed(packet);
+            return Ok(true);
+        }
+        if ch == channel::CONTROL {
+            self.handle_control(packet);
+            return Ok(true);
+        }
+        if ch == channel::DISPLAY
+            && let Some(complete) = self.reasm.push(packet)?
+        {
+            let decoder = match self.decoders.entry(complete.display_id) {
+                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    if complete.display_id == 0 {
+                        warn!("no DisplayInfo received; assuming raw codec");
+                        e.insert(codec::build_decoder(VideoCodecType::Raw)?)
+                    } else {
+                        warn!(
+                            display_id = complete.display_id,
+                            "frame for unknown display; dropped"
+                        );
+                        return Ok(true);
+                    }
+                }
+            };
+            match decoder.decode(&EncodedPacket {
+                data: complete.data,
+                keyframe: true,
+            }) {
+                Ok(frame) => {
+                    self.recovery.awaiting = false;
+                    // Every display is presented into its own framebuffer
+                    // (§8.3, §15.3); the A/V sync decision (§9.1) decides:
+                    // present, hold for the audio clock, or drop.
+                    if !self.present_or_hold(complete.display_id, frame, complete.capture_ts_ms) {
+                        return Ok(false);
+                    }
+                }
+                Err(e) => {
+                    // A lost fragment breaks the predictive chain: tolerate
+                    // the error and let the loop ask for a keyframe (§12.2).
+                    if !self.recovery.awaiting {
+                        warn!("decode failed ({e}); awaiting keyframe");
+                        let _ = emit(
+                            &self.events,
+                            ClientEvent::Error(format!("video decode failed: {e}")),
+                        );
+                    }
+                    self.recovery.awaiting = true;
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Handles one control-channel message (announcements, §8.4/§9/§9.2).
+    fn handle_control(&mut self, packet: &[u8]) {
+        match ControlMessage::decode(packet) {
+            Ok(ControlMessage::DisplayInfo {
+                display_id,
+                width,
+                height,
+                codec,
+            }) => {
+                let codec_type = VideoCodecType::from_wire_id(codec);
+                match codec_type.map(codec::build_decoder).transpose() {
+                    Ok(Some(dec)) => {
+                        info!(display_id, width, height, codec, "display announced");
+                        self.decoders.insert(display_id, dec);
+                        // The framebuffer exists from the announcement on,
+                        // so the consumer can fetch it immediately (§15.3).
+                        self.displays.get_or_insert(display_id);
+                        let _ = emit(
+                            &self.events,
+                            ClientEvent::DisplayInfo {
+                                display_id,
+                                width,
+                                height,
+                                codec: codec_type.expect("decoder exists"),
+                            },
+                        );
+                    }
+                    Ok(None) => {
+                        warn!(codec, "unknown codec id; frames will be dropped");
+                        let _ = emit(
+                            &self.events,
+                            ClientEvent::Error(format!("unknown video codec id {codec}")),
+                        );
+                    }
+                    Err(e) => {
+                        warn!(codec, "cannot build decoder: {e}");
+                        let _ = emit(
+                            &self.events,
+                            ClientEvent::Error(format!("cannot build video decoder: {e}")),
+                        );
+                    }
+                }
+            }
+            Ok(ControlMessage::AudioConfig {
+                codec,
+                sample_rate,
+                channels,
+                bitrate_kbps,
+                frame_ms,
+                fec,
+            }) => {
+                self.audio.configure(AudioSpec {
+                    codec,
+                    sample_rate,
+                    channels,
+                    bitrate_kbps,
+                    frame_ms,
+                    fec,
+                });
+            }
+            Ok(ControlMessage::AudioInConfig {
+                codec,
+                sample_rate,
+                channels,
+                bitrate_kbps,
+                frame_ms,
+                fec,
+            }) => {
+                // Audio-in support (§9.2): the server has a real mic sink;
+                // capture starts now (no packets are sent before this).
+                self.mic.enable(&AudioSpec {
+                    codec,
+                    sample_rate,
+                    channels,
+                    bitrate_kbps,
+                    frame_ms,
+                    fec,
+                });
+            }
+            _ => {}
+        }
+    }
+}
