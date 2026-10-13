@@ -15,7 +15,7 @@ Signature="$WINDOWS NT$"
 Class=Display
 ClassGuid={4D36E968-E325-11CE-BFC1-08002BE10318}
 Provider=%ManufacturerName%
-DriverVer=10/14/2026,0.1.0.0
+DriverVer=10/12/2026,0.1.0.0
 CatalogFile=udsdisp.cat
 PnpLockdown=1
 
