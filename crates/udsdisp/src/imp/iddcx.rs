@@ -61,6 +61,8 @@ macro_rules! call_iddcx {
     }};
 }
 
+// Re-exported for the sibling modules that will use it from M2 on.
+#[allow(unused_imports)]
 pub(crate) use call_iddcx;
 
 use bindings::{

@@ -99,7 +99,7 @@ mod win {
             // dispatch table, so bindgen cannot export them as functions; what
             // we need are the PFN_* typedefs, the IDARG_*/IDD*/IDDCX_* types,
             // the EVT callback typedefs and the dispatch-table index enum.
-            .allowlist_type("IDDCX.*|IDARG.*|IDD_.*|PFN_IDD.*|EVT_IDD.*")
+            .allowlist_type("IDDCX.*|IDARG.*|IDD_.*|.*IDDFUNCENUM.*|.*IDDSTRUCTENUM.*|PFN_IDD.*|EVT_IDD.*")
             .allowlist_var("IDDCX_VERSION.*|IDD_ALWAYS_AVAILABLE_FUNCTION_COUNT|.*TableIndex")
             .ctypes_prefix("std::ffi")
             .layout_tests(false)
