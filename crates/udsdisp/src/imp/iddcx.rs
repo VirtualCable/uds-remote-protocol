@@ -34,6 +34,16 @@ unsafe extern "C" {
     static IddDriverGlobals: PIDD_DRIVER_GLOBALS;
 }
 
+/// Version negotiation global expected by `iddcxstub.lib`: in C this is the
+/// `__declspec(selectany) ULONG IddMinimumVersionRequired =
+/// IDDCX_MINIMUM_VERSION_REQUIRED` definition that `IddCxFuncEnum.h` injects
+/// into the client (the stub itself is built with `IDD_STUB`, so it only
+/// references the symbol). We build against the 1.7 headers and require
+/// IddCx >= 1.7 (Windows Server 2022 / Windows 11 21H2+).
+#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
+static IddMinimumVersionRequired: u32 = 7;
+
 /// Calls the IddCx function at `$index` in the dispatch table.
 ///
 /// The first argument is always `IddDriverGlobals`, exactly like the
