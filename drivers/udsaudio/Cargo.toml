@@ -16,7 +16,7 @@ crate-type = ["cdylib"]
 # build time). The pure logic in src/logic.rs must stay testable on any host.
 [target.'cfg(windows)'.build-dependencies]
 wdk-build = "0.5.1"
-bindgen = "0.72"
+bindgen = "0.73.2"
 
 [target.'cfg(windows)'.dependencies]
 wdk = "0.4.1"

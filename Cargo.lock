@@ -1759,6 +1759,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "udsaudio-ctl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "windows",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
