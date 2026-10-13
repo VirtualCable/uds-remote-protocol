@@ -1,7 +1,8 @@
 //! Transport contracts (design doc §4.4).
 //!
 //! The protocol core only knows these traits: it does not know whether it is
-//! talking to direct sockets or to an intermediate tunnel (UDS tunnel-server, phase 4).
+//! talking to direct sockets or to a local listener proxied through the UDS
+//! tunnel by the launcher.
 
 use std::net::SocketAddr;
 
@@ -52,7 +53,7 @@ impl Target {
 ///
 /// It does not apply its own framing: that is the responsibility of the
 /// protocol layer ([`crate::EncryptedStream`]). This maps 1:1 to the opaque
-/// stream the future tunnel-server adapter will offer.
+/// stream the launcher's local tunnel listener offers.
 #[async_trait]
 pub trait ReliableTransport: Send {
     /// Sends the given bytes (full write).

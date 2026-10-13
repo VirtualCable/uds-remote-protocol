@@ -60,8 +60,9 @@ impl<T: ReliableTransport + ?Sized> ReliableTransport for Box<T> {
     }
 }
 
-/// Direct TCP connector (PoC phase). The future `TunnelConnector` (phase 4)
-/// will implement the same [`Connector`] trait talking to tunnel-server.
+/// Direct TCP connector. Also covers the gateway case: the UDS launcher
+/// exposes the tunnel as a local TCP+UDP listener, which is just another
+/// address for this connector.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DirectConnector;
 

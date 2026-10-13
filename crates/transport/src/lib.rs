@@ -7,13 +7,16 @@
 //! - [`DatagramTransport`]: unreliable datagrams (UDP equivalent), optional.
 //! - [`Connector`]: connection factory (client side).
 //! - [`EncryptedStream`]: Hello handshake + E2E encryption over any
-//!   [`ReliableTransport`] (layer shared with the future tunnel).
+//!   [`ReliableTransport`].
 //! - [`EncryptedDatagram`]: E2E encryption over any [`DatagramTransport`].
 //!
 //! Implementations:
-//! - [`DirectConnector`] / [`DirectListener`] (PoC phase): real TCP.
+//! - [`DirectConnector`] / [`DirectListener`]: real TCP.
 //! - [`UdpTransport`]: real UDP.
-//! - `TunnelConnector` (phase 4, separate crate): UDS tunnel-server adapter.
+//!
+//! There is no tunnel adapter crate: gateway access is provided by the UDS
+//! launcher, which exposes the tunnel as a local TCP+UDP listener (freerdp
+//! style). This connector then targets `127.0.0.1:<tunnel port>` unchanged.
 
 mod datagram;
 mod detect;

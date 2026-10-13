@@ -11,8 +11,8 @@ use protocol::ChannelId;
 use crate::error::{Result, TransportError};
 use crate::traits::DatagramTransport;
 
-/// Encrypted datagram channel over a [`DatagramTransport`] (direct UDP or a
-/// future tunnel UDP leg).
+/// Encrypted datagram channel over a [`DatagramTransport`] (direct UDP or the
+/// launcher's local tunnel UDP relay).
 pub struct EncryptedDatagram<T: DatagramTransport> {
     inner: T,
     tx: DatagramCrypt,
