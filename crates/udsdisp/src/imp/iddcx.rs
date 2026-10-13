@@ -67,8 +67,8 @@ pub(crate) use call_iddcx;
 
 use bindings::{
     IDARG_OUT_GETVERSION, IDD_CX_CLIENT_CONFIG, PFN_IDDCXDEVICEINITCONFIG, PFN_IDDCXDEVICEINITIALIZE,
-    PFN_IDDCXGETVERSION, IddCxDeviceInitConfigTableIndex, IddCxDeviceInitializeTableIndex,
-    IddCxGetVersionTableIndex,
+    PFN_IDDCXGETVERSION, _IDDFUNCENUM_IddCxDeviceInitConfigTableIndex,
+    _IDDFUNCENUM_IddCxDeviceInitializeTableIndex, _IDDFUNCENUM_IddCxGetVersionTableIndex,
 };
 use wdk_sys::{NTSTATUS, WDFDEVICE, WDFDEVICE_INIT};
 
@@ -90,7 +90,7 @@ pub unsafe fn device_init_config(
     // WDFDEVICE_INIT pointee types is layout-neutral.
     call_iddcx!(
         PFN_IDDCXDEVICEINITCONFIG,
-        IddCxDeviceInitConfigTableIndex,
+        _IDDFUNCENUM_IddCxDeviceInitConfigTableIndex,
         device_init.cast(),
         core::ptr::from_mut(config),
     )
@@ -106,7 +106,7 @@ pub unsafe fn device_initialize(device: WDFDEVICE) -> NTSTATUS {
     // SAFETY: guaranteed by the caller (see above for the cast).
     call_iddcx!(
         PFN_IDDCXDEVICEINITIALIZE,
-        IddCxDeviceInitializeTableIndex,
+        _IDDFUNCENUM_IddCxDeviceInitializeTableIndex,
         device.cast(),
     )
 }
@@ -121,7 +121,7 @@ pub unsafe fn get_version() -> (NTSTATUS, u32) {
     // SAFETY: `out` is a valid out-parameter of the right type.
     let status = call_iddcx!(
         PFN_IDDCXGETVERSION,
-        IddCxGetVersionTableIndex,
+        _IDDFUNCENUM_IddCxGetVersionTableIndex,
         core::ptr::from_mut(&mut out),
     );
     (status, out.IddCxVersion)
