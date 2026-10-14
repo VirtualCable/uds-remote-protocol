@@ -25,12 +25,17 @@ const CONTAINER_ID: bindings::GUID = bindings::GUID {
 /// Creates the monitor object and reports it as connected. Called from the
 /// adapter init-finished callback (like IddSampleDriver's `FinishInit`).
 pub fn create_and_arrive(adapter: bindings::IDDCX_ADAPTER, connector_index: u32) {
-    // IddSampleDriver passes non-null object attributes here (it attaches a
-    // context); we keep monitor state globally instead, but still pass an
-    // initialized attributes struct — the field is not documented optional.
-    // SAFETY: POD struct; zeroed + Size is WDF_OBJECT_ATTRIBUTES_INIT.
+    // WDF_OBJECT_ATTRIBUTES_INIT is not a plain zero-init: it also sets
+    // ExecutionLevel and SynchronizationScope to InheritFromParent — a zeroed
+    // struct has both set to *Invalid and WDF rejects it with
+    // STATUS_WDF_OBJECT_ATTRIBUTES_INVALID (0xC0200209).
+    // SAFETY: POD struct; the macro equivalent is zeroed + Size + the two
+    // inherit-from-parent fields.
     let mut attrs: bindings::_WDF_OBJECT_ATTRIBUTES = unsafe { core::mem::zeroed() };
     attrs.Size = size32::<bindings::_WDF_OBJECT_ATTRIBUTES>();
+    attrs.ExecutionLevel = bindings::_WDF_EXECUTION_LEVEL_WdfExecutionLevelInheritFromParent;
+    attrs.SynchronizationScope =
+        bindings::_WDF_SYNCHRONIZATION_SCOPE_WdfSynchronizationScopeInheritFromParent;
 
     let mut monitor_info = bindings::IDDCX_MONITOR_INFO {
         Size: size32::<bindings::IDDCX_MONITOR_INFO>(),
