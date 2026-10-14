@@ -2,24 +2,26 @@
 //! pipe (`\\.\pipe\udsrp-credprov`), receives credential requests and sends
 //! back acknowledgements and logon results.
 //!
-//! The connection is persistent and self-healing: the read loop runs on its
-//! own thread, and any pipe error (service restart, broken pipe) triggers a
-//! reconnect with backoff until the provider is dropped.
+//! The connection is persistent, self-healing and process-global: LogonUI
+//! creates a new provider instance per enumeration cycle, so the pipe client
+//! thread and its endpoint live in a singleton shared by every instance
+//! (exactly like the credential store), pinned for the process lifetime so
+//! the DLL is never unloaded while the thread runs. Any pipe error (service
+//! restart, broken pipe) triggers a reconnect with backoff.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, Mutex, OnceLock};
+
 use std::time::Duration;
 
-use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE};
+use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, HMODULE};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, OPEN_EXISTING, ReadFile, WriteFile,
 };
+use windows::Win32::System::LibraryLoader::{GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleHandleExW};
 use windows::Win32::System::Pipes::WaitNamedPipeW;
 use windows::core::{HRESULT, PCWSTR};
 
-use crate::imp::credentials::provider::UdsRpCredentialsProvider;
+use crate::imp::credentials::{provider, store};
 use crate::imp::utils::log::{debug, error, info};
 use crate::imp::utils::safe::SafeHandle;
 use crate::logic::{
@@ -32,9 +34,37 @@ use crate::{debug_dev, debug_flow};
 /// serialize their writes through the mutex.
 pub type SharedPipe = Arc<Mutex<Option<SafeHandle>>>;
 
-/// Creates an empty (disconnected) shared pipe endpoint.
-pub fn new_shared_pipe() -> SharedPipe {
-    Arc::new(Mutex::new(None))
+/// The process-global pipe endpoint shared by every provider/credential
+/// instance of this DLL.
+pub fn shared_pipe() -> &'static SharedPipe {
+    static PIPE: OnceLock<SharedPipe> = OnceLock::new();
+    PIPE.get_or_init(|| Arc::new(Mutex::new(None)))
+}
+
+/// Starts the singleton pipe client thread (idempotent). The thread runs
+/// until the process exits; the DLL is pinned so it cannot be unloaded
+/// from under the running thread.
+pub fn ensure_started() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        pin_dll();
+        let pipe = shared_pipe().clone();
+        std::thread::spawn(move || run(pipe));
+    });
+}
+
+/// Pins this DLL in the process: bumps the module reference count so
+/// `FreeLibrary` (via `CoFreeUnusedLibraries`) can never unmap the code the
+/// pipe thread is executing.
+fn pin_dll() {
+    let mut module = HMODULE::default();
+    let _ = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            PCWSTR(pin_dll as *const () as usize as *const u16),
+            &mut module,
+        )
+    };
 }
 
 /// Sends a response frame if connected. Errors are logged and swallowed:
@@ -74,13 +104,14 @@ fn kind_of(response: &Response) -> &'static str {
     }
 }
 
-/// Connects to the service pipe, retrying while it is busy or not yet
-/// created. Returns `None` when `stop` was requested.
-fn connect(stop: &AtomicBool) -> Option<SafeHandle> {
+/// Connects to the service pipe, retrying forever while it is busy or not
+/// yet created (the service may start after LogonUI). Returns `None` only if
+/// the pipe name is malformed.
+fn connect() -> Option<SafeHandle> {
     let pipe_name = widestring::U16CString::from_str(logic::PIPE_NAME).ok()?;
     let pipe_name = PCWSTR::from_raw(pipe_name.as_ptr());
 
-    while !stop.load(Ordering::Relaxed) {
+    loop {
         let result = unsafe {
             CreateFileW(
                 pipe_name,
@@ -99,10 +130,7 @@ fn connect(stop: &AtomicBool) -> Option<SafeHandle> {
             }
             Err(e) if e.code() == HRESULT::from_win32(ERROR_PIPE_BUSY.0) => {
                 // Another client holds the pipe; wait for a free instance
-                if !unsafe { WaitNamedPipeW(pipe_name, 1000) }.as_bool() && stop.load(Ordering::Relaxed)
-                {
-                    return None;
-                }
+                let _ = unsafe { WaitNamedPipeW(pipe_name, 1000) };
             }
             Err(e) if e.code() == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0) => {
                 // Service not listening yet; back off and retry
@@ -114,11 +142,10 @@ fn connect(stop: &AtomicBool) -> Option<SafeHandle> {
             }
         }
     }
-    None
 }
 
 /// Dispatches one request and answers it over the pipe.
-fn dispatch(provider: &UdsRpCredentialsProvider, pipe: &SharedPipe, request: &Request) {
+fn dispatch(pipe: &SharedPipe, request: &Request) {
     match request {
         Request::Ping => {
             debug_flow!("pipe: Ping received");
@@ -126,10 +153,13 @@ fn dispatch(provider: &UdsRpCredentialsProvider, pipe: &SharedPipe, request: &Re
         }
         Request::SetCredentials(creds) => {
             debug_flow!("pipe: SetCredentials received for user {}", creds.username);
-            let (accepted, detail) = match provider.on_set_credentials(creds.clone()) {
+            debug_dev!("Storing pipe credentials for {}", creds.username);
+            store::set(creds.clone());
+            // Ask LogonUI to re-enumerate, which triggers the auto-logon path
+            let (accepted, detail) = match provider::fire_credentials_changed() {
                 Ok(()) => (true, "credentials stored".to_string()),
                 Err(e) => {
-                    error!("on_set_credentials failed: {e:?}");
+                    error!("fire_credentials_changed failed: {e:?}");
                     (false, format!("{e}"))
                 }
             };
@@ -144,7 +174,8 @@ fn dispatch(provider: &UdsRpCredentialsProvider, pipe: &SharedPipe, request: &Re
         }
         Request::ClearCredentials => {
             debug_flow!("pipe: ClearCredentials received");
-            provider.on_clear_credentials();
+            debug_dev!("Clearing pipe credentials");
+            store::clear();
             send_response(
                 pipe,
                 &Response::Ack {
@@ -158,13 +189,8 @@ fn dispatch(provider: &UdsRpCredentialsProvider, pipe: &SharedPipe, request: &Re
 }
 
 /// Read/dispatch loop for one established connection. Returns when the
-/// connection breaks or `stop` is requested.
-fn session(
-    handle: SafeHandle,
-    provider: &UdsRpCredentialsProvider,
-    pipe: &SharedPipe,
-    stop: &AtomicBool,
-) {
+/// connection breaks.
+fn session(handle: SafeHandle, pipe: &SharedPipe) {
     // Announce ourselves so the service knows which protocol we speak
     send_response(
         pipe,
@@ -175,7 +201,7 @@ fn session(
 
     let mut decoder = FrameDecoder::new();
     let mut buf = [0u8; 2048];
-    while !stop.load(Ordering::Relaxed) {
+    loop {
         let mut read = 0u32;
         let result = unsafe { ReadFile(handle.get(), Some(&mut buf), Some(&mut read), None) };
         match result {
@@ -189,7 +215,7 @@ fn session(
                 }
                 loop {
                     match decoder.next_request() {
-                        Ok(Some(request)) => dispatch(provider, pipe, &request),
+                        Ok(Some(request)) => dispatch(pipe, &request),
                         Ok(None) => break,
                         Err(e) => {
                             error!("Pipe frame decode error: {e}; reconnecting");
@@ -206,17 +232,17 @@ fn session(
     }
 }
 
-/// Reconnecting client loop; intended to run on its own thread until `stop`
-/// is set. `pipe` is the shared write endpoint handed to the credential so
-/// `ReportResult` can report logon outcomes.
-pub fn run(provider: UdsRpCredentialsProvider, pipe: SharedPipe, stop: Arc<AtomicBool>) {
+/// Reconnecting client loop; runs on the singleton pipe thread for the whole
+/// process lifetime. `pipe` is the shared write endpoint handed to the
+/// credential so `ReportResult` can report logon outcomes.
+pub fn run(pipe: SharedPipe) {
     debug_flow!("pipe: client loop starting");
-    while !stop.load(Ordering::Relaxed) {
-        let Some(handle) = connect(&stop) else {
+    loop {
+        let Some(handle) = connect() else {
             break;
         };
         *pipe.lock().unwrap() = Some(handle.clone());
-        session(handle, &provider, &pipe, &stop);
+        session(handle, &pipe);
         pipe.lock().unwrap().take();
     }
     debug_flow!("pipe: client loop stopped");

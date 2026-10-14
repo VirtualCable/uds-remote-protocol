@@ -60,25 +60,6 @@ impl UdsRpCredential {
         }
     }
 
-    /// Forgets any pipe-delivered credential (zeroizes the password).
-    pub fn reset_credential(&mut self) {
-        super::store::clear();
-    }
-
-    /// Whether a pipe-delivered auto-logon credential is stored.
-    pub fn has_valid_credential(&self) -> bool {
-        super::store::is_valid()
-    }
-
-    /// Stores a pipe-delivered credential (in the process-global store: the
-    /// enumerated provider instance is not the one that received it) and
-    /// prefills the username field so the tile shows who is being logged on.
-    pub fn set_credentials(&mut self, creds: logic::Credentials) {
-        self.values.write().unwrap()[types::UdsFieldId::Username as usize] =
-            helpers::username_with_domain(&creds.username, &creds.domain);
-        super::store::set(creds);
-    }
-
     /// Sets the usage scenario (logon vs unlock).
     pub fn set_usage_scenario(&mut self, cpus: CREDENTIAL_PROVIDER_USAGE_SCENARIO) {
         self.cpus = cpus;
@@ -286,7 +267,7 @@ impl UdsRpCredential {
 
 impl Default for UdsRpCredential {
     fn default() -> Self {
-        Self::new(pipe::new_shared_pipe())
+        Self::new(pipe::shared_pipe().clone())
     }
 }
 

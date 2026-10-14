@@ -1,11 +1,9 @@
 //! The provider COM object (`ICredentialProvider` +
-//! `ICredentialProviderSetUserArray`): owns the credential tile, the pipe
-//! client thread and the LogonUI event manager.
+//! `ICredentialProviderSetUserArray`): owns the credential tile and the
+//! LogonUI event manager. The pipe client is process-global (see
+//! `crate::imp::pipe`).
 
-use std::sync::{
-    Arc, RwLock,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, RwLock};
 
 use windows::{
     Win32::{
@@ -23,12 +21,12 @@ use windows::{
 };
 
 use super::{
-    credential::UdsRpCredential, fields::CREDENTIAL_PROVIDER_FIELD_DESCRIPTORS, types::UdsFieldId,
+    credential::UdsRpCredential, fields::CREDENTIAL_PROVIDER_FIELD_DESCRIPTORS, store,
+    types::UdsFieldId,
 };
 use crate::imp::utils::com;
 use crate::imp::utils::log::{self, error};
 use crate::imp::pipe;
-use crate::logic;
 use crate::{debug_dev, debug_flow};
 
 /// GIT cookie and advise context of the most recently Advise'd provider
@@ -44,50 +42,25 @@ pub struct UdsRpCredentialsProvider {
     credential: Arc<RwLock<UdsRpCredential>>,
     cookie: Arc<RwLock<Option<u32>>>,
     up_advise_context: Arc<RwLock<usize>>,
-    stop_flag: Arc<AtomicBool>,
-    pipe: pipe::SharedPipe,
 }
 
 impl UdsRpCredentialsProvider {
-    /// Creates the provider and starts the pipe client thread.
+    /// Creates the provider and ensures the process-global pipe client
+    /// thread is running.
     pub fn new() -> Self {
         log::reset_flow_counter();
 
         debug_flow!("UdsRpCredentialsProvider::new");
-        let pipe_endpoint = pipe::new_shared_pipe();
-        let me = Self {
-            credential: Arc::new(RwLock::new(UdsRpCredential::new(pipe_endpoint.clone()))),
+        pipe::ensure_started();
+        Self {
+            credential: Arc::new(RwLock::new(UdsRpCredential::new(pipe::shared_pipe().clone()))),
             cookie: Arc::new(RwLock::new(None)),
             up_advise_context: Arc::new(RwLock::new(0)),
-            stop_flag: Arc::new(AtomicBool::new(false)),
-            pipe: pipe_endpoint,
-        };
-        // Pipe client thread: receives credentials from the uds-rp service
-        let provider = me.clone();
-        let pipe_arg = me.pipe.clone();
-        let stop = me.stop_flag.clone();
-        std::thread::spawn(move || pipe::run(provider, pipe_arg, stop));
-        me
-    }
-
-    /// Pipe callback: stores auto-logon credentials and asks LogonUI to
-    /// re-enumerate, which triggers the auto-logon path.
-    pub fn on_set_credentials(&self, creds: logic::Credentials) -> windows::core::Result<()> {
-        debug_dev!("Storing pipe credentials for {}", creds.username);
-        self.credential.write().unwrap().set_credentials(creds);
-
-        if let Some((event_manager, advise_context)) = self.get_event_manager()? {
-            unsafe { event_manager.CredentialsChanged(advise_context)? };
         }
-        Ok(())
     }
 
-    /// Pipe callback: forgets the auto-logon credentials.
-    pub fn on_clear_credentials(&self) {
-        debug_dev!("Clearing pipe credentials");
-        self.credential.write().unwrap().reset_credential();
-    }
-
+    /// Fires `CredentialsChanged` so LogonUI re-enumerates (auto-logon
+    /// trigger). See [`fire_credentials_changed`].
     fn set_usage_scenario(
         &self,
         cpus: CREDENTIAL_PROVIDER_USAGE_SCENARIO,
@@ -139,22 +112,11 @@ impl UdsRpCredentialsProvider {
         Ok(())
     }
 
-    /// The event manager of the most recently Advise'd provider instance, so
-    /// the pipe callback can trigger a re-enumeration regardless of which
-    /// instance received the credentials.
-    fn get_event_manager(&self) -> windows::core::Result<Option<(ICredentialProviderEvents, usize)>> {
-        if let Some((cookie, advise_context)) = *LAST_EVENTS.read().unwrap() {
-            Ok(Some((com::get_from_git(cookie)?, advise_context)))
-        } else {
-            Ok(None)
-        }
-    }
-
     fn get_credential_count(&self) -> (u32, u32, BOOL) {
         // With pipe-delivered credentials we are the default tile and ask
         // LogonUI for an immediate auto-logon (no UI shown). Without them we
         // behave as a normal interactive tile alongside the other providers.
-        let has_valid_creds = self.credential.read().unwrap().has_valid_credential();
+        let has_valid_creds = store::is_valid();
         debug_dev!("get_credential_count: has_valid_creds: {has_valid_creds}");
 
         let pdwcount = 1; // 0 would hide our tile entirely
@@ -184,13 +146,19 @@ impl Default for UdsRpCredentialsProvider {
     }
 }
 
+/// Fires `CredentialsChanged` through the most recently Advise'd provider
+/// instance, so LogonUI re-enumerates (auto-logon trigger). No-op when
+/// LogonUI has not Advise'd any instance yet.
+pub fn fire_credentials_changed() -> windows::core::Result<()> {
+    if let Some((cookie, advise_context)) = *LAST_EVENTS.read().unwrap() {
+        let event_manager: ICredentialProviderEvents = com::get_from_git(cookie)?;
+        unsafe { event_manager.CredentialsChanged(advise_context)? };
+    }
+    Ok(())
+}
+
 impl Drop for UdsRpCredentialsProvider {
     fn drop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        // Unblock the pipe read loop so the thread can exit
-        if let Some(handle) = self.pipe.lock().unwrap().take() {
-            handle.clear();
-        }
         let cookie_opt = *self.cookie.read().unwrap();
         if let Some(cookie) = cookie_opt
             && let Err(e) = com::unregister_from_git(cookie)

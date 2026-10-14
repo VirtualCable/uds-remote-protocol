@@ -22,19 +22,6 @@ pub fn get_computer_name() -> String {
     }
 }
 
-/// Composes `username` and `domain` into a display string:
-/// `username@domain` for dotted (DNS-style) domains, `domain\username`
-/// otherwise, and `username@<computer>` when the domain is empty.
-pub fn username_with_domain(username: &str, domain: &str) -> String {
-    if domain.is_empty() {
-        format!("{}@{}", username, get_computer_name())
-    } else if domain.contains('.') {
-        format!("{username}@{domain}")
-    } else {
-        format!("{domain}\\{username}")
-    }
-}
-
 /// Splits `domain\username` / `username@domain` / bare `username` into
 /// `(username, domain)`; a bare username gets the local computer name.
 pub fn split_username_domain(username: &str) -> (String, String) {
