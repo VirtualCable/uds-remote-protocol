@@ -53,7 +53,7 @@ async fn connect(addr: std::net::SocketAddr) -> EncryptedStream<Box<dyn Reliable
         .connect(&Target::new(addr, ticket(), secret()))
         .await
         .unwrap();
-    EncryptedStream::client_handshake(raw, &ticket(), &secret())
+    EncryptedStream::client_handshake(raw, &ticket(), &secret(), 0)
         .await
         .unwrap()
 }
@@ -83,7 +83,7 @@ async fn recover_resumes_session_after_tcp_drop() {
         .await
         .unwrap();
     let transport::RecoverOutcome::Resumed(mut recovered) =
-        EncryptedStream::client_recover(raw, &ticket(), &secret(), seqs)
+        EncryptedStream::client_recover(raw, &ticket(), &secret(), seqs, 0)
             .await
             .unwrap()
     else {
@@ -125,7 +125,7 @@ async fn recover_never_rolls_back_server_seqs() {
         .unwrap();
     let zeroed = transport::StreamSeqs { send: 0, recv: 0 };
     let transport::RecoverOutcome::Resumed(mut recovered) =
-        EncryptedStream::client_recover(raw, &ticket(), &secret(), zeroed)
+        EncryptedStream::client_recover(raw, &ticket(), &secret(), zeroed, 0)
             .await
             .unwrap()
     else {

@@ -68,14 +68,18 @@ impl<T: ReliableTransport> EncryptedStream<T> {
     /// Client handshake: sends the Hello (`Open` + ticket) and derives the
     /// session keys from the ticket and the pre-shared key (PoC PSK;
     /// ML-KEM comes later).
+    ///
+    /// `flags` is the HELLO flags byte (see `protocol::FLAG_PRIVACY_SCREEN`).
     pub async fn client_handshake(
         mut inner: T,
         ticket: &[u8; TICKET_LENGTH],
         key: &[u8; consts::KEY_LENGTH],
+        flags: u8,
     ) -> Result<Self> {
         let hello = Hello {
             version: PROTOCOL_VERSION,
             command: Command::Open,
+            flags,
             ticket: *ticket,
         };
         inner.send(&hello.encode()).await?;
@@ -92,15 +96,18 @@ impl<T: ReliableTransport> EncryptedStream<T> {
     /// with the seqs actually applied by the server. Each side resumes at
     /// `max(own, peer expectation)` so a `(key, nonce)` pair never repeats,
     /// even for records lost in flight during the drop.
+    /// `flags` is the HELLO flags byte (see `protocol::FLAG_PRIVACY_SCREEN`).
     pub async fn client_recover(
         mut inner: T,
         ticket: &[u8; TICKET_LENGTH],
         key: &[u8; consts::KEY_LENGTH],
         seqs: StreamSeqs,
+        flags: u8,
     ) -> Result<RecoverOutcome<T>> {
         let hello = Hello {
             version: PROTOCOL_VERSION,
             command: Command::Recover,
+            flags,
             ticket: *ticket,
         };
         inner.send(&hello.encode()).await?;

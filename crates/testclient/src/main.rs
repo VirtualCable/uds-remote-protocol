@@ -22,6 +22,8 @@ use client::{ClientCommand, ClientConfig, ClientEvent, Displays, Rect, Session};
 use protocol::{self, InputMessage, PointerButton};
 use tracing::{info, warn};
 
+// CLI flags are plain booleans by nature.
+#[allow(clippy::struct_excessive_bools)]
 struct Args {
     addr: std::net::SocketAddr,
     key: [u8; 32],
@@ -36,6 +38,9 @@ struct Args {
     /// Mic capture (§9.2): off by default, `--mic` captures the default
     /// input device, `--mic-test-tone FREQ` sends a synthetic sine instead.
     mic: MicMode,
+    /// Privacy screen (M7): `--privacy` asks the server to hide the
+    /// physical console behind the branded lock overlay.
+    privacy: bool,
 }
 
 /// One scripted input action for `--selftest-input`.
@@ -95,6 +100,7 @@ fn parse_args() -> Result<Args> {
         selftest_input: false,
         audio: true,
         mic: MicMode::Off,
+        privacy: false,
     };
     let mut key_seen = false;
     let mut ticket_seen = false;
@@ -114,6 +120,10 @@ fn parse_args() -> Result<Args> {
         }
         if arg == "--mic" {
             args.mic = MicMode::Device;
+            continue;
+        }
+        if arg == "--privacy" {
+            args.privacy = true;
             continue;
         }
         let value = it.next().context(format!("missing value for {arg}"))?;
@@ -554,6 +564,7 @@ async fn run() -> Result<()> {
         key: args.key,
         audio: args.audio,
         mic: args.mic,
+        privacy_screen: args.privacy,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);
     let (session, commands, displays) = Session::new(config, events_tx);

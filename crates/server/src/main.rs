@@ -35,6 +35,11 @@
 //! Audio-in (§9.2): `--mic-sink wav:PATH` records the client microphone to a
 //! WAV file (48 kHz mono) and announces audio-in support to the client; the
 //! default `null` keeps audio-in off (no announcement, packets discarded).
+//!
+//! Privacy screen (M7): when the client negotiates `FLAG_PRIVACY_SCREEN`
+//! (testclient `--privacy`), the physical console displays are covered with
+//! a branded lock overlay for the duration of the session (Windows with the
+//! `windows-capture` feature; elsewhere the flag is ignored).
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -723,6 +728,28 @@ async fn serve<T: ReliableTransport>(
 ) -> Result<()> {
     let mut stream = EncryptedStream::server_handshake(raw, key, None).await?;
     info!("handshake done");
+
+    // Privacy screen (M7): the client asks for it with FLAG_PRIVACY_SCREEN;
+    // the guard covers the physical displays until the session ends and is
+    // best-effort (a failure is logged, never fatal to the session).
+    #[cfg(all(windows, feature = "windows-capture"))]
+    let _privacy_guard = if stream
+        .peer_hello()
+        .is_some_and(|h| h.flags & protocol::FLAG_PRIVACY_SCREEN != 0)
+    {
+        match server::privacy::activate() {
+            Ok(guard) => {
+                info!("privacy screen active (client request)");
+                Some(guard)
+            }
+            Err(e) => {
+                warn!("privacy screen unavailable: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let mut udp_bind = args.bind;
     udp_bind.set_port(0);

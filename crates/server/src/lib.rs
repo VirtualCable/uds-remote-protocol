@@ -16,4 +16,5 @@ pub mod capture;
 pub mod dxgi;
 pub mod input;
 pub mod mic;
+pub mod privacy;
 pub mod synthetic;

@@ -1,8 +1,8 @@
 //! Tests of the `protocol` crate: handshake, control messages and channels.
 
 use protocol::{
-    Capability, ChannelId, Command, ControlMessage, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION,
-    ProtocolError, channel,
+    Capability, ChannelId, Command, ControlMessage, FLAG_PRIVACY_SCREEN, HANDSHAKE_SIGNATURE,
+    Hello, PROTOCOL_VERSION, ProtocolError, channel,
 };
 
 #[test]
@@ -10,6 +10,7 @@ fn hello_roundtrip() {
     let hello = Hello {
         version: PROTOCOL_VERSION,
         command: Command::Open,
+        flags: 0,
         ticket: [0x42; 48],
     };
     let bytes = hello.encode();
@@ -22,11 +23,26 @@ fn hello_has_signature_and_fixed_size() {
     let hello = Hello {
         version: PROTOCOL_VERSION,
         command: Command::Test,
+        flags: 0,
         ticket: [0; 48],
     };
     let bytes = hello.encode();
     assert_eq!(&bytes[..8], &HANDSHAKE_SIGNATURE);
-    assert_eq!(bytes.len(), 8 + 2 + 1 + 48);
+    assert_eq!(bytes.len(), 8 + 2 + 1 + 1 + 48);
+}
+
+#[test]
+fn hello_flags_roundtrip() {
+    let hello = Hello {
+        version: PROTOCOL_VERSION,
+        command: Command::Open,
+        flags: FLAG_PRIVACY_SCREEN,
+        ticket: [7; 48],
+    };
+    let bytes = hello.encode();
+    assert_eq!(bytes[11], FLAG_PRIVACY_SCREEN);
+    let decoded = Hello::decode(&bytes).unwrap();
+    assert_eq!(decoded, hello);
 }
 
 #[test]
@@ -34,6 +50,7 @@ fn hello_bad_signature_is_rejected() {
     let hello = Hello {
         version: PROTOCOL_VERSION,
         command: Command::Open,
+        flags: 0,
         ticket: [0; 48],
     };
     let mut bytes = hello.encode();
@@ -47,6 +64,7 @@ fn hello_unknown_command_is_rejected() {
     let hello = Hello {
         version: PROTOCOL_VERSION,
         command: Command::Open,
+        flags: 0,
         ticket: [0; 48],
     };
     let mut bytes = hello.encode();
@@ -60,6 +78,7 @@ fn hello_truncated_is_rejected() {
     let hello = Hello {
         version: PROTOCOL_VERSION,
         command: Command::Recover,
+        flags: 0,
         ticket: [9; 48],
     };
     let bytes = hello.encode();

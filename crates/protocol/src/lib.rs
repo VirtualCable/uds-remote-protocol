@@ -21,7 +21,7 @@ pub use channel::ChannelId;
 pub use control::{Capability, ControlMessage};
 pub use cursor::{CursorError, CursorMessage, MAX_CURSOR_DIM};
 pub use error::ProtocolError;
-pub use hello::{Command, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION, TICKET_LENGTH};
+pub use hello::{Command, FLAG_PRIVACY_SCREEN, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION, TICKET_LENGTH};
 pub use input::{InputError, InputMessage, PointerButton};
 pub use probe::{Probe, ProbeAck, ProbeError, compute_rtt};
 pub use quality::{

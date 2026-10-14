@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = ["opus"]
-windows-capture = ["dep:windows"]
+windows-capture = ["dep:windows", "dep:image"]
 vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
 jpeg = ["codec/codec-jpeg"]
@@ -31,6 +31,7 @@ getrandom.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, optional = true }
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 
 [dev-dependencies]
 codec = { workspace = true, features = ["codec-vp9"] }

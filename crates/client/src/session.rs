@@ -53,6 +53,9 @@ pub struct ClientConfig {
     pub audio: bool,
     /// Mic capture mode (§9.2); off by default.
     pub mic: MicMode,
+    /// Ask the server to hide the physical console behind a privacy screen
+    /// for the duration of the session (M7; `FLAG_PRIVACY_SCREEN`).
+    pub privacy_screen: bool,
 }
 
 /// One client session (§15.3). Build with [`Session::new`], then drive it
@@ -99,9 +102,15 @@ impl Session {
     async fn run_inner(&mut self) -> Result<()> {
         let target = Target::new(self.config.addr, self.config.ticket, self.config.key);
         let (raw, _) = DirectConnector::new().connect(&target).await?;
+        let flags = if self.config.privacy_screen {
+            protocol::FLAG_PRIVACY_SCREEN
+        } else {
+            0
+        };
         let mut stream: EncryptedStream<Box<dyn ReliableTransport>> =
-            EncryptedStream::client_handshake(raw, &self.config.ticket, &self.config.key).await?;
-        info!("handshake done");
+            EncryptedStream::client_handshake(raw, &self.config.ticket, &self.config.key, flags)
+                .await?;
+        info!(privacy_screen = self.config.privacy_screen, "handshake done");
 
         let clock_start = Instant::now();
         let clock = || micros_since(clock_start);

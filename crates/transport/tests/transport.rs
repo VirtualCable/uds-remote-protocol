@@ -24,7 +24,7 @@ async fn connect(addr: std::net::SocketAddr) -> EncryptedStream<Box<dyn Reliable
         .connect(&Target::new(addr, test_ticket(), test_key()))
         .await
         .unwrap();
-    EncryptedStream::client_handshake(raw, &test_ticket(), &test_key())
+    EncryptedStream::client_handshake(raw, &test_ticket(), &test_key(), 0)
         .await
         .unwrap()
 }
@@ -49,6 +49,7 @@ async fn server_rejects_a_mismatched_protocol_version() {
     let hello = protocol::Hello {
         version: protocol::PROTOCOL_VERSION + 1,
         command: protocol::Command::Open,
+        flags: 0,
         ticket: test_ticket(),
     };
     raw.send(&hello.encode()).await.unwrap();
