@@ -93,8 +93,11 @@ impl UdsRpCredentialsProvider {
     ) -> windows::core::Result<()> {
         match cpus {
             CPUS_LOGON | CPUS_UNLOCK_WORKSTATION => {
-                self.credential.write().unwrap().reset_credential();
-                filter::set_pipe_credentials_present(false);
+                // Unlike the reference provider, we do NOT reset the stored
+                // credential here: ours arrive asynchronously over the pipe,
+                // and LogonUI re-runs SetUsageScenario when re-enumerating
+                // after our CredentialsChanged — resetting would wipe the
+                // just-delivered credentials before the auto-logon attempt.
                 self.credential.write().unwrap().set_usage_scenario(cpus);
                 Ok(())
             }
