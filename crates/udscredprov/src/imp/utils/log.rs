@@ -150,7 +150,8 @@ pub fn reset_flow_counter() {
 }
 
 /// Logs one numbered step of the LogonUI call sequence (enabled via
-/// `UDSRPCP_ENABLE_FLOW_LOG=1`).
+/// `UDSRPCP_ENABLE_FLOW_LOG=1`). Entries are prefixed with the process id:
+/// several processes (multiple LogonUI instances) share the same log file.
 #[macro_export]
 macro_rules! debug_flow {
     ($($arg:tt)*) => {{
@@ -162,20 +163,21 @@ macro_rules! debug_flow {
                     tracing::info!(target: "flow", "----------------------------------------");
                 }
                 let s = format!($($arg)*);
-                tracing::info!(target: "flow", "[#{count:5}][{:>5} ms] {}", last_guard.read().unwrap().elapsed().as_millis(), s);
+                tracing::info!(target: "flow", "[pid {:>5}][#{count:5}][{:>5} ms] {}", std::process::id(), last_guard.read().unwrap().elapsed().as_millis(), s);
                 *last_guard.write().unwrap() = std::time::Instant::now();
             }
     }};
 }
 
-/// Debug-build-only log line.
+/// Debug-build-only log line, prefixed with the process id (several
+/// processes share the same log file).
 #[macro_export]
 macro_rules! debug_dev {
     ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
         {
             let s = format!($($arg)*);
-            tracing::info!(target: "dev", "{}", s);
+            tracing::info!(target: "dev", "[pid {:>5}] {}", std::process::id(), s);
         }
     };
 }

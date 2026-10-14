@@ -23,16 +23,19 @@ use windows::{
 };
 
 use super::{
-    credential::UdsRpCredential,
-    fields::CREDENTIAL_PROVIDER_FIELD_DESCRIPTORS,
-    filter,
-    types::UdsFieldId,
+    credential::UdsRpCredential, fields::CREDENTIAL_PROVIDER_FIELD_DESCRIPTORS, types::UdsFieldId,
 };
 use crate::imp::utils::com;
 use crate::imp::utils::log::{self, error};
 use crate::imp::pipe;
 use crate::logic;
 use crate::{debug_dev, debug_flow};
+
+/// GIT cookie and advise context of the most recently Advise'd provider
+/// instance. The pipe callback must be able to fire `CredentialsChanged`
+/// even when the instance that received the credentials is not the one
+/// LogonUI Advise'd (each enumeration cycle creates fresh instances).
+static LAST_EVENTS: RwLock<Option<(u32, usize)>> = RwLock::new(None);
 
 /// The credential provider COM object.
 #[implement(ICredentialProvider, ICredentialProviderSetUserArray)]
@@ -72,10 +75,9 @@ impl UdsRpCredentialsProvider {
     pub fn on_set_credentials(&self, creds: logic::Credentials) -> windows::core::Result<()> {
         debug_dev!("Storing pipe credentials for {}", creds.username);
         self.credential.write().unwrap().set_credentials(creds);
-        filter::set_pipe_credentials_present(true);
 
-        if let Some(event_manager) = self.get_event_manager()? {
-            unsafe { event_manager.CredentialsChanged(*self.up_advise_context.read().unwrap())? };
+        if let Some((event_manager, advise_context)) = self.get_event_manager()? {
+            unsafe { event_manager.CredentialsChanged(advise_context)? };
         }
         Ok(())
     }
@@ -84,7 +86,6 @@ impl UdsRpCredentialsProvider {
     pub fn on_clear_credentials(&self) {
         debug_dev!("Clearing pipe credentials");
         self.credential.write().unwrap().reset_credential();
-        filter::set_pipe_credentials_present(false);
     }
 
     fn set_usage_scenario(
@@ -120,6 +121,7 @@ impl UdsRpCredentialsProvider {
         let cookie = com::register_in_git(pcpe)?;
         *self.cookie.write().unwrap() = Some(cookie);
         *self.up_advise_context.write().unwrap() = upadvisecontext;
+        *LAST_EVENTS.write().unwrap() = Some((cookie, upadvisecontext));
         Ok(())
     }
 
@@ -129,13 +131,20 @@ impl UdsRpCredentialsProvider {
             com::unregister_from_git(cookie)?;
             *self.cookie.write().unwrap() = None;
             *self.up_advise_context.write().unwrap() = 0;
+            let mut last = LAST_EVENTS.write().unwrap();
+            if last.is_some_and(|(c, _)| c == cookie) {
+                *last = None;
+            }
         }
         Ok(())
     }
 
-    fn get_event_manager(&self) -> windows::core::Result<Option<ICredentialProviderEvents>> {
-        if let Some(cookie) = *self.cookie.read().unwrap() {
-            Ok(Some(com::get_from_git(cookie)?))
+    /// The event manager of the most recently Advise'd provider instance, so
+    /// the pipe callback can trigger a re-enumeration regardless of which
+    /// instance received the credentials.
+    fn get_event_manager(&self) -> windows::core::Result<Option<(ICredentialProviderEvents, usize)>> {
+        if let Some((cookie, advise_context)) = *LAST_EVENTS.read().unwrap() {
+            Ok(Some((com::get_from_git(cookie)?, advise_context)))
         } else {
             Ok(None)
         }

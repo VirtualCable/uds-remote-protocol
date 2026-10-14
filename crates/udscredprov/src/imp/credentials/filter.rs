@@ -4,8 +4,6 @@
 //! leave the provider list untouched, so this CP coexists with the inbox
 //! providers and with the UDS RDP credential provider (different CLSID).
 
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use windows::{
     Win32::{
         Foundation::{E_INVALIDARG, E_NOTIMPL},
@@ -18,17 +16,9 @@ use windows::{
     core::*,
 };
 
+use super::store;
 use crate::imp::globals;
 use crate::{debug_dev, debug_flow};
-
-/// Whether a pipe-delivered auto-logon credential is currently stored.
-/// Shared between provider and filter (separate COM objects, same DLL).
-static PIPE_CREDENTIALS_PRESENT: AtomicBool = AtomicBool::new(false);
-
-/// Records whether auto-logon credentials are armed (called by the provider).
-pub fn set_pipe_credentials_present(present: bool) {
-    PIPE_CREDENTIALS_PRESENT.store(present, Ordering::Relaxed);
-}
 
 /// The credential provider filter COM object.
 #[implement(ICredentialProviderFilter)]
@@ -49,7 +39,10 @@ impl UdsRpCredentialsFilter {
         rgballow: *mut BOOL,
         cproviders: u32,
     ) -> windows::core::Result<()> {
-        let auto_logon_armed = PIPE_CREDENTIALS_PRESENT.load(Ordering::Relaxed);
+        // The armed flag lives in the process-global store: the filter is a
+        // separate COM object and each enumeration cycle creates fresh
+        // provider instances.
+        let auto_logon_armed = store::is_valid();
         debug_dev!(
             "Filter called: auto_logon_armed: {auto_logon_armed}, dwflags: {dwflags}, cpus: {cpus:?}"
         );

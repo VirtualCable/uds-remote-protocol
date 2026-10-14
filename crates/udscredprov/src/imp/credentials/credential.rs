@@ -41,7 +41,6 @@ use crate::{debug_dev, debug_flow};
 pub struct UdsRpCredential {
     cpus: CREDENTIAL_PROVIDER_USAGE_SCENARIO,
     values: Arc<RwLock<Vec<String>>>, // Interactive field values
-    credential: Arc<RwLock<types::Credential>>, // Pipe-delivered auto-logon credential
     cookie: Arc<RwLock<Option<u32>>>,
     pipe: pipe::SharedPipe,
 }
@@ -56,7 +55,6 @@ impl UdsRpCredential {
                 String::new();
                 types::UdsFieldId::NumFields as usize
             ])),
-            credential: Arc::new(RwLock::new(types::Credential::default())),
             cookie: Arc::new(RwLock::new(None)),
             pipe,
         }
@@ -64,20 +62,21 @@ impl UdsRpCredential {
 
     /// Forgets any pipe-delivered credential (zeroizes the password).
     pub fn reset_credential(&mut self) {
-        self.credential.write().unwrap().clear();
+        super::store::clear();
     }
 
     /// Whether a pipe-delivered auto-logon credential is stored.
     pub fn has_valid_credential(&self) -> bool {
-        self.credential.read().unwrap().is_valid()
+        super::store::is_valid()
     }
 
-    /// Stores a pipe-delivered credential and prefills the username field so
-    /// the tile shows who is being logged on.
+    /// Stores a pipe-delivered credential (in the process-global store: the
+    /// enumerated provider instance is not the one that received it) and
+    /// prefills the username field so the tile shows who is being logged on.
     pub fn set_credentials(&mut self, creds: logic::Credentials) {
         self.values.write().unwrap()[types::UdsFieldId::Username as usize] =
             helpers::username_with_domain(&creds.username, &creds.domain);
-        self.credential.write().unwrap().set(creds);
+        super::store::set(creds);
     }
 
     /// Sets the usage scenario (logon vs unlock).
@@ -204,7 +203,7 @@ impl UdsRpCredential {
         // First choice: the pipe-delivered auto-logon credential (one-shot:
         // consumed here so it does not linger in memory and a failure cannot
         // loop; the service may resend it after reading the LogonResult).
-        let pipe_creds = self.credential.write().unwrap().take();
+        let pipe_creds = super::store::take();
         let (username, password, domain) = pipe_creds.map_or_else(
             || {
                 // Fallback: interactive username/password typed into our tile

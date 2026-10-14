@@ -104,6 +104,11 @@ pub struct Credential {
 }
 
 impl Credential {
+    /// Creates an empty credential container (const so it can back a static).
+    pub const fn new() -> Self {
+        Self { creds: None }
+    }
+
     /// Stores (or replaces) the pipe-delivered credential.
     pub fn set(&mut self, creds: logic::Credentials) {
         self.creds = Some(creds);
