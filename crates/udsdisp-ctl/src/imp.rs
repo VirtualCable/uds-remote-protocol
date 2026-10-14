@@ -46,9 +46,13 @@ pub fn run() -> anyhow::Result<()> {
             let connector = parse_connector(&args[1..])?;
             remove(connector)
         }
+        "cursor" => {
+            let connector = parse_connector(&args[1..])?;
+            cursor(connector)
+        }
         _ => {
             eprintln!(
-                "usage: udsdisp-ctl <list | create | set-mode | remove> [connector] [WxH[@HZ]]"
+                "usage: udsdisp-ctl <list | create | set-mode | remove | cursor> [connector] [WxH[@HZ]]"
             );
             std::process::exit(64);
         }
@@ -280,8 +284,37 @@ fn set_mode(connector: u32, mode: logic::Mode) -> anyhow::Result<()> {
     Ok(())
 }
 
-// --- desktop-side mode application -------------------------------------------
+/// `cursor`: dump the driver-tracked hardware cursor state of a connector.
+fn cursor(connector: u32) -> anyhow::Result<()> {
+    let device = ControlDevice::open()?;
+    let body = logic::encode_connector(connector);
+    let mut buf = vec![0u8; logic::CURSOR_RESPONSE_LEN];
+    device.ioctl(logic::IOCTL_GET_CURSOR, Some(&body), Some(&mut buf))?;
+    let status = logic::decode_cursor(&buf).context("driver returned a malformed cursor state")?;
+    if !status.known {
+        println!("connector {connector}: no cursor data yet (no commit with an active path?)");
+        return Ok(());
+    }
+    println!(
+        "connector {connector}: visible={} pos=({},{}) shape_id={} shape={}x{} pitch={} type={} ({})",
+        status.visible,
+        status.x,
+        status.y,
+        status.shape_id,
+        status.width,
+        status.height,
+        status.pitch,
+        status.shape_type,
+        match status.shape_type {
+            1 => "masked color",
+            2 => "alpha",
+            _ => "unknown",
+        },
+    );
+    Ok(())
+}
 
+// --- desktop-side mode application -------------------------------------------
 /// Maps a connector index to its GDI display device (`\\.\DISPLAYx`): the OS
 /// creates one display device per connector in order, so the UDS display
 /// devices sorted by number line up with connector indices.

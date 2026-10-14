@@ -135,6 +135,10 @@ pub const IOCTL_REMOVE: u32 = ctl_code(0x802);
 /// IOCTL: change the preferred mode of a live monitor (input: same body as
 /// [`encode_create`]).
 pub const IOCTL_SET_MODE: u32 = ctl_code(0x803);
+/// IOCTL: report the hardware-cursor state of a connector (input:
+/// [`encode_connector`] body; output: a fixed-size [`CURSOR_RESPONSE_LEN`]
+/// buffer, see [`encode_cursor`]).
+pub const IOCTL_GET_CURSOR: u32 = ctl_code(0x804);
 
 /// Device interface GUID the driver registers (`WdfDeviceCreateDeviceInter-
 /// face`) and the control tool enumerates (SetupAPI):
@@ -255,6 +259,74 @@ pub fn decode_list(buf: &[u8]) -> Option<Vec<MonitorStatus>> {
     Some(out)
 }
 
+/// Hardware-cursor state of a connector, as tracked by the driver through
+/// `IddCxMonitorQueryHardwareCursor` (the cursor update events the OS posts
+/// once hardware cursor is enabled on the path).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CursorStatus {
+    /// Whether the driver has queried the cursor at least once for this
+    /// connector. When false the remaining fields are meaningless (zeroed).
+    pub known: bool,
+    /// Whether the cursor is currently visible on this path.
+    pub visible: bool,
+    /// Cursor position in desktop coordinates.
+    pub x: i32,
+    /// Cursor position in desktop coordinates.
+    pub y: i32,
+    /// Identifier of the current cursor shape (increases with every shape
+    /// change; same shape reuses the id).
+    pub shape_id: u32,
+    /// Shape width in pixels.
+    pub width: u32,
+    /// Shape height in pixels.
+    pub height: u32,
+    /// Shape row pitch in bytes.
+    pub pitch: u32,
+    /// Shape type: `IDDCX_CURSOR_SHAPE_TYPE` (1 = masked color, 2 = alpha).
+    pub shape_type: u32,
+}
+
+/// Length of the [`IOCTL_GET_CURSOR`] response body.
+pub const CURSOR_RESPONSE_LEN: usize = 36;
+
+/// Encodes the [`IOCTL_GET_CURSOR`] response.
+#[must_use]
+pub fn encode_cursor(status: &CursorStatus) -> [u8; CURSOR_RESPONSE_LEN] {
+    let mut out = [0u8; CURSOR_RESPONSE_LEN];
+    out[0..4].copy_from_slice(&u32::from(status.known).to_le_bytes());
+    out[4..8].copy_from_slice(&u32::from(status.visible).to_le_bytes());
+    out[8..12].copy_from_slice(&status.x.to_le_bytes());
+    out[12..16].copy_from_slice(&status.y.to_le_bytes());
+    out[16..20].copy_from_slice(&status.shape_id.to_le_bytes());
+    out[20..24].copy_from_slice(&status.width.to_le_bytes());
+    out[24..28].copy_from_slice(&status.height.to_le_bytes());
+    out[28..32].copy_from_slice(&status.pitch.to_le_bytes());
+    out[32..36].copy_from_slice(&status.shape_type.to_le_bytes());
+    out
+}
+
+/// Decodes an [`IOCTL_GET_CURSOR`] response; `None` on wrong length.
+#[must_use]
+pub fn decode_cursor(buf: &[u8]) -> Option<CursorStatus> {
+    if buf.len() != CURSOR_RESPONSE_LEN {
+        return None;
+    }
+    let read = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(buf[at..at + 4].try_into().ok()?))
+    };
+    Some(CursorStatus {
+        known: read(0)? != 0,
+        visible: read(4)? != 0,
+        x: read(8)?.cast_signed(),
+        y: read(12)?.cast_signed(),
+        shape_id: read(16)?,
+        width: read(20)?,
+        height: read(24)?,
+        pitch: read(28)?,
+        shape_type: read(32)?,
+    })
+}
+
 /// Parses a mode in `WxH@HZ` form; the `@HZ` part is optional and defaults to
 /// 60 Hz. This is the CLI syntax of `udsdisp-ctl`.
 #[must_use]
@@ -315,6 +387,7 @@ mod tests {
         assert_eq!(IOCTL_CREATE, 0x0022_2004);
         assert_eq!(IOCTL_REMOVE, 0x0022_2008);
         assert_eq!(IOCTL_SET_MODE, 0x0022_200C);
+        assert_eq!(IOCTL_GET_CURSOR, 0x0022_2010);
     }
 
     #[test]
@@ -390,6 +463,28 @@ mod tests {
         assert_eq!(parse_mode("1280x"), None);
         assert_eq!(parse_mode("1280x720@hz"), None);
         assert_eq!(parse_mode(""), None);
+    }
+
+    #[test]
+    fn cursor_response_roundtrips() {
+        let status = CursorStatus {
+            known: true,
+            visible: true,
+            x: -32,
+            y: 1080,
+            shape_id: 7,
+            width: 32,
+            height: 32,
+            pitch: 128,
+            shape_type: 2,
+        };
+        let bytes = encode_cursor(&status);
+        assert_eq!(bytes.len(), CURSOR_RESPONSE_LEN);
+        assert_eq!(decode_cursor(&bytes), Some(status));
+        assert!(!decode_cursor(&encode_cursor(&CursorStatus::default()))
+            .unwrap_or_default()
+            .known);
+        assert_eq!(decode_cursor(&bytes[..CURSOR_RESPONSE_LEN - 1]), None);
     }
 
     #[test]

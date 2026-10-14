@@ -2,6 +2,7 @@
 
 mod adapter;
 mod control;
+mod cursor;
 mod iddcx;
 mod monitor;
 mod shared;

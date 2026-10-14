@@ -76,19 +76,22 @@ macro_rules! call_iddcx {
 pub(crate) use call_iddcx;
 
 use bindings::{
-    IDARG_IN_ADAPTER_INIT, IDARG_IN_GETDIRTYRECTS, IDARG_IN_MONITORCREATE, IDARG_IN_SWAPCHAINSETDEVICE,
-    IDARG_IN_UPDATEMODES, IDARG_OUT_ADAPTER_INIT, IDARG_OUT_GETDIRTYRECTS, IDARG_OUT_GETVERSION,
-    IDARG_OUT_MONITORARRIVAL, IDARG_OUT_MONITORCREATE, IDARG_OUT_RELEASEANDACQUIREBUFFER,
+    IDARG_IN_ADAPTER_INIT, IDARG_IN_GETDIRTYRECTS, IDARG_IN_MONITORCREATE, IDARG_IN_QUERY_HWCURSOR,
+    IDARG_IN_SETUP_HWCURSOR, IDARG_IN_SWAPCHAINSETDEVICE, IDARG_IN_UPDATEMODES,
+    IDARG_OUT_ADAPTER_INIT, IDARG_OUT_GETDIRTYRECTS, IDARG_OUT_GETVERSION, IDARG_OUT_MONITORARRIVAL,
+    IDARG_OUT_MONITORCREATE, IDARG_OUT_QUERY_HWCURSOR, IDARG_OUT_RELEASEANDACQUIREBUFFER,
     IDDCX_ADAPTER, IDDCX_MONITOR, IDDCX_SWAPCHAIN, IDD_CX_CLIENT_CONFIG, PFN_IDDCXADAPTERINITASYNC,
     PFN_IDDCXDEVICEINITCONFIG, PFN_IDDCXDEVICEINITIALIZE, PFN_IDDCXGETVERSION,
     PFN_IDDCXMONITORARRIVAL, PFN_IDDCXMONITORCREATE, PFN_IDDCXMONITORDEPARTURE,
+    PFN_IDDCXMONITORQUERYHARDWARECURSOR, PFN_IDDCXMONITORSETUPHARDWARECURSOR,
     PFN_IDDCXMONITORUPDATEMODES, PFN_IDDCXSWAPCHAINFINISHEDPROCESSINGFRAME,
     PFN_IDDCXSWAPCHAINGETDIRTYRECTS, PFN_IDDCXSWAPCHAINRELEASEANDACQUIREBUFFER,
     PFN_IDDCXSWAPCHAINSETDEVICE, RECT,
     _IDDFUNCENUM_IddCxAdapterInitAsyncTableIndex, _IDDFUNCENUM_IddCxDeviceInitConfigTableIndex,
     _IDDFUNCENUM_IddCxDeviceInitializeTableIndex, _IDDFUNCENUM_IddCxGetVersionTableIndex,
     _IDDFUNCENUM_IddCxMonitorArrivalTableIndex, _IDDFUNCENUM_IddCxMonitorCreateTableIndex,
-    _IDDFUNCENUM_IddCxMonitorDepartureTableIndex, _IDDFUNCENUM_IddCxMonitorUpdateModesTableIndex,
+    _IDDFUNCENUM_IddCxMonitorDepartureTableIndex, _IDDFUNCENUM_IddCxMonitorQueryHardwareCursorTableIndex,
+    _IDDFUNCENUM_IddCxMonitorSetupHardwareCursorTableIndex, _IDDFUNCENUM_IddCxMonitorUpdateModesTableIndex,
     _IDDFUNCENUM_IddCxSwapChainFinishedProcessingFrameTableIndex,
     _IDDFUNCENUM_IddCxSwapChainGetDirtyRectsTableIndex,
     _IDDFUNCENUM_IddCxSwapChainReleaseAndAcquireBufferTableIndex,
@@ -331,5 +334,48 @@ pub unsafe fn swapchain_finished_processing_frame(swapchain: IDDCX_SWAPCHAIN) ->
         PFN_IDDCXSWAPCHAINFINISHEDPROCESSINGFRAME,
         _IDDFUNCENUM_IddCxSwapChainFinishedProcessingFrameTableIndex,
         swapchain,
+    )
+}
+
+/// `IddCxMonitorSetupHardwareCursor`: switches the path from software cursor
+/// (the default after every mode commit) to hardware cursor and hands the OS
+/// the event it signals on every cursor update. Must be re-called after every
+/// `EvtIddCxAdapterCommitModes` for the path to keep hardware cursor.
+///
+/// # Safety
+/// `monitor` must be a live, arrived monitor handle with an active path, and
+/// `in_args.hNewCursorDataAvailable` must be a valid, alive event handle for
+/// as long as hardware cursor stays enabled.
+pub unsafe fn monitor_setup_hardware_cursor(monitor: IDDCX_MONITOR, in_args: &IDARG_IN_SETUP_HWCURSOR) -> NTSTATUS {
+    // SAFETY: guaranteed by the caller.
+    call_iddcx!(
+        PFN_IDDCXMONITORSETUPHARDWARECURSOR,
+        _IDDFUNCENUM_IddCxMonitorSetupHardwareCursorTableIndex,
+        monitor,
+        core::ptr::from_ref(in_args),
+    )
+}
+
+/// `IddCxMonitorQueryHardwareCursor`: reads the current cursor position,
+/// visibility and shape. Called in response to the event registered with
+/// [`monitor_setup_hardware_cursor`] being signaled. The caller-provided
+/// `in_args.pShapeBuffer` receives the shape image when the shape changed.
+///
+/// # Safety
+/// `monitor` must be a live, arrived monitor handle with hardware cursor
+/// enabled, and `in_args.pShapeBuffer` (when non-null) must be a writable
+/// buffer of `in_args.ShapeBufferSizeInBytes` bytes.
+pub unsafe fn monitor_query_hardware_cursor(
+    monitor: IDDCX_MONITOR,
+    in_args: &IDARG_IN_QUERY_HWCURSOR,
+    out_args: &mut IDARG_OUT_QUERY_HWCURSOR,
+) -> NTSTATUS {
+    // SAFETY: guaranteed by the caller.
+    call_iddcx!(
+        PFN_IDDCXMONITORQUERYHARDWARECURSOR,
+        _IDDFUNCENUM_IddCxMonitorQueryHardwareCursorTableIndex,
+        monitor,
+        core::ptr::from_ref(in_args),
+        core::ptr::from_mut(out_args),
     )
 }

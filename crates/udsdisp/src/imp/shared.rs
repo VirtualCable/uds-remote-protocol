@@ -7,7 +7,7 @@
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use super::swapchain;
+use super::{cursor, swapchain};
 use crate::logic;
 
 /// Per-monitor runtime state.
@@ -25,6 +25,11 @@ pub struct MonitorEntry {
     pub current_mode: Option<logic::Mode>,
     /// Active swap-chain processing task, if the OS has assigned one.
     pub swapchain_task: Option<swapchain::Task>,
+    /// Last known hardware-cursor state, filled by the tracking task.
+    pub cursor: Option<cursor::State>,
+    /// Cursor tracking task; created on the first mode commit with an active
+    /// path, stopped on departure.
+    pub cursor_task: Option<cursor::Task>,
 }
 
 /// Whole-driver state.

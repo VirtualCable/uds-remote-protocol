@@ -11,7 +11,9 @@
 //!   monitor (`IddCxMonitorUpdateModes`) and best-effort apply it to the
 //!   desktop with `ChangeDisplaySettingsEx` (the latter needs an interactive
 //!   session; the IOCTL works from anywhere);
-//! - `remove <connector>`: unplug and destroy the monitor.
+//! - `remove <connector>`: unplug and destroy the monitor;
+//! - `cursor <connector>`: dump the driver-tracked hardware cursor state
+//!   (position, visibility, shape) of the monitor on `connector`.
 
 #[cfg(windows)]
 mod imp;

@@ -25,6 +25,9 @@ const STATUS_OBJECT_NAME_COLLISION: NTSTATUS = -1_073_741_771;
 /// `STATUS_DEVICE_NOT_READY` (0xC00000A3): the adapter is not up yet.
 const STATUS_DEVICE_NOT_READY: NTSTATUS = -1_073_741_661;
 
+/// `STATUS_NOT_FOUND` (0xC0000225): no monitor on the requested connector.
+const STATUS_NOT_FOUND: NTSTATUS = -1_073_741_275;
+
 /// `EvtIddCxDeviceIoControl`: IddCx forwards `DeviceIoControl` calls made on
 /// our device interface to this callback (its internal queue); the request
 /// must be completed exactly once.
@@ -46,6 +49,7 @@ pub unsafe extern "C" fn device_io_control(
         logic::IOCTL_CREATE => handle_create(request),
         logic::IOCTL_REMOVE => handle_remove(request),
         logic::IOCTL_SET_MODE => handle_set_mode(request),
+        logic::IOCTL_GET_CURSOR => handle_get_cursor(request),
         other => {
             log_line(&format!("unknown IOCTL {other:#010x}"));
             (STATUS_INVALID_DEVICE_REQUEST, 0)
@@ -226,4 +230,37 @@ fn handle_set_mode(request: WDFREQUEST) -> (NTSTATUS, usize) {
         return (STATUS_INVALID_PARAMETER, 0);
     }
     (monitor::set_monitor_mode(connector_index, mode), 0)
+}
+
+/// `IOCTL_GET_CURSOR`: report the last known hardware-cursor state of a
+/// connector (zeroed with `known: false` until the tracking task has answered
+/// its first query).
+fn handle_get_cursor(request: WDFREQUEST) -> (NTSTATUS, usize) {
+    let connector_index =
+        match read_body(request, logic::CONNECTOR_REQUEST_LEN, logic::decode_connector) {
+            Ok(ok) => ok,
+            Err(status) => return (status, 0),
+        };
+    // SAFETY: `request` is live until completed by the caller.
+    let ptr = match unsafe { output_buffer(request, logic::CURSOR_RESPONSE_LEN) } {
+        Ok(ptr) => ptr,
+        Err(status) => return (status, 0),
+    };
+    let status = {
+        let state = shared::lock();
+        match state.monitors.iter().find(|m| m.connector_index == connector_index) {
+            Some(entry) => entry
+                .cursor
+                .as_ref()
+                .map_or_else(logic::CursorStatus::default, |cursor| cursor.status),
+            None => {
+                log_line(&format!("IOCTL get-cursor: no monitor on connector {connector_index}"));
+                return (STATUS_NOT_FOUND, 0);
+            }
+        }
+    };
+    let bytes = logic::encode_cursor(&status);
+    // SAFETY: `ptr` is valid for CURSOR_RESPONSE_LEN writable bytes.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len()) };
+    (0, logic::CURSOR_RESPONSE_LEN)
 }

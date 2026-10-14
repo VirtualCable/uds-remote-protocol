@@ -7,7 +7,7 @@
 
 use wdk_sys::{NTSTATUS, WDFOBJECT, call_unsafe_wdf_function_binding};
 
-use super::{adapter::size32, iddcx, iddcx::bindings, log_line, shared, swapchain};
+use super::{adapter::size32, cursor, iddcx, iddcx::bindings, log_line, shared, swapchain};
 use crate::logic;
 
 /// `STATUS_BUFFER_TOO_SMALL` (0xC0000023): buffer given but undersized.
@@ -84,6 +84,8 @@ pub fn create_and_arrive(
         modes,
         current_mode: None,
         swapchain_task: None,
+        cursor: None,
+        cursor_task: None,
     });
 
     // SAFETY: `monitor` is a fresh handle from IddCxMonitorCreate.
@@ -125,6 +127,9 @@ pub fn depart(connector_index: u32) -> NTSTATUS {
     // Stop the frame loop first; the OS also unassigns the swap-chain during
     // departure, and stop_task is idempotent (the task is an Option::take).
     swapchain::stop_task(handle);
+    // Stop cursor tracking before departure destroys the monitor object (the
+    // tracking thread queries through that handle).
+    cursor::stop(handle);
 
     // SAFETY: `handle` is a live monitor object from the state map.
     let status = unsafe { iddcx::monitor_departure(handle as bindings::IDDCX_MONITOR) };
@@ -387,6 +392,8 @@ pub unsafe extern "C" fn query_target_modes(
 /// reconfigure on a virtual adapter — IddCx reassigns the swap-chain itself —
 /// but record the committed mode per monitor (the control channel reports it
 /// in `IOCTL_LIST`) and log the paths (IddSampleDriver also no-ops here).
+/// Every active path also (re-)enables hardware cursor: a mode commit resets
+/// the path to software cursor, so the setup must be re-armed on every commit.
 ///
 /// # Safety
 /// Registered with IddCx; `input` is valid for the call duration.
@@ -406,7 +413,10 @@ pub unsafe extern "C" fn commit_modes(
             "  path[{i}] monitor={:?} active={active} {}x{}@{}Hz",
             path.MonitorObject, info.activeSize.cx, info.activeSize.cy, info.vSyncFreq.Numerator
         ));
-        if active {
+        if !active {
+            continue;
+        }
+        {
             let mut state = shared::lock();
             if let Some(entry) =
                 state.monitors.iter_mut().find(|m| m.handle == path.MonitorObject as usize)
@@ -418,6 +428,8 @@ pub unsafe extern "C" fn commit_modes(
                 ));
             }
         }
+        // Lock released: cursor::enable locks the state internally.
+        cursor::enable(path.MonitorObject);
     }
     0
 }
