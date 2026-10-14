@@ -48,7 +48,10 @@ impl Src {
     fn new() -> Self {
         #[cfg(all(windows, feature = "windows-capture"))]
         {
-            Self::Dxgi(server::dxgi::DxgiSource::new(0).expect("dxgi"))
+            Self::Dxgi(
+                server::dxgi::DxgiSource::new(&server::capture::OutputSelector::Index(0))
+                    .expect("dxgi"),
+            )
         }
         #[cfg(not(all(windows, feature = "windows-capture")))]
         {
