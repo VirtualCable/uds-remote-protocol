@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{
-    CloseHandle, E_PENDING, HANDLE, HMODULE, LUID, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, HANDLE, HMODULE, LUID, WAIT_EVENT, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D11::{
@@ -18,13 +18,18 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11DeviceContext,
 };
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIResource,
+    CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1, IDXGIFactory4,
+    IDXGIResource,
 };
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects};
 use windows::core::{Interface, PCWSTR};
 use wdk_sys::{NTSTATUS, call_unsafe_wdf_function_binding};
 
 use super::{iddcx, iddcx::bindings, log_line, shared};
+
+/// `E_PENDING` (0x8000000A) as a plain i32: `IddCxSwapChainReleaseAndAcquireBuffer`
+/// returns it when no new frame is ready yet.
+const E_PENDING: i32 = 0x8000_000A_u32 as i32;
 
 /// How often dirty-rect details are logged at most (the loop can run at the
 /// full monitor refresh rate; the log is for verification, not telemetry).
@@ -35,9 +40,9 @@ const MAX_LOGGED_RECTS: usize = 8;
 
 /// A running swap-chain processing loop (one per assigned swap-chain).
 pub struct Task {
-    /// Stop signal for the processing thread (Win32 event handle as `isize`
+    /// Stop signal for the processing thread (Win32 event handle as `usize`
     /// to keep the state map free of `Send`/`Sync` concerns).
-    pub stop_event: isize,
+    pub stop_event: usize,
     /// Processing thread; joined on unassign.
     pub thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -88,8 +93,8 @@ pub unsafe extern "C" fn assign(
     };
 
     let swapchain = input.hSwapChain as usize;
-    let available = input.hNextSurfaceAvailable as isize;
-    let stop = stop_event.0;
+    let available = input.hNextSurfaceAvailable as usize;
+    let stop = stop_event.0 as usize;
     let thread = std::thread::spawn(move || processing_loop(swapchain, available, stop, device));
 
     let mut state = shared::lock();
@@ -128,14 +133,14 @@ fn stop_task(monitor: usize) {
         // SAFETY: the event is ours and still open; it is closed after the
         // join so the thread can never observe a closed handle.
         unsafe {
-            let _ = SetEvent(HANDLE(task.stop_event));
+            let _ = SetEvent(HANDLE(task.stop_event as *mut core::ffi::c_void));
         }
         if let Some(thread) = task.thread {
             let _ = thread.join();
         }
         // SAFETY: the thread is joined; nobody references the event anymore.
         unsafe {
-            let _ = CloseHandle(HANDLE(task.stop_event));
+            let _ = CloseHandle(HANDLE(task.stop_event as *mut core::ffi::c_void));
         }
         log_line("swap-chain task stopped");
     }
@@ -154,7 +159,11 @@ fn create_render_device(luid: bindings::LUID) -> Result<(ID3D11Device, ID3D11Dev
     unsafe {
         let factory: IDXGIFactory1 =
             CreateDXGIFactory1().map_err(|e| format!("CreateDXGIFactory1: {e}"))?;
-        let adapter: IDXGIAdapter = factory
+        // EnumAdapterByLuid lives on IDXGIFactory4 (DXGI 1.4); every OS we
+        // target ships it.
+        let factory4: IDXGIFactory4 =
+            factory.cast().map_err(|e| format!("QI IDXGIFactory4: {e}"))?;
+        let adapter: IDXGIAdapter = factory4
             .EnumAdapterByLuid(win_luid)
             .map_err(|e| format!("EnumAdapterByLuid({:#x}:{:#x}): {e}", win_luid.HighPart, win_luid.LowPart))?;
         if let Ok(adapter1) = adapter.cast::<IDXGIAdapter1>() {
@@ -193,7 +202,7 @@ fn create_render_device(luid: bindings::LUID) -> Result<(ID3D11Device, ID3D11Dev
 /// The frame loop, on its own thread: hand our DXGI device to IddCx, then
 /// acquire → (log metadata) → finish in a loop until the stop event fires or
 /// the swap-chain dies. Mirrors IddSampleDriver's `SwapChainProcessor::RunCore`.
-fn processing_loop(swapchain: usize, available_event: isize, stop_event: isize, device: ID3D11Device) {
+fn processing_loop(swapchain: usize, available_event: usize, stop_event: usize, device: ID3D11Device) {
     let swapchain = swapchain as bindings::IDDCX_SWAPCHAIN;
 
     // IddCxSwapChainSetDevice needs our D3D11 device as an IDXGIDevice.
@@ -223,10 +232,13 @@ fn processing_loop(swapchain: usize, available_event: isize, stop_event: isize, 
     loop {
         // SAFETY: swapchain is ours until we delete it at loop exit.
         let (hr, out) = unsafe { iddcx::swapchain_release_and_acquire(swapchain) };
-        if hr == E_PENDING.0 {
+        if hr == E_PENDING {
             // No new frame: wait for the next surface or the stop signal
             // (16 ms timeout keeps the loop responsive like the sample).
-            let handles = [HANDLE(available_event), HANDLE(stop_event)];
+            let handles = [
+                HANDLE(available_event as *mut core::ffi::c_void),
+                HANDLE(stop_event as *mut core::ffi::c_void),
+            ];
             // SAFETY: both handles are valid Win32 events.
             let wait = unsafe { WaitForMultipleObjects(&handles, false, 16) };
             if wait == WAIT_OBJECT_0 || wait == WAIT_TIMEOUT {

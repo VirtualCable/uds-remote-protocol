@@ -30,7 +30,7 @@ bindgen = "0.73.2"
 [target.'cfg(windows)'.dependencies]
 wdk = "0.4.1"
 wdk-sys = "0.5.1"
-windows = { workspace = true, features = ["Win32_System_Threading"] }
+windows = { workspace = true, features = ["Win32_System_Threading", "Win32_Security"] }
 
 [lints]
 workspace = true

@@ -99,10 +99,8 @@ fn fill_signal_info(
         cx: mode.width,
         cy: mode.height,
     };
-    // SAFETY: plain-data union; we write the whole 32-bit storage.
-    unsafe {
-        info.__bindgen_anon_1.videoStandard = logic::additional_signal_info(monitor_mode);
-    }
+    // Plain-data union; we write the whole 32-bit storage.
+    info.__bindgen_anon_1.videoStandard = logic::additional_signal_info(monitor_mode);
     info.scanLineOrdering =
         bindings::DISPLAYCONFIG_SCANLINE_ORDERING_DISPLAYCONFIG_SCANLINE_ORDERING_PROGRESSIVE;
 }
