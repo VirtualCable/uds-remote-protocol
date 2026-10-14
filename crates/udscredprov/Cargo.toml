@@ -1,0 +1,59 @@
+[package]
+name = "udscredprov"
+description = "UDS Credential Provider — Windows auto-logon credential provider fed by the uds-rp service over a local named pipe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# rlib in addition to the cdylib: unit tests link the crate, and
+# `udscredprov-ctl` links `logic` (the pipe protocol) from it.
+crate-type = ["cdylib", "rlib"]
+
+# Pure-Rust, host-independent dependencies (the pipe protocol lives in
+# `logic` and is unit-tested on Linux).
+[dependencies]
+zeroize = "1.8"
+thiserror.workspace = true
+
+# Every Windows-specific dependency is gated to Windows: elsewhere the crate
+# compiles to `logic` only, so the workspace stays buildable and testable on
+# Linux (same pattern as `udsdisp` / `udsaudio-ctl`).
+[target.'cfg(windows)'.dependencies]
+anyhow.workspace = true
+widestring = "1.2"
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+windows-core = "0.62"
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_Storage_FileSystem",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_Security_Authentication_Identity",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+[lints]
+workspace = true
