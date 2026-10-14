@@ -6,5 +6,7 @@
 //! virtual monitors whose resolution is dictated by the remote client; see
 //! `doc/plan/iddcx-pantalla-virtual.md` for the spike plan.
 
+pub mod logic;
+
 #[cfg(windows)]
 mod imp;

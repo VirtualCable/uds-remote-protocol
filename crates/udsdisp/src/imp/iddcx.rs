@@ -76,9 +76,20 @@ macro_rules! call_iddcx {
 pub(crate) use call_iddcx;
 
 use bindings::{
-    IDARG_OUT_GETVERSION, IDD_CX_CLIENT_CONFIG, PFN_IDDCXDEVICEINITCONFIG, PFN_IDDCXDEVICEINITIALIZE,
-    PFN_IDDCXGETVERSION, _IDDFUNCENUM_IddCxDeviceInitConfigTableIndex,
+    IDARG_IN_ADAPTER_INIT, IDARG_IN_GETDIRTYRECTS, IDARG_IN_MONITORCREATE, IDARG_IN_SWAPCHAINSETDEVICE,
+    IDARG_OUT_ADAPTER_INIT, IDARG_OUT_GETDIRTYRECTS, IDARG_OUT_GETVERSION, IDARG_OUT_MONITORARRIVAL,
+    IDARG_OUT_MONITORCREATE, IDARG_OUT_RELEASEANDACQUIREBUFFER, IDDCX_ADAPTER, IDDCX_MONITOR,
+    IDDCX_SWAPCHAIN, IDD_CX_CLIENT_CONFIG, PFN_IDDCXADAPTERINITASYNC, PFN_IDDCXDEVICEINITCONFIG,
+    PFN_IDDCXDEVICEINITIALIZE, PFN_IDDCXGETVERSION, PFN_IDDCXMONITORARRIVAL, PFN_IDDCXMONITORCREATE,
+    PFN_IDDCXSWAPCHAINFINISHEDPROCESSINGFRAME, PFN_IDDCXSWAPCHAINGETDIRTYRECTS,
+    PFN_IDDCXSWAPCHAINRELEASEANDACQUIREBUFFER, PFN_IDDCXSWAPCHAINSETDEVICE, RECT,
+    _IDDFUNCENUM_IddCxAdapterInitAsyncTableIndex, _IDDFUNCENUM_IddCxDeviceInitConfigTableIndex,
     _IDDFUNCENUM_IddCxDeviceInitializeTableIndex, _IDDFUNCENUM_IddCxGetVersionTableIndex,
+    _IDDFUNCENUM_IddCxMonitorArrivalTableIndex, _IDDFUNCENUM_IddCxMonitorCreateTableIndex,
+    _IDDFUNCENUM_IddCxSwapChainFinishedProcessingFrameTableIndex,
+    _IDDFUNCENUM_IddCxSwapChainGetDirtyRectsTableIndex,
+    _IDDFUNCENUM_IddCxSwapChainReleaseAndAcquireBufferTableIndex,
+    _IDDFUNCENUM_IddCxSwapChainSetDeviceTableIndex,
 };
 use wdk_sys::{NTSTATUS, WDFDEVICE, WDFDEVICE_INIT};
 
@@ -135,4 +146,152 @@ pub unsafe fn get_version() -> (NTSTATUS, u32) {
         core::ptr::from_mut(&mut out),
     );
     (status, out.IddCxVersion)
+}
+
+/// `IddCxAdapterInitAsync`: starts the asynchronous initialization of the
+/// WDDM adapter object for `in_args.WdfDevice`. Completion is reported through
+/// the `EvtIddCxAdapterInitFinished` callback. Returns `(status, out-args)`,
+/// where `out-args.AdapterObject` is the adapter handle.
+///
+/// # Safety
+/// `in_args` must be fully initialized (caps with correct `Size` fields); the
+/// WDFDEVICE inside must be the device created in `EvtDriverDeviceAdd`.
+pub unsafe fn adapter_init_async(
+    in_args: &IDARG_IN_ADAPTER_INIT,
+) -> (NTSTATUS, IDARG_OUT_ADAPTER_INIT) {
+    // SAFETY: POD out-struct.
+    let mut out: IDARG_OUT_ADAPTER_INIT = unsafe { core::mem::zeroed() };
+    // SAFETY: guaranteed by the caller.
+    let status = call_iddcx!(
+        PFN_IDDCXADAPTERINITASYNC,
+        _IDDFUNCENUM_IddCxAdapterInitAsyncTableIndex,
+        core::ptr::from_ref(in_args),
+        core::ptr::from_mut(&mut out),
+    );
+    (status, out)
+}
+
+/// `IddCxMonitorCreate`: creates a monitor object on `adapter`. The monitor
+/// is not visible to the OS until [`monitor_arrival`] is called.
+///
+/// # Safety
+/// `adapter` must be a live adapter handle and `in_args.pMonitorInfo` must
+/// point to a fully initialized `IDDCX_MONITOR_INFO`.
+pub unsafe fn monitor_create(
+    adapter: IDDCX_ADAPTER,
+    in_args: &IDARG_IN_MONITORCREATE,
+) -> (NTSTATUS, IDARG_OUT_MONITORCREATE) {
+    // SAFETY: POD out-struct.
+    let mut out: IDARG_OUT_MONITORCREATE = unsafe { core::mem::zeroed() };
+    // SAFETY: guaranteed by the caller.
+    let status = call_iddcx!(
+        PFN_IDDCXMONITORCREATE,
+        _IDDFUNCENUM_IddCxMonitorCreateTableIndex,
+        adapter,
+        core::ptr::from_ref(in_args),
+        core::ptr::from_mut(&mut out),
+    );
+    (status, out)
+}
+
+/// `IddCxMonitorArrival`: reports the monitor as plugged in. Returns
+/// `(status, out-args)` with the OS-assigned adapter LUID and target id.
+///
+/// # Safety
+/// `monitor` must be a live monitor handle from [`monitor_create`].
+pub unsafe fn monitor_arrival(monitor: IDDCX_MONITOR) -> (NTSTATUS, IDARG_OUT_MONITORARRIVAL) {
+    // SAFETY: POD out-struct.
+    let mut out: IDARG_OUT_MONITORARRIVAL = unsafe { core::mem::zeroed() };
+    // SAFETY: guaranteed by the caller.
+    let status = call_iddcx!(
+        PFN_IDDCXMONITORARRIVAL,
+        _IDDFUNCENUM_IddCxMonitorArrivalTableIndex,
+        monitor,
+        core::ptr::from_mut(&mut out),
+    );
+    (status, out)
+}
+
+/// `IddCxSwapChainSetDevice`: hands the DXGI device that will process frames
+/// to the swap-chain. Returns an HRESULT (not NTSTATUS).
+///
+/// # Safety
+/// `swapchain` must be the handle received in `EvtIddCxMonitorAssignSwapChain`
+/// and `in_args.pDevice` a valid `IDXGIDevice` pointer.
+pub unsafe fn swapchain_set_device(swapchain: IDDCX_SWAPCHAIN, in_args: &IDARG_IN_SWAPCHAINSETDEVICE) -> i32 {
+    // SAFETY: guaranteed by the caller.
+    call_iddcx!(
+        PFN_IDDCXSWAPCHAINSETDEVICE,
+        _IDDFUNCENUM_IddCxSwapChainSetDeviceTableIndex,
+        swapchain,
+        core::ptr::from_ref(in_args),
+    )
+}
+
+/// `IddCxSwapChainReleaseAndAcquireBuffer`: releases the current frame and
+/// acquires the next one. Returns `(HRESULT, out-args)`; `E_PENDING` means no
+/// new frame is ready (wait on the swap-chain event). On success the caller
+/// owns a reference on `out.MetaData.pSurface` that it must release.
+///
+/// # Safety
+/// `swapchain` must be a live swap-chain handle with a device set via
+/// [`swapchain_set_device`].
+pub unsafe fn swapchain_release_and_acquire(
+    swapchain: IDDCX_SWAPCHAIN,
+) -> (i32, IDARG_OUT_RELEASEANDACQUIREBUFFER) {
+    // SAFETY: POD out-struct.
+    let mut out: IDARG_OUT_RELEASEANDACQUIREBUFFER = unsafe { core::mem::zeroed() };
+    // SAFETY: guaranteed by the caller.
+    let hr = call_iddcx!(
+        PFN_IDDCXSWAPCHAINRELEASEANDACQUIREBUFFER,
+        _IDDFUNCENUM_IddCxSwapChainReleaseAndAcquireBufferTableIndex,
+        swapchain,
+        core::ptr::from_mut(&mut out),
+    );
+    (hr, out)
+}
+
+/// `IddCxSwapChainGetDirtyRects`: copies the dirty rects of the currently
+/// acquired frame into `rects`. Returns `(HRESULT, count actually copied)`.
+///
+/// # Safety
+/// `swapchain` must be in a frame-acquired state (a successful
+/// [`swapchain_release_and_acquire`] without an intervening one).
+pub unsafe fn swapchain_get_dirty_rects(swapchain: IDDCX_SWAPCHAIN, rects: &mut [RECT]) -> (i32, u32) {
+    let in_args = IDARG_IN_GETDIRTYRECTS {
+        DirtyRectInCount: {
+            assert!(rects.len() <= u32::MAX as usize);
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                rects.len() as u32
+            }
+        },
+        pDirtyRects: rects.as_mut_ptr(),
+    };
+    // SAFETY: POD out-struct.
+    let mut out: IDARG_OUT_GETDIRTYRECTS = unsafe { core::mem::zeroed() };
+    // SAFETY: `rects` is a valid writable buffer of DirtyRectInCount entries.
+    let hr = call_iddcx!(
+        PFN_IDDCXSWAPCHAINGETDIRTYRECTS,
+        _IDDFUNCENUM_IddCxSwapChainGetDirtyRectsTableIndex,
+        swapchain,
+        core::ptr::from_ref(&in_args),
+        core::ptr::from_mut(&mut out),
+    );
+    (hr, out.DirtyRectOutCount)
+}
+
+/// `IddCxSwapChainFinishedProcessingFrame`: tells the OS the driver is done
+/// with the current frame. Must be called after every successful acquire
+/// before acquiring again. Returns an HRESULT.
+///
+/// # Safety
+/// `swapchain` must be in a frame-acquired state.
+pub unsafe fn swapchain_finished_processing_frame(swapchain: IDDCX_SWAPCHAIN) -> i32 {
+    // SAFETY: guaranteed by the caller.
+    call_iddcx!(
+        PFN_IDDCXSWAPCHAINFINISHEDPROCESSINGFRAME,
+        _IDDFUNCENUM_IddCxSwapChainFinishedProcessingFrameTableIndex,
+        swapchain,
+    )
 }

@@ -1,13 +1,18 @@
 //! Windows implementation of the UDS Virtual Display driver (UMDF).
 
+mod adapter;
 mod iddcx;
+mod monitor;
+mod shared;
+mod swapchain;
 
 use std::{fs::OpenOptions, io::Write as _, sync::Once};
 
 use wdk::println;
 use wdk_sys::{
     NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT, ULONG, WDFDEVICE, WDFDEVICE_INIT, WDFDRIVER,
-    WDF_DRIVER_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES, call_unsafe_wdf_function_binding,
+    WDF_DRIVER_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES, WDF_PNPPOWER_EVENT_CALLBACKS,
+    call_unsafe_wdf_function_binding,
 };
 
 /// Appends one line to the driver's log file and to the debug output.
@@ -79,6 +84,29 @@ extern "C" fn evt_driver_device_add(
 ) -> NTSTATUS {
     log_line("EvtDriverDeviceAdd");
 
+    // Register for power callbacks: the adapter is created in D0 entry.
+    // SAFETY: WDF_PNPPOWER_EVENT_CALLBACKS is a POD of size + function
+    // pointers; zeroed + Size is exactly what WDF_PNPPOWER_EVENT_CALLBACKS_INIT
+    // does.
+    let mut pnp_power: WDF_PNPPOWER_EVENT_CALLBACKS = unsafe { core::mem::zeroed() };
+    pnp_power.Size = {
+        const SIZE: usize = core::mem::size_of::<WDF_PNPPOWER_EVENT_CALLBACKS>();
+        const { assert!(SIZE <= ULONG::MAX as usize) }
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            SIZE as ULONG
+        }
+    };
+    pnp_power.EvtDeviceD0Entry = Some(adapter::evt_device_d0_entry);
+    // SAFETY: `device_init` comes from the framework and is valid.
+    unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceInitSetPnpPowerEventCallbacks,
+            device_init,
+            &mut pnp_power,
+        );
+    }
+
     // Register the IddCx callbacks for this device before creating it.
     // Zeroed + Size is exactly what IDD_CX_CLIENT_CONFIG_INIT does.
     // SAFETY: IDD_CX_CLIENT_CONFIG is a POD of a size field and function
@@ -93,15 +121,15 @@ extern "C" fn evt_driver_device_add(
         }
     };
     // IddCxDeviceInitConfig rejects a config without the core callback set
-    // (STATUS_INVALID_PARAMETER). These are logging stubs until M2.
-    idd_config.EvtIddCxAdapterInitFinished = Some(evt_idd_cx_adapter_init_finished);
-    idd_config.EvtIddCxAdapterCommitModes = Some(evt_idd_cx_adapter_commit_modes);
-    idd_config.EvtIddCxParseMonitorDescription = Some(evt_idd_cx_parse_monitor_description);
+    // (STATUS_INVALID_PARAMETER).
+    idd_config.EvtIddCxAdapterInitFinished = Some(adapter::on_init_finished);
+    idd_config.EvtIddCxAdapterCommitModes = Some(monitor::commit_modes);
+    idd_config.EvtIddCxParseMonitorDescription = Some(monitor::parse_description);
     idd_config.EvtIddCxMonitorGetDefaultDescriptionModes =
-        Some(evt_idd_cx_monitor_get_default_description_modes);
-    idd_config.EvtIddCxMonitorQueryTargetModes = Some(evt_idd_cx_monitor_query_target_modes);
-    idd_config.EvtIddCxMonitorAssignSwapChain = Some(evt_idd_cx_monitor_assign_swapchain);
-    idd_config.EvtIddCxMonitorUnassignSwapChain = Some(evt_idd_cx_monitor_unassign_swapchain);
+        Some(monitor::get_default_description_modes);
+    idd_config.EvtIddCxMonitorQueryTargetModes = Some(monitor::query_target_modes);
+    idd_config.EvtIddCxMonitorAssignSwapChain = Some(swapchain::assign);
+    idd_config.EvtIddCxMonitorUnassignSwapChain = Some(swapchain::unassign);
     // SAFETY: `device_init` comes from the framework and is valid; the config
     // is zeroed except for its size, exactly like IDD_CX_CLIENT_CONFIG_INIT.
     let status = unsafe { iddcx::device_init_config(device_init, &mut idd_config) };
@@ -141,69 +169,6 @@ extern "C" fn evt_driver_device_add(
 
 extern "C" fn evt_driver_unload(_driver: WDFDRIVER) {
     log_line("DriverUnload");
-}
-
-// ---------------------------------------------------------------------------
-// IddCx callbacks (logging stubs until M2 implements adapter/monitors)
-// ---------------------------------------------------------------------------
-
-use iddcx::bindings;
-
-unsafe extern "C" fn evt_idd_cx_adapter_init_finished(
-    _adapter: bindings::IDDCX_ADAPTER,
-    _in_args: *const bindings::IDARG_IN_ADAPTER_INIT_FINISHED,
-) -> NTSTATUS {
-    log_line("EvtIddCxAdapterInitFinished");
-    0
-}
-
-unsafe extern "C" fn evt_idd_cx_adapter_commit_modes(
-    _adapter: bindings::IDDCX_ADAPTER,
-    _in_args: *const bindings::IDARG_IN_COMMITMODES,
-) -> NTSTATUS {
-    log_line("EvtIddCxAdapterCommitModes");
-    0
-}
-
-unsafe extern "C" fn evt_idd_cx_parse_monitor_description(
-    _in_args: *const bindings::IDARG_IN_PARSEMONITORDESCRIPTION,
-    _out_args: *mut bindings::IDARG_OUT_PARSEMONITORDESCRIPTION,
-) -> NTSTATUS {
-    log_line("EvtIddCxParseMonitorDescription");
-    0
-}
-
-unsafe extern "C" fn evt_idd_cx_monitor_get_default_description_modes(
-    _monitor: bindings::IDDCX_MONITOR,
-    _in_args: *const bindings::IDARG_IN_GETDEFAULTDESCRIPTIONMODES,
-    _out_args: *mut bindings::IDARG_OUT_GETDEFAULTDESCRIPTIONMODES,
-) -> NTSTATUS {
-    log_line("EvtIddCxMonitorGetDefaultDescriptionModes");
-    0
-}
-
-unsafe extern "C" fn evt_idd_cx_monitor_query_target_modes(
-    _monitor: bindings::IDDCX_MONITOR,
-    _in_args: *const bindings::IDARG_IN_QUERYTARGETMODES,
-    _out_args: *mut bindings::IDARG_OUT_QUERYTARGETMODES,
-) -> NTSTATUS {
-    log_line("EvtIddCxMonitorQueryTargetModes");
-    0
-}
-
-unsafe extern "C" fn evt_idd_cx_monitor_assign_swapchain(
-    _monitor: bindings::IDDCX_MONITOR,
-    _in_args: *const bindings::IDARG_IN_SETSWAPCHAIN,
-) -> NTSTATUS {
-    log_line("EvtIddCxMonitorAssignSwapChain");
-    0
-}
-
-unsafe extern "C" fn evt_idd_cx_monitor_unassign_swapchain(
-    _monitor: bindings::IDDCX_MONITOR,
-) -> NTSTATUS {
-    log_line("EvtIddCxMonitorUnassignSwapChain");
-    0
 }
 
 #[cfg(test)]
