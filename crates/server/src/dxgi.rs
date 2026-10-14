@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 use tracing::{info, warn};
 use windows::Win32::Foundation::{HMODULE, RECT};
+use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
@@ -28,17 +29,16 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
-use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
 use windows::core::Interface;
 
 use crate::capture::{
-    copy_bgra_rows, mask_shape_to_rgba, CapturedFrame, CursorUpdate, FrameSource, MaskShapeKind,
-    Rect,
+    copy_bgra_rows, mask_shape_to_rgba, select_output, CapturedFrame, CursorUpdate, FrameSource,
+    MaskShapeKind, OutputCandidate, OutputSelector, Rect,
 };
 
 /// Desktop Duplication source for a single output.
 pub struct DxgiSource {
-    output_index: u32,
+    selector: OutputSelector,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
@@ -60,11 +60,11 @@ pub struct DxgiSource {
 }
 
 impl DxgiSource {
-    /// Captures `output_index` (0 = first enumerated output, usually primary).
-    pub fn new(output_index: u32) -> anyhow::Result<Self> {
-        let dup = init_duplication(output_index)?;
+    /// Captures the output picked by `selector` (see [`OutputSelector`]).
+    pub fn new(selector: &OutputSelector) -> anyhow::Result<Self> {
+        let dup = init_duplication(selector)?;
         Ok(Self {
-            output_index,
+            selector: selector.clone(),
             device: dup.device,
             context: dup.context,
             duplication: dup.duplication,
@@ -80,8 +80,8 @@ impl DxgiSource {
 
     /// Re-creates the duplication after `DXGI_ERROR_ACCESS_LOST`.
     fn reinit(&mut self) -> anyhow::Result<()> {
-        info!(output = self.output_index, "DXGI access lost, reinitializing");
-        let dup = init_duplication(self.output_index)?;
+        info!(selector = ?self.selector, "DXGI access lost, reinitializing");
+        let dup = init_duplication(&self.selector)?;
         if (dup.width, dup.height) != (self.width, self.height) {
             info!(
                 old = ?(self.width, self.height),
@@ -392,16 +392,92 @@ struct DupInit {
     height: u32,
 }
 
-/// Creates a D3D11 device and duplicates `output_index`.
-fn init_duplication(output_index: u32) -> anyhow::Result<DupInit> {
+/// One enumerated output with everything needed to duplicate it.
+struct EnumeratedOutput {
+    adapter: IDXGIAdapter1,
+    output: IDXGIOutput1,
+    candidate: OutputCandidate,
+}
+
+/// Converts a fixed-size NUL-terminated UTF-16 buffer (as DXGI uses for its
+/// description fields) to a `String`.
+fn wide_to_string(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+
+/// Enumerates every output of every adapter, adapter-major (the order
+/// `IDXGIFactory1::EnumAdapters1`/`EnumOutputs` reports them).
+fn enumerate_outputs(factory: &IDXGIFactory1) -> Vec<EnumeratedOutput> {
+    let mut out = Vec::new();
+    for adapter_idx in 0.. {
+        // SAFETY: standard enumeration; ends with DXGI_ERROR_NOT_FOUND.
+        let adapter: IDXGIAdapter1 = match unsafe { factory.EnumAdapters1(adapter_idx) } {
+            Ok(a) => a,
+            Err(_) => break,
+        };
+        // SAFETY: plain getter on a live COM object.
+        let adapter_desc = unsafe { adapter.GetDesc1() }
+            .map(|d| wide_to_string(&d.Description))
+            .unwrap_or_default();
+        for output_idx in 0.. {
+            // SAFETY: standard enumeration; ends with DXGI_ERROR_NOT_FOUND.
+            let Ok(output) = (unsafe { adapter.EnumOutputs(output_idx) }) else {
+                break;
+            };
+            // SAFETY: plain getter on a live COM object.
+            let name = unsafe { output.GetDesc() }
+                .map(|d| wide_to_string(&d.DeviceName))
+                .unwrap_or_default();
+            let Ok(output1) = output.cast::<IDXGIOutput1>() else {
+                continue;
+            };
+            out.push(EnumeratedOutput {
+                adapter: adapter.clone(),
+                output: output1,
+                candidate: OutputCandidate {
+                    adapter: adapter_desc.clone(),
+                    name,
+                    index_in_adapter: output_idx,
+                },
+            });
+        }
+    }
+    out
+}
+
+/// Selects the output matching `selector`, creates a D3D11 device on the
+/// adapter owning it (a hard requirement of `DuplicateOutput`) and
+/// duplicates it.
+fn init_duplication(selector: &OutputSelector) -> anyhow::Result<DupInit> {
+    // SAFETY: COM factory creation with a valid out-param.
+    let factory: IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
+
+    let enumerated = enumerate_outputs(&factory);
+    let candidates: Vec<OutputCandidate> =
+        enumerated.iter().map(|e| e.candidate.clone()).collect();
+    let pos = select_output(&candidates, selector).with_context(|| {
+        let available = candidates
+            .iter()
+            .map(|c| format!("{} on {}", c.name, c.adapter))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("no output matches {selector:?} (available: {available})")
+    })?;
+    let chosen = &enumerated[pos];
+
+    // DuplicateOutput rejects a D3D11 device created on a different adapter
+    // than the output's, so the device is created here, after the selection
+    // (an explicit adapter requires D3D_DRIVER_TYPE_UNKNOWN).
     let mut device: Option<ID3D11Device> = None;
     let mut context: Option<ID3D11DeviceContext> = None;
     let feature_levels = [D3D_FEATURE_LEVEL_11_0];
     // SAFETY: standard device creation; all out-params are valid.
     unsafe {
         D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
+            &chosen.adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             Some(&feature_levels),
@@ -411,53 +487,40 @@ fn init_duplication(output_index: u32) -> anyhow::Result<DupInit> {
             Some(&mut context),
         )
     }
-    .context("D3D11CreateDevice failed")?;
+    .with_context(|| {
+        format!("D3D11CreateDevice failed on adapter {}", chosen.candidate.adapter)
+    })?;
     let device = device.context("no D3D11 device returned")?;
 
-    // SAFETY: COM factory creation with valid out-params.
-    let factory: IDXGIFactory1 =
-        unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
-
-    let mut adapter_idx = 0u32;
-    loop {
-        let adapter: IDXGIAdapter1 = match unsafe { factory.EnumAdapters1(adapter_idx) } {
-            Ok(a) => a,
-            Err(_) => break,
-        };
-        if let Ok(output) = unsafe { adapter.EnumOutputs(output_index) } {
-            let output1: IDXGIOutput1 =
-                output.cast().context("output does not expose IDXGIOutput1")?;
-            let duplication = unsafe { output1.DuplicateOutput(&device) }
-                .context("DuplicateOutput failed (needs an interactive desktop session)")?;
-            let dup_desc = unsafe { duplication.GetDesc() };
-            if dup_desc.Rotation != DXGI_MODE_ROTATION_IDENTITY {
-                warn!(
-                    rotation = ?dup_desc.Rotation,
-                    "output is rotated; capture assumes identity rotation (not yet supported)"
-                );
-            }
-            anyhow::ensure!(
-                dup_desc.ModeDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
-                "unexpected desktop format {:?}",
-                dup_desc.ModeDesc.Format
-            );
-            info!(
-                output = output_index,
-                width = dup_desc.ModeDesc.Width,
-                height = dup_desc.ModeDesc.Height,
-                "DXGI duplication ready"
-            );
-            return Ok(DupInit {
-                device: device.clone(),
-                context: context.clone().context("no D3D11 device context returned")?,
-                duplication,
-                width: dup_desc.ModeDesc.Width,
-                height: dup_desc.ModeDesc.Height,
-            });
-        }
-        adapter_idx += 1;
+    // SAFETY: the output and device are alive and share the same adapter.
+    let duplication = unsafe { chosen.output.DuplicateOutput(&device) }
+        .context("DuplicateOutput failed (needs an interactive desktop session)")?;
+    let dup_desc = unsafe { duplication.GetDesc() };
+    if dup_desc.Rotation != DXGI_MODE_ROTATION_IDENTITY {
+        warn!(
+            rotation = ?dup_desc.Rotation,
+            "output is rotated; capture assumes identity rotation (not yet supported)"
+        );
     }
-    anyhow::bail!("output index {output_index} not found on any adapter")
+    anyhow::ensure!(
+        dup_desc.ModeDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
+        "unexpected desktop format {:?}",
+        dup_desc.ModeDesc.Format
+    );
+    info!(
+        adapter = %chosen.candidate.adapter,
+        output = %chosen.candidate.name,
+        width = dup_desc.ModeDesc.Width,
+        height = dup_desc.ModeDesc.Height,
+        "DXGI duplication ready"
+    );
+    Ok(DupInit {
+        device,
+        context: context.context("no D3D11 device context returned")?,
+        duplication,
+        width: dup_desc.ModeDesc.Width,
+        height: dup_desc.ModeDesc.Height,
+    })
 }
 
 #[cfg(test)]
@@ -471,7 +534,8 @@ mod tests {
     #[test]
     #[ignore = "requires an interactive Windows desktop session"]
     fn dxgi_capture_bench() {
-        let mut src = DxgiSource::new(0).expect("Desktop Duplication available");
+        let mut src =
+            DxgiSource::new(&OutputSelector::Index(0)).expect("Desktop Duplication available");
         let (w, h) = src.dimensions();
         eprintln!("output 0: {w}x{h}");
 

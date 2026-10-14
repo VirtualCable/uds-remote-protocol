@@ -188,6 +188,51 @@ pub fn mask_shape_to_rgba(
     })
 }
 
+/// Which desktop output a capture backend should capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputSelector {
+    /// Nth output of the first adapter that has one (the historical
+    /// `--output N` behavior; `0` is usually the primary monitor).
+    Index(u32),
+    /// First output whose adapter description or output device name
+    /// contains this substring, case-insensitive (e.g. `"UDS Virtual
+    /// Display"` selects the IddCx virtual monitor whichever display index
+    /// the OS gave it). Must not be empty (an empty needle would match the
+    /// first output).
+    NameContains(String),
+}
+
+/// One enumerable desktop output, as the platform backend reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputCandidate {
+    /// Description of the adapter owning the output (DXGI's
+    /// `DXGI_ADAPTER_DESC1.Description`, e.g. `"UDS Virtual Display"`).
+    pub adapter: String,
+    /// The output's device name (e.g. `\\.\DISPLAY1`).
+    pub name: String,
+    /// Output index within its adapter.
+    pub index_in_adapter: u32,
+}
+
+/// Picks the position in `candidates` (adapter-major order) that matches
+/// `selector`, or `None` when nothing matches. Pure, so the selection rules
+/// are testable off Windows.
+#[must_use]
+pub fn select_output(candidates: &[OutputCandidate], selector: &OutputSelector) -> Option<usize> {
+    match selector {
+        OutputSelector::Index(n) => candidates
+            .iter()
+            .position(|c| c.index_in_adapter == *n),
+        OutputSelector::NameContains(needle) => {
+            let needle = needle.to_lowercase();
+            candidates.iter().position(|c| {
+                c.adapter.to_lowercase().contains(&needle)
+                    || c.name.to_lowercase().contains(&needle)
+            })
+        }
+    }
+}
+
 /// A source of desktop frames.
 pub trait FrameSource {
     /// Frame geometry `(width, height)` in pixels.
@@ -370,5 +415,57 @@ mod tests {
         assert!(mask_shape_to_rgba(MaskShapeKind::Color, 0, 1, 4, 0, 0, &[0; 4]).is_none());
         // Buffer too small for declared layout.
         assert!(mask_shape_to_rgba(MaskShapeKind::Color, 4, 2, 16, 0, 0, &[0; 8]).is_none());
+    }
+
+    fn candidates() -> Vec<OutputCandidate> {
+        // Two adapters: a physical GPU with two outputs, then the IddCx
+        // virtual display with one.
+        vec![
+            OutputCandidate {
+                adapter: "Red Hat QXL controller".to_string(),
+                name: r"\\.\DISPLAY1".to_string(),
+                index_in_adapter: 0,
+            },
+            OutputCandidate {
+                adapter: "Red Hat QXL controller".to_string(),
+                name: r"\\.\DISPLAY2".to_string(),
+                index_in_adapter: 1,
+            },
+            OutputCandidate {
+                adapter: "UDS Virtual Display".to_string(),
+                name: r"\\.\DISPLAY6".to_string(),
+                index_in_adapter: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn index_selects_first_adapter_having_that_output() {
+        let c = candidates();
+        assert_eq!(select_output(&c, &OutputSelector::Index(0)), Some(0));
+        assert_eq!(select_output(&c, &OutputSelector::Index(1)), Some(1));
+        assert_eq!(select_output(&c, &OutputSelector::Index(2)), None);
+    }
+
+    #[test]
+    fn name_matches_adapter_description_case_insensitively() {
+        let c = candidates();
+        let sel = OutputSelector::NameContains("uds virtual".to_string());
+        assert_eq!(select_output(&c, &sel), Some(2));
+    }
+
+    #[test]
+    fn name_matches_output_device_name() {
+        let c = candidates();
+        let sel = OutputSelector::NameContains("display2".to_string());
+        assert_eq!(select_output(&c, &sel), Some(1));
+    }
+
+    #[test]
+    fn name_with_no_match_is_none() {
+        let c = candidates();
+        let sel = OutputSelector::NameContains("nvidia".to_string());
+        assert_eq!(select_output(&c, &sel), None);
+        assert_eq!(select_output(&[], &OutputSelector::Index(0)), None);
     }
 }

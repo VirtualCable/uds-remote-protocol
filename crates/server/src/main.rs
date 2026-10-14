@@ -2,7 +2,7 @@
 //! desktop capture (DXGI, Windows) over the protocol.
 //!
 //! Usage: `server --key <hex64> [--ticket <hex96>] [--bind host:port]
-//!                 [--source synthetic|dxgi] [--output N]
+//!                 [--source synthetic|dxgi] [--output N | --output-name SUBSTR]
 //!                 [--preset NAME] [--bitrate KBPS]
 //!                 [--width N] [--height N] [--fps N] [--max-frames N]
 //!                 [--audio-preset NAME] [--audio-source auto|synthetic|wasapi]
@@ -12,6 +12,12 @@
 //! `vp8-low-latency`); VP8/VP9 presets require the crate features
 //! `vp9`/`vp8`. The chosen codec/geometry is announced on the control
 //! channel (`DisplayInfo`) before the first frame.
+//!
+//! `--output N` captures the Nth output of the first adapter that has one
+//! (0 = primary, the default); `--output-name SUBSTR` captures the first
+//! output whose adapter description or device name contains SUBSTR
+//! (case-insensitive), e.g. `--output-name "UDS Virtual Display"` for the
+//! IddCx virtual monitor.
 //!
 //! Audio (§9) is served by default: one Opus frame (preset named by
 //! `--audio-preset`, a name from `codec::AUDIO_PRESETS`, default
@@ -55,7 +61,7 @@ struct Args {
     key: [u8; consts::KEY_LENGTH],
     ticket: Option<[u8; protocol::TICKET_LENGTH]>,
     source: String,
-    output: u32,
+    output: server::capture::OutputSelector,
     preset: String,
     bitrate: Option<u32>,
     width: u32,
@@ -74,7 +80,7 @@ fn parse_args() -> Result<Args> {
         key: [0; consts::KEY_LENGTH],
         ticket: None,
         source: "synthetic".to_string(),
-        output: 0,
+        output: server::capture::OutputSelector::Index(0),
         preset: "raw".to_string(),
         bitrate: None,
         width: 640,
@@ -102,7 +108,14 @@ fn parse_args() -> Result<Args> {
             }
             "--ticket" => args.ticket = Some(protocol::hex::decode(&value)?),
             "--source" => args.source = value,
-            "--output" => args.output = value.parse().context("bad --output")?,
+            "--output" => {
+                let n: u32 = value.parse().context("bad --output")?;
+                args.output = server::capture::OutputSelector::Index(n);
+            }
+            "--output-name" => {
+                anyhow::ensure!(!value.is_empty(), "--output-name must not be empty");
+                args.output = server::capture::OutputSelector::NameContains(value);
+            }
             "--preset" => args.preset = value,
             "--bitrate" => args.bitrate = Some(value.parse().context("bad --bitrate")?),
             "--width" => args.width = value.parse().context("bad --width")?,
@@ -208,10 +221,10 @@ fn spawn_capture(
     clock_start: Instant,
 ) -> mpsc::Receiver<CaptureMsg> {
     let kind = args.source.clone();
-    let (width, height, output) = (args.width, args.height, args.output);
+    let (width, height, output) = (args.width, args.height, args.output.clone());
     let (tx, rx) = mpsc::channel(2);
     std::thread::spawn(move || {
-        let mut source = match Source::new(&kind, output, width, height) {
+        let mut source = match Source::new(&kind, &output, width, height) {
             Ok(s) => s,
             Err(e) => {
                 let _ = tx.blocking_send(CaptureMsg::Ready(Err(e)));
@@ -1072,13 +1085,18 @@ enum Source {
 }
 
 impl Source {
-    fn new(kind: &str, output: u32, width: u32, height: u32) -> Result<Self> {
-        let _ = output; // used only by the Windows DXGI arm
+    fn new(
+        kind: &str,
+        selector: &server::capture::OutputSelector,
+        width: u32,
+        height: u32,
+    ) -> Result<Self> {
+        let _ = selector; // used only by the Windows DXGI arm
         match kind {
             "synthetic" => Ok(Self::Synthetic(SyntheticSource::new(width, height))),
             #[cfg(all(windows, feature = "windows-capture"))]
             "dxgi" => Ok(Self::Dxgi {
-                source: Box::new(server::dxgi::DxgiSource::new(output)?),
+                source: Box::new(server::dxgi::DxgiSource::new(selector)?),
                 last: None,
             }),
             other => bail!(
