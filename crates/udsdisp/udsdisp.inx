@@ -55,6 +55,12 @@ AddReg=udsdisp_HardwareDeviceSettings
 HKR,, "UpperFilters", %REG_MULTI_SZ%, "IndirectKmd"
 ; Unique group: the driver gets its own dedicated WUDFHost process.
 HKR, "WUDF", "DeviceGroupId", %REG_SZ%, "UdsVirtualDisplayGroup"
+; Loosen the device security descriptor: the default (SYSTEM + Admins) would
+; deny the IOCTL control channel to unelevated tools (the UDS agent runs as
+; SYSTEM in production, but in-session helpers and lab tooling do not).
+; UMDF has no WdfDeviceInitAssignSDDLString (KMDF-only), so the SDDL goes
+; here: Everyone gets full access to the device object.
+HKR,, "Security", %REG_SZ%, "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)"
 
 [udsdisp_Device.NT.Services]
 Include=WUDFRD.inf

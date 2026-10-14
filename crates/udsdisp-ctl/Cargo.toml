@@ -1,0 +1,24 @@
+[package]
+name = "udsdisp-ctl"
+description = "Control/verification tool for the UDS virtual display driver (Windows only)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+udsdisp = { path = "../udsdisp" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Graphics_Gdi",
+] }
+
+[lints]
+workspace = true

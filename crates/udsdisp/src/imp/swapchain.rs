@@ -122,8 +122,9 @@ pub unsafe extern "C" fn unassign(monitor: bindings::IDDCX_MONITOR) -> NTSTATUS 
 
 /// Signals the monitor's processing thread to stop, joins it and releases the
 /// stop event. The thread itself deletes the swap-chain WDF object on exit
-/// (that is what makes the OS hand us a fresh swap-chain later).
-fn stop_task(monitor: usize) {
+/// (that is what makes the OS hand us a fresh swap-chain later). Idempotent:
+/// the task is an `Option::take`, so a second stop is a no-op.
+pub(crate) fn stop_task(monitor: usize) {
     let task = shared::lock()
         .monitors
         .iter_mut()

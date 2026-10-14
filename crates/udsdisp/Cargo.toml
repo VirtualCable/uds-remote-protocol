@@ -17,7 +17,9 @@ umdf-version-major = 2
 target-umdf-version-minor = 33
 
 [lib]
-crate-type = ["cdylib"]
+# rlib in addition to the driver cdylib: udsdisp-ctl links `logic` (the
+# control protocol) from this crate.
+crate-type = ["cdylib", "rlib"]
 
 # The WDK crates only exist on Windows build machines (they require the WDK
 # at build time), so every dependency is gated to Windows and the crate

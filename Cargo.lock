@@ -2159,6 +2159,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "udsdisp-ctl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "udsdisp",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"

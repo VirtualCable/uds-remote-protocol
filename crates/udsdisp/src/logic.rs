@@ -42,6 +42,14 @@ impl Mode {
     pub const fn hsync_numerator(&self) -> u32 {
         self.vsync * self.height
     }
+
+    /// Whether the adapter can process this mode, i.e. it appears in
+    /// [`TARGET_MODES`] (the OS only exposes the intersection of monitor and
+    /// target modes, so a mode outside this list would be unreachable).
+    #[must_use]
+    pub fn is_supported(&self) -> bool {
+        TARGET_MODES.contains(self)
+    }
 }
 
 /// Maximum simultaneous virtual monitors the adapter advertises
@@ -65,12 +73,14 @@ pub const PREFERRED_DEFAULT_MODE: u32 = 0;
 /// Target modes: what the adapter can process and scan out
 /// (`EvtIddCxMonitorQueryTargetModes`). The OS exposes the intersection of
 /// the monitor modes and these target modes, so every default monitor mode
-/// must appear here or it would be unreachable.
-pub const TARGET_MODES: [Mode; 6] = [
+/// must appear here or it would be unreachable. Modes accepted through the
+/// control channel must be in this list too ([`Mode::is_supported`]).
+pub const TARGET_MODES: [Mode; 7] = [
     Mode::new(3840, 2160, 60),
     Mode::new(2560, 1440, 60),
     Mode::new(1920, 1080, 60),
     Mode::new(1600, 900, 60),
+    Mode::new(1280, 720, 60),
     Mode::new(1024, 768, 75),
     Mode::new(1024, 768, 60),
 ];
@@ -84,6 +94,177 @@ pub const TARGET_MODES: [Mode; 6] = [
 pub const fn additional_signal_info(monitor_mode: bool) -> u32 {
     let divider = if monitor_mode { 0u32 } else { 1u32 };
     255 | (divider << 16)
+}
+
+/// Builds the monitor-mode list served for a monitor whose preferred mode is
+/// `preferred`: the preferred mode first (preferred mode index is always 0),
+/// then every other target mode. The full [`TARGET_MODES`] list is served
+/// (not just the small defaults) because the OS caches the monitor mode list
+/// at arrival — `IddCxMonitorUpdateModes` re-evaluates modes but does NOT
+/// re-query `EvtIddCxMonitorGetDefaultDescriptionModes` (observed on Server
+/// 2022), so a mode absent at arrival stays unreachable for
+/// `ChangeDisplaySettingsEx`.
+#[must_use]
+pub fn modes_with_preferred(preferred: Mode) -> Vec<Mode> {
+    let mut modes = vec![preferred];
+    modes.extend(TARGET_MODES.iter().copied().filter(|m| *m != preferred));
+    modes
+}
+
+// ---------------------------------------------------------------------------
+// Control channel: the IOCTL protocol spoken between `udsdisp-ctl` (user
+// mode) and the driver's `EvtIddCxDeviceIoControl`. All bodies are fixed-size
+// little-endian; the driver validates lengths exactly.
+// ---------------------------------------------------------------------------
+
+/// Packs a Win32 `CTL_CODE` with `FILE_DEVICE_UNKNOWN` (0x22),
+/// `METHOD_BUFFERED` and `FILE_ANY_ACCESS` — the value the `IoControlCode`
+/// argument of `EvtIddCxDeviceIoControl` carries.
+#[must_use]
+pub const fn ctl_code(function: u16) -> u32 {
+    (0x22 << 16) | ((function as u32) << 2)
+}
+
+/// IOCTL: report the state of every connector (no input; output is a
+/// fixed-size [`LIST_RESPONSE_LEN`] buffer, see [`encode_list`]).
+pub const IOCTL_LIST: u32 = ctl_code(0x800);
+/// IOCTL: create and plug in a monitor (input: [`encode_create`] body).
+pub const IOCTL_CREATE: u32 = ctl_code(0x801);
+/// IOCTL: unplug and destroy a monitor (input: [`encode_connector`] body).
+pub const IOCTL_REMOVE: u32 = ctl_code(0x802);
+/// IOCTL: change the preferred mode of a live monitor (input: same body as
+/// [`encode_create`]).
+pub const IOCTL_SET_MODE: u32 = ctl_code(0x803);
+
+/// Device interface GUID the driver registers (`WdfDeviceCreateDeviceInter-
+/// face`) and the control tool enumerates (SetupAPI):
+/// `{75647364-6973-7001-8000-554453445350}` ("udsd-is-p\0\x01..." — arbitrary
+/// but stable). In memory-order bytes (GUID fields are little-endian).
+pub const DEVICE_INTERFACE_GUID_BYTES: [u8; 16] = [
+    0x64, 0x73, 0x64, 0x75, 0x73, 0x69, 0x01, 0x70, 0x80, 0x00, 0x55, 0x44, 0x53, 0x44, 0x53, 0x50,
+];
+
+/// Length of the create / set-mode request body.
+pub const MODE_REQUEST_LEN: usize = 16;
+/// Length of the remove request body (connector index only).
+pub const CONNECTOR_REQUEST_LEN: usize = 4;
+
+/// Per-connector state reported by [`IOCTL_LIST`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorStatus {
+    /// Connector index (`IDDCX_MONITOR_INFO.ConnectorIndex`) of this slot.
+    pub connector_index: u32,
+    /// Whether a monitor is currently plugged into this connector.
+    pub connected: bool,
+    /// Last mode the OS committed on this connector; zeroed when the monitor
+    /// has never committed (or when `connected` is false).
+    pub mode: Mode,
+}
+
+/// Bytes per [`MonitorStatus`] entry in the list response.
+const LIST_ENTRY_LEN: usize = 20;
+
+/// Total length of the [`IOCTL_LIST`] response: a u32 entry count followed by
+/// [`MAX_MONITORS`] fixed slots (unused slots report `connected: false`).
+pub const LIST_RESPONSE_LEN: usize = 4 + MAX_MONITORS as usize * LIST_ENTRY_LEN;
+
+/// Encodes a create / set-mode request body: connector, width, height, vsync.
+#[must_use]
+pub fn encode_mode_request(connector_index: u32, mode: Mode) -> [u8; MODE_REQUEST_LEN] {
+    let mut out = [0u8; MODE_REQUEST_LEN];
+    out[0..4].copy_from_slice(&connector_index.to_le_bytes());
+    out[4..8].copy_from_slice(&mode.width.to_le_bytes());
+    out[8..12].copy_from_slice(&mode.height.to_le_bytes());
+    out[12..16].copy_from_slice(&mode.vsync.to_le_bytes());
+    out
+}
+
+/// Decodes a create / set-mode request body; `None` on wrong length.
+#[must_use]
+pub fn decode_mode_request(buf: &[u8]) -> Option<(u32, Mode)> {
+    if buf.len() != MODE_REQUEST_LEN {
+        return None;
+    }
+    let read = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(buf[at..at + 4].try_into().ok()?))
+    };
+    Some((read(0)?, Mode::new(read(4)?, read(8)?, read(12)?)))
+}
+
+/// Encodes a remove request body (connector index).
+#[must_use]
+pub fn encode_connector(connector_index: u32) -> [u8; CONNECTOR_REQUEST_LEN] {
+    connector_index.to_le_bytes()
+}
+
+/// Decodes a remove request body; `None` on wrong length.
+#[must_use]
+pub fn decode_connector(buf: &[u8]) -> Option<u32> {
+    if buf.len() != CONNECTOR_REQUEST_LEN {
+        return None;
+    }
+    Some(u32::from_le_bytes(buf.try_into().ok()?))
+}
+
+/// Encodes the [`IOCTL_LIST`] response: always [`MAX_MONITORS`] slots.
+///
+/// # Panics
+/// Never panics for inputs produced by the driver (at most [`MAX_MONITORS`]
+/// entries); extra entries are silently truncated.
+#[must_use]
+pub fn encode_list(statuses: &[MonitorStatus]) -> [u8; LIST_RESPONSE_LEN] {
+    let mut out = [0u8; LIST_RESPONSE_LEN];
+    let count = statuses.len().min(MAX_MONITORS as usize);
+    let count32 = u32::try_from(count).unwrap_or(0);
+    out[0..4].copy_from_slice(&count32.to_le_bytes());
+    for (i, status) in statuses.iter().take(count).enumerate() {
+        let base = 4 + i * LIST_ENTRY_LEN;
+        out[base..base + 4].copy_from_slice(&status.connector_index.to_le_bytes());
+        out[base + 4..base + 8].copy_from_slice(&u32::from(status.connected).to_le_bytes());
+        out[base + 8..base + 12].copy_from_slice(&status.mode.width.to_le_bytes());
+        out[base + 12..base + 16].copy_from_slice(&status.mode.height.to_le_bytes());
+        out[base + 16..base + 20].copy_from_slice(&status.mode.vsync.to_le_bytes());
+    }
+    out
+}
+
+/// Decodes an [`IOCTL_LIST`] response; `None` on wrong length or a count that
+/// does not match the buffer.
+#[must_use]
+pub fn decode_list(buf: &[u8]) -> Option<Vec<MonitorStatus>> {
+    if buf.len() != LIST_RESPONSE_LEN {
+        return None;
+    }
+    let count = u32::from_le_bytes(buf[0..4].try_into().ok()?) as usize;
+    if count > MAX_MONITORS as usize {
+        return None;
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = 4 + i * LIST_ENTRY_LEN;
+        let entry = &buf[base..base + LIST_ENTRY_LEN];
+        let read = |at: usize| -> Option<u32> {
+            Some(u32::from_le_bytes(entry[at..at + 4].try_into().ok()?))
+        };
+        out.push(MonitorStatus {
+            connector_index: read(0)?,
+            connected: read(4)? != 0,
+            mode: Mode::new(read(8)?, read(12)?, read(16)?),
+        });
+    }
+    Some(out)
+}
+
+/// Parses a mode in `WxH@HZ` form; the `@HZ` part is optional and defaults to
+/// 60 Hz. This is the CLI syntax of `udsdisp-ctl`.
+#[must_use]
+pub fn parse_mode(text: &str) -> Option<Mode> {
+    let (res, vsync) = match text.split_once('@') {
+        Some((res, vsync)) => (res, vsync.parse().ok()?),
+        None => (text, 60),
+    };
+    let (w, h) = res.split_once(['x', 'X'])?;
+    Some(Mode::new(w.parse().ok()?, h.parse().ok()?, vsync))
 }
 
 #[cfg(test)]
@@ -124,5 +305,97 @@ mod tests {
                 "{default:?} missing from target modes"
             );
         }
+    }
+
+    #[test]
+    fn ctl_codes_match_ctl_code_layout() {
+        // FILE_DEVICE_UNKNOWN (0x22) << 16 | function << 2, METHOD_BUFFERED,
+        // FILE_ANY_ACCESS — same values as the audio driver's control codes.
+        assert_eq!(IOCTL_LIST, 0x0022_2000);
+        assert_eq!(IOCTL_CREATE, 0x0022_2004);
+        assert_eq!(IOCTL_REMOVE, 0x0022_2008);
+        assert_eq!(IOCTL_SET_MODE, 0x0022_200C);
+    }
+
+    #[test]
+    fn mode_request_roundtrips() {
+        let mode = Mode::new(1280, 720, 60);
+        let body = encode_mode_request(3, mode);
+        assert_eq!(decode_mode_request(&body), Some((3, mode)));
+        assert_eq!(decode_mode_request(&body[..8]), None);
+        assert_eq!(decode_mode_request(&[]), None);
+    }
+
+    #[test]
+    fn connector_request_roundtrips() {
+        let body = encode_connector(2);
+        assert_eq!(decode_connector(&body), Some(2));
+        assert_eq!(decode_connector(&body[..3]), None);
+    }
+
+    #[test]
+    fn list_response_roundtrips() {
+        let statuses = vec![
+            MonitorStatus {
+                connector_index: 0,
+                connected: true,
+                mode: Mode::new(1920, 1080, 60),
+            },
+            MonitorStatus {
+                connector_index: 1,
+                connected: true,
+                mode: Mode::new(1280, 720, 60),
+            },
+            MonitorStatus {
+                connector_index: 2,
+                connected: false,
+                mode: Mode::new(0, 0, 0),
+            },
+            MonitorStatus {
+                connector_index: 3,
+                connected: false,
+                mode: Mode::new(0, 0, 0),
+            },
+        ];
+        let bytes = encode_list(&statuses);
+        assert_eq!(bytes.len(), LIST_RESPONSE_LEN);
+        assert_eq!(decode_list(&bytes), Some(statuses));
+        assert_eq!(decode_list(&bytes[..LIST_RESPONSE_LEN - 1]), None);
+    }
+
+    #[test]
+    fn list_response_rejects_bad_count() {
+        let mut bytes = encode_list(&[]);
+        bytes[0..4].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(decode_list(&bytes), None);
+    }
+
+    #[test]
+    fn modes_with_preferred_puts_it_first_without_duplicates() {
+        let modes = modes_with_preferred(Mode::new(2560, 1440, 60));
+        assert_eq!(modes[0], Mode::new(2560, 1440, 60));
+        assert_eq!(modes.len(), TARGET_MODES.len());
+
+        // A preferred mode that is already a target mode must not duplicate.
+        let modes = modes_with_preferred(TARGET_MODES[2]);
+        assert_eq!(modes[0], TARGET_MODES[2]);
+        assert_eq!(modes.len(), TARGET_MODES.len());
+    }
+
+    #[test]
+    fn parse_mode_accepts_full_and_short_forms() {
+        assert_eq!(parse_mode("1280x720@60"), Some(Mode::new(1280, 720, 60)));
+        assert_eq!(parse_mode("1280x720"), Some(Mode::new(1280, 720, 60)));
+        assert_eq!(parse_mode("2560X1440@75"), Some(Mode::new(2560, 1440, 75)));
+        assert_eq!(parse_mode("1280x"), None);
+        assert_eq!(parse_mode("1280x720@hz"), None);
+        assert_eq!(parse_mode(""), None);
+    }
+
+    #[test]
+    fn supported_modes_cover_control_requests() {
+        assert!(Mode::new(1280, 720, 60).is_supported());
+        assert!(Mode::new(2560, 1440, 60).is_supported());
+        assert!(!Mode::new(640, 480, 60).is_supported());
     }
 }

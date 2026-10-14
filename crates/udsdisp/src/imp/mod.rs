@@ -1,6 +1,7 @@
 //! Windows implementation of the UDS Virtual Display driver (UMDF).
 
 mod adapter;
+mod control;
 mod iddcx;
 mod monitor;
 mod shared;
@@ -14,6 +15,8 @@ use wdk_sys::{
     WDF_DRIVER_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES, WDF_PNPPOWER_EVENT_CALLBACKS,
     call_unsafe_wdf_function_binding,
 };
+
+use crate::logic;
 
 /// Appends one line to the driver's log file and to the debug output.
 ///
@@ -130,6 +133,8 @@ extern "C" fn evt_driver_device_add(
     idd_config.EvtIddCxMonitorQueryTargetModes = Some(monitor::query_target_modes);
     idd_config.EvtIddCxMonitorAssignSwapChain = Some(swapchain::assign);
     idd_config.EvtIddCxMonitorUnassignSwapChain = Some(swapchain::unassign);
+    // Control channel for udsdisp-ctl (hot-plug, dynamic modes).
+    idd_config.EvtIddCxDeviceIoControl = Some(control::device_io_control);
     // SAFETY: `device_init` comes from the framework and is valid; the config
     // is zeroed except for its size, exactly like IDD_CX_CLIENT_CONFIG_INIT.
     let status = unsafe { iddcx::device_init_config(device_init, &mut idd_config) };
@@ -149,6 +154,31 @@ extern "C" fn evt_driver_device_add(
         )
     };
     log_line(&format!("WdfDeviceCreate -> {status:#010x}"));
+    if status < 0 {
+        return status;
+    }
+
+    // Advertise the control device interface so udsdisp-ctl can find this
+    // device by GUID through SetupAPI (the UMDF equivalent of the audio
+    // driver's `\\.\UDSAudioCtl` symlink).
+    let guid_bytes = logic::DEVICE_INTERFACE_GUID_BYTES;
+    let interface_guid = wdk_sys::GUID {
+        Data1: u32::from_le_bytes(guid_bytes[0..4].try_into().expect("16-byte GUID")),
+        Data2: u16::from_le_bytes(guid_bytes[4..6].try_into().expect("16-byte GUID")),
+        Data3: u16::from_le_bytes(guid_bytes[6..8].try_into().expect("16-byte GUID")),
+        Data4: guid_bytes[8..16].try_into().expect("16-byte GUID"),
+    };
+    // SAFETY: `device` was just created; the GUID outlives the call and the
+    // reference string may be null.
+    let status = unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfDeviceCreateDeviceInterface,
+            device,
+            core::ptr::from_ref(&interface_guid),
+            core::ptr::null::<wdk_sys::UNICODE_STRING>(),
+        )
+    };
+    log_line(&format!("WdfDeviceCreateDeviceInterface -> {status:#010x}"));
     if status < 0 {
         return status;
     }

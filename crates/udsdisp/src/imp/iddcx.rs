@@ -77,15 +77,18 @@ pub(crate) use call_iddcx;
 
 use bindings::{
     IDARG_IN_ADAPTER_INIT, IDARG_IN_GETDIRTYRECTS, IDARG_IN_MONITORCREATE, IDARG_IN_SWAPCHAINSETDEVICE,
-    IDARG_OUT_ADAPTER_INIT, IDARG_OUT_GETDIRTYRECTS, IDARG_OUT_GETVERSION, IDARG_OUT_MONITORARRIVAL,
-    IDARG_OUT_MONITORCREATE, IDARG_OUT_RELEASEANDACQUIREBUFFER, IDDCX_ADAPTER, IDDCX_MONITOR,
-    IDDCX_SWAPCHAIN, IDD_CX_CLIENT_CONFIG, PFN_IDDCXADAPTERINITASYNC, PFN_IDDCXDEVICEINITCONFIG,
-    PFN_IDDCXDEVICEINITIALIZE, PFN_IDDCXGETVERSION, PFN_IDDCXMONITORARRIVAL, PFN_IDDCXMONITORCREATE,
-    PFN_IDDCXSWAPCHAINFINISHEDPROCESSINGFRAME, PFN_IDDCXSWAPCHAINGETDIRTYRECTS,
-    PFN_IDDCXSWAPCHAINRELEASEANDACQUIREBUFFER, PFN_IDDCXSWAPCHAINSETDEVICE, RECT,
+    IDARG_IN_UPDATEMODES, IDARG_OUT_ADAPTER_INIT, IDARG_OUT_GETDIRTYRECTS, IDARG_OUT_GETVERSION,
+    IDARG_OUT_MONITORARRIVAL, IDARG_OUT_MONITORCREATE, IDARG_OUT_RELEASEANDACQUIREBUFFER,
+    IDDCX_ADAPTER, IDDCX_MONITOR, IDDCX_SWAPCHAIN, IDD_CX_CLIENT_CONFIG, PFN_IDDCXADAPTERINITASYNC,
+    PFN_IDDCXDEVICEINITCONFIG, PFN_IDDCXDEVICEINITIALIZE, PFN_IDDCXGETVERSION,
+    PFN_IDDCXMONITORARRIVAL, PFN_IDDCXMONITORCREATE, PFN_IDDCXMONITORDEPARTURE,
+    PFN_IDDCXMONITORUPDATEMODES, PFN_IDDCXSWAPCHAINFINISHEDPROCESSINGFRAME,
+    PFN_IDDCXSWAPCHAINGETDIRTYRECTS, PFN_IDDCXSWAPCHAINRELEASEANDACQUIREBUFFER,
+    PFN_IDDCXSWAPCHAINSETDEVICE, RECT,
     _IDDFUNCENUM_IddCxAdapterInitAsyncTableIndex, _IDDFUNCENUM_IddCxDeviceInitConfigTableIndex,
     _IDDFUNCENUM_IddCxDeviceInitializeTableIndex, _IDDFUNCENUM_IddCxGetVersionTableIndex,
     _IDDFUNCENUM_IddCxMonitorArrivalTableIndex, _IDDFUNCENUM_IddCxMonitorCreateTableIndex,
+    _IDDFUNCENUM_IddCxMonitorDepartureTableIndex, _IDDFUNCENUM_IddCxMonitorUpdateModesTableIndex,
     _IDDFUNCENUM_IddCxSwapChainFinishedProcessingFrameTableIndex,
     _IDDFUNCENUM_IddCxSwapChainGetDirtyRectsTableIndex,
     _IDDFUNCENUM_IddCxSwapChainReleaseAndAcquireBufferTableIndex,
@@ -210,6 +213,41 @@ pub unsafe fn monitor_arrival(monitor: IDDCX_MONITOR) -> (NTSTATUS, IDARG_OUT_MO
         core::ptr::from_mut(&mut out),
     );
     (status, out)
+}
+
+/// `IddCxMonitorDeparture`: reports the monitor as unplugged. The OS unassigns
+/// the swap-chain first; after this returns the monitor object can be deleted
+/// with `WdfObjectDelete`.
+///
+/// # Safety
+/// `monitor` must be a live monitor handle from [`monitor_create`] that was
+/// reported with [`monitor_arrival`].
+pub unsafe fn monitor_departure(monitor: IDDCX_MONITOR) -> NTSTATUS {
+    // SAFETY: guaranteed by the caller.
+    call_iddcx!(
+        PFN_IDDCXMONITORDEPARTURE,
+        _IDDFUNCENUM_IddCxMonitorDepartureTableIndex,
+        monitor,
+    )
+}
+
+/// `IddCxMonitorUpdateModes`: hands the OS a new target-mode list for a live
+/// monitor and forces a mode re-evaluation (the dynamic-resolution path).
+///
+/// # Safety
+/// `monitor` must be a live, arrived monitor handle and `in_args.pTargetModes`
+/// must point to `in_args.TargetModeCount` valid `IDDCX_TARGET_MODE` entries.
+pub unsafe fn monitor_update_modes(
+    monitor: IDDCX_MONITOR,
+    in_args: &IDARG_IN_UPDATEMODES,
+) -> NTSTATUS {
+    // SAFETY: guaranteed by the caller.
+    call_iddcx!(
+        PFN_IDDCXMONITORUPDATEMODES,
+        _IDDFUNCENUM_IddCxMonitorUpdateModesTableIndex,
+        monitor,
+        core::ptr::from_ref(in_args),
+    )
 }
 
 /// `IddCxSwapChainSetDevice`: hands the DXGI device that will process frames

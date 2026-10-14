@@ -8,6 +8,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::swapchain;
+use crate::logic;
 
 /// Per-monitor runtime state.
 pub struct MonitorEntry {
@@ -16,6 +17,12 @@ pub struct MonitorEntry {
     pub handle: usize,
     /// Connector index this monitor was created with.
     pub connector_index: u32,
+    /// Mode list served for this monitor in
+    /// `EvtIddCxMonitorGetDefaultDescriptionModes` (index 0 is the preferred
+    /// mode). Starts as the defaults; `set-mode` requests rewrite it.
+    pub modes: Vec<logic::Mode>,
+    /// Last mode the OS committed on this monitor (`EvtIddCxAdapterCommitModes`).
+    pub current_mode: Option<logic::Mode>,
     /// Active swap-chain processing task, if the OS has assigned one.
     pub swapchain_task: Option<swapchain::Task>,
 }

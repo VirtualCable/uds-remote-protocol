@@ -91,7 +91,12 @@ pub unsafe extern "C" fn on_init_finished(
     let init_status = unsafe { (*in_args).AdapterInitStatus };
     log_line(&format!("EvtIddCxAdapterInitFinished status={init_status:#010x}"));
     if init_status >= 0 {
-        monitor::create_and_arrive(adapter, 0);
+        let status = monitor::create_and_arrive(
+            adapter,
+            0,
+            logic::modes_with_preferred(logic::DEFAULT_MONITOR_MODES[0]),
+        );
+        log_line(&format!("default monitor create_and_arrive -> {status:#010x}"));
     }
     0
 }
