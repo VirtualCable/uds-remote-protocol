@@ -8,26 +8,39 @@
 //! (exactly like the credential store), pinned for the process lifetime so
 //! the DLL is never unloaded while the thread runs. Any pipe error (service
 //! restart, broken pipe) triggers a reconnect with backoff.
+//!
+//! All pipe I/O is overlapped: handles opened without `FILE_FLAG_OVERLAPPED`
+//! get their operations serialized by the I/O manager, which would block a
+//! `WriteFile` (e.g. `ReportResult` from the LogonUI thread) behind the read
+//! loop's outstanding `ReadFile` until the service talked again.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
 use std::time::Duration;
 
-use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, HMODULE};
-use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, OPEN_EXISTING, ReadFile, WriteFile,
+use windows::Win32::Foundation::{
+    ERROR_FILE_NOT_FOUND, ERROR_IO_PENDING, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, HMODULE,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
-use windows::Win32::System::LibraryLoader::{GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleHandleExW};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_FLAG_OVERLAPPED, OPEN_EXISTING, ReadFile, WriteFile,
+};
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::LibraryLoader::{
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleHandleExW,
+};
 use windows::Win32::System::Pipes::WaitNamedPipeW;
+use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
 use windows::core::{HRESULT, PCWSTR};
 
 use crate::imp::credentials::{provider, store};
 use crate::imp::utils::log::{debug, error, info};
 use crate::imp::utils::safe::SafeHandle;
-use crate::logic::{
-    self, FrameDecoder, Request, RequestKind, Response,
-};
+use crate::logic::{self, FrameDecoder, Request, RequestKind, Response};
 use crate::{debug_dev, debug_flow};
+
+/// How long a response write may stay pending before we give up on it.
+const WRITE_TIMEOUT_MS: u32 = 10_000;
 
 /// Shared write endpoint: `Some` while a pipe connection is established.
 /// Both the read loop (acks, pongs) and `ReportResult` (logon results)
@@ -67,6 +80,17 @@ fn pin_dll() {
     };
 }
 
+/// Creates a manual-reset event for an overlapped operation.
+fn new_event() -> Option<SafeHandle> {
+    match unsafe { CreateEventW(None, true, false, PCWSTR::null()) } {
+        Ok(event) => Some(SafeHandle::new(event)),
+        Err(e) => {
+            error!("CreateEventW failed: {e:?}");
+            None
+        }
+    }
+}
+
 /// Sends a response frame if connected. Errors are logged and swallowed:
 /// the pipe is a reporting channel and must never break the logon flow.
 pub fn send_response(pipe: &SharedPipe, response: &Response) {
@@ -79,13 +103,8 @@ pub fn send_response(pipe: &SharedPipe, response: &Response) {
     };
     let handle = pipe.lock().unwrap().clone();
     if let Some(handle) = handle {
-        let mut written = 0u32;
-        let ok = unsafe {
-            WriteFile(handle.get(), Some(&frame), Some(&mut written), None).is_ok()
-                && written as usize == frame.len()
-        };
-        if !ok {
-            error!("Failed to write response to pipe; dropping the connection");
+        if let Err(e) = write_frame(&handle, &frame) {
+            error!("Failed to write response to pipe ({e:?}); dropping the connection");
             // Force the read loop into its reconnect path
             handle.clear();
             pipe.lock().unwrap().take();
@@ -93,6 +112,51 @@ pub fn send_response(pipe: &SharedPipe, response: &Response) {
     } else {
         debug_dev!("No pipe connection; dropping response {:?}", kind_of(response));
     }
+}
+
+/// Overlapped write of one frame, so it never queues behind the read loop's
+/// outstanding read on the same handle.
+fn write_frame(handle: &SafeHandle, frame: &[u8]) -> windows::core::Result<()> {
+    let Some(event) = new_event() else {
+        return Err(windows::core::Error::from_thread());
+    };
+    let mut overlapped = OVERLAPPED {
+        hEvent: event.get(),
+        ..OVERLAPPED::default()
+    };
+    let mut written = 0u32;
+    let result = unsafe {
+        WriteFile(
+            handle.get(),
+            Some(frame),
+            Some(&mut written),
+            Some(&mut overlapped),
+        )
+    };
+    if let Err(e) = result {
+        if e.code() != HRESULT::from_win32(ERROR_IO_PENDING.0) {
+            return Err(e);
+        }
+        let wait = unsafe { WaitForSingleObject(event.get(), WRITE_TIMEOUT_MS) };
+        if wait == WAIT_TIMEOUT {
+            let _ = unsafe { CancelIoEx(handle.get(), Some(&overlapped)) };
+            return Err(windows::core::Error::from_hresult(HRESULT::from_win32(
+                WAIT_TIMEOUT.0,
+            )));
+        }
+        if wait != WAIT_OBJECT_0 {
+            return Err(windows::core::Error::from_thread());
+        }
+        unsafe {
+            GetOverlappedResult(handle.get(), &overlapped, &mut written, false)?;
+        }
+    }
+    if written as usize != frame.len() {
+        return Err(windows::core::Error::from_hresult(HRESULT::from_win32(
+            windows::Win32::Foundation::ERROR_WRITE_FAULT.0,
+        )));
+    }
+    Ok(())
 }
 
 fn kind_of(response: &Response) -> &'static str {
@@ -119,7 +183,7 @@ fn connect() -> Option<SafeHandle> {
                 windows::Win32::Storage::FileSystem::FILE_SHARE_MODE(0),
                 None,
                 OPEN_EXISTING,
-                FILE_FLAGS_AND_ATTRIBUTES(0),
+                FILE_FLAG_OVERLAPPED,
                 None,
             )
         };
@@ -199,34 +263,57 @@ fn session(handle: SafeHandle, pipe: &SharedPipe) {
         },
     );
 
+    let Some(event) = new_event() else {
+        return;
+    };
     let mut decoder = FrameDecoder::new();
     let mut buf = [0u8; 2048];
-    loop {
+    'outer: loop {
+        let mut overlapped = OVERLAPPED {
+            hEvent: event.get(),
+            ..OVERLAPPED::default()
+        };
         let mut read = 0u32;
-        let result = unsafe { ReadFile(handle.get(), Some(&mut buf), Some(&mut read), None) };
-        match result {
-            Ok(()) => {
-                if read == 0 {
-                    continue;
-                }
-                if let Err(e) = decoder.feed(&buf[..read as usize]) {
-                    error!("Pipe protocol error: {e}; reconnecting");
-                    break;
-                }
-                loop {
-                    match decoder.next_request() {
-                        Ok(Some(request)) => dispatch(pipe, &request),
-                        Ok(None) => break,
-                        Err(e) => {
-                            error!("Pipe frame decode error: {e}; reconnecting");
-                            return;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
+        let result = unsafe {
+            ReadFile(
+                handle.get(),
+                Some(&mut buf),
+                Some(&mut read),
+                Some(&mut overlapped),
+            )
+        };
+        if let Err(e) = result {
+            if e.code() != HRESULT::from_win32(ERROR_IO_PENDING.0) {
                 debug!("Pipe read failed ({e:?}); reconnecting");
                 break;
+            }
+            let wait = unsafe { WaitForSingleObject(event.get(), INFINITE) };
+            if wait != WAIT_OBJECT_0 {
+                debug!("Pipe read wait failed ({wait:?}); reconnecting");
+                break;
+            }
+            if let Err(e) =
+                unsafe { GetOverlappedResult(handle.get(), &overlapped, &mut read, false) }
+            {
+                debug!("Pipe read failed ({e:?}); reconnecting");
+                break;
+            }
+        }
+        if read == 0 {
+            continue;
+        }
+        if let Err(e) = decoder.feed(&buf[..read as usize]) {
+            error!("Pipe protocol error: {e}; reconnecting");
+            break;
+        }
+        loop {
+            match decoder.next_request() {
+                Ok(Some(request)) => dispatch(pipe, &request),
+                Ok(None) => break,
+                Err(e) => {
+                    error!("Pipe frame decode error: {e}; reconnecting");
+                    break 'outer;
+                }
             }
         }
     }
