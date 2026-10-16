@@ -54,9 +54,9 @@ RUN git clone https://github.com/microsoft/vcpkg $env:VCPKG_ROOT ; \
 # highest SDK version — installing WDK on top of the same-version SDK is the
 # validated combo; see doc/plan/driver-audio-windows.md traps).
 # Silent full-feature installs; ~several GB download.
-RUN Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/?linkid=2249912 -OutFile winsdksetup.exe; \
+RUN Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/?linkid=2311806 -OutFile winsdksetup.exe; \
     Start-Process -FilePath .\winsdksetup.exe -ArgumentList "'/q /features +'" -Wait; \
     Remove-Item winsdksetup.exe; \
-    Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/?linkid=2249371 -OutFile wdksetup.exe; \
+    Invoke-WebRequest -Uri https://go.microsoft.com/fwlink/?linkid=2196230 -OutFile wdksetup.exe; \
     Start-Process -FilePath .\wdksetup.exe -ArgumentList "'/q'" -Wait; \
     Remove-Item wdksetup.exe
