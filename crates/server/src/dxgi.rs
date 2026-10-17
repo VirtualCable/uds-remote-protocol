@@ -30,6 +30,7 @@ use windows::Win32::Graphics::Dxgi::{
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
 use windows::core::Interface;
+use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
 
 use crate::capture::{
     copy_bgra_rows, mask_shape_to_rgba, select_output, CapturedFrame, CursorUpdate, FrameSource,
@@ -406,6 +407,34 @@ fn wide_to_string(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..end])
 }
 
+/// Resolves the GDI device string (monitor description, e.g. `"UDS Virtual
+/// Display"`) for a DXGI output device name (`\\.\DISPLAYn`). DXGI may
+/// report an IddCx output under a generic adapter ("Microsoft Basic Render
+/// Driver"), so this GDI string is the reliable identity of the monitor.
+/// Returns an empty string when it cannot be resolved.
+fn gdi_device_string(device_name: &str) -> String {
+    let name_wide: Vec<u16> = device_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut dd = DISPLAY_DEVICEW {
+        cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+        ..DISPLAY_DEVICEW::default()
+    };
+    // SAFETY: `dd` is a valid, correctly sized out buffer and `name_wide` is
+    // NUL-terminated for the whole call.
+    let ok = unsafe {
+        EnumDisplayDevicesW(
+            windows::core::PCWSTR(name_wide.as_ptr()),
+            0,
+            &mut dd,
+            0,
+        )
+    };
+    if ok.as_bool() {
+        wide_to_string(&dd.DeviceString)
+    } else {
+        String::new()
+    }
+}
+
 /// Enumerates every output of every adapter, adapter-major (the order
 /// `IDXGIFactory1::EnumAdapters1`/`EnumOutputs` reports them).
 fn enumerate_outputs(factory: &IDXGIFactory1) -> Vec<EnumeratedOutput> {
@@ -432,12 +461,14 @@ fn enumerate_outputs(factory: &IDXGIFactory1) -> Vec<EnumeratedOutput> {
             let Ok(output1) = output.cast::<IDXGIOutput1>() else {
                 continue;
             };
+            let gdi_name = gdi_device_string(&name);
             out.push(EnumeratedOutput {
                 adapter: adapter.clone(),
                 output: output1,
                 candidate: OutputCandidate {
                     adapter: adapter_desc.clone(),
                     name,
+                    gdi_name,
                     index_in_adapter: output_idx,
                 },
             });

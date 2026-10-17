@@ -210,6 +210,13 @@ pub struct OutputCandidate {
     pub adapter: String,
     /// The output's device name (e.g. `\\.\DISPLAY1`).
     pub name: String,
+    /// The output's GDI device string (`EnumDisplayDevicesW`'s
+    /// `DeviceString`, the monitor description). DXGI can report a virtual
+    /// (IddCx) output under a generic adapter such as "Microsoft Basic
+    /// Render Driver", hiding its own adapter description, so this GDI
+    /// string is the reliable way to identify a specific monitor. Empty
+    /// when the backend cannot resolve it.
+    pub gdi_name: String,
     /// Output index within its adapter.
     pub index_in_adapter: u32,
 }
@@ -228,6 +235,7 @@ pub fn select_output(candidates: &[OutputCandidate], selector: &OutputSelector) 
             candidates.iter().position(|c| {
                 c.adapter.to_lowercase().contains(&needle)
                     || c.name.to_lowercase().contains(&needle)
+                    || c.gdi_name.to_lowercase().contains(&needle)
             })
         }
     }
@@ -424,16 +432,19 @@ mod tests {
             OutputCandidate {
                 adapter: "Red Hat QXL controller".to_string(),
                 name: r"\\.\DISPLAY1".to_string(),
+                gdi_name: "QXL monitor".to_string(),
                 index_in_adapter: 0,
             },
             OutputCandidate {
                 adapter: "Red Hat QXL controller".to_string(),
                 name: r"\\.\DISPLAY2".to_string(),
+                gdi_name: "QXL monitor".to_string(),
                 index_in_adapter: 1,
             },
             OutputCandidate {
                 adapter: "UDS Virtual Display".to_string(),
                 name: r"\\.\DISPLAY6".to_string(),
+                gdi_name: "UDS Virtual Display".to_string(),
                 index_in_adapter: 0,
             },
         ]
@@ -467,5 +478,28 @@ mod tests {
         let sel = OutputSelector::NameContains("nvidia".to_string());
         assert_eq!(select_output(&c, &sel), None);
         assert_eq!(select_output(&[], &OutputSelector::Index(0)), None);
+    }
+
+    #[test]
+    fn name_matches_gdi_device_string_when_dxgi_hides_the_adapter() {
+        // On hosts rendering through the Microsoft Basic Render Driver,
+        // DXGI reports the IddCx output under that generic adapter, so only
+        // the GDI device string still identifies our virtual monitor.
+        let c = vec![
+            OutputCandidate {
+                adapter: "Microsoft Basic Render Driver".to_string(),
+                name: r"\\.\DISPLAY1".to_string(),
+                gdi_name: "Generic PnP Monitor".to_string(),
+                index_in_adapter: 0,
+            },
+            OutputCandidate {
+                adapter: "Microsoft Basic Render Driver".to_string(),
+                name: r"\\.\DISPLAY2".to_string(),
+                gdi_name: "UDS Virtual Display".to_string(),
+                index_in_adapter: 1,
+            },
+        ];
+        let sel = OutputSelector::NameContains("UDS Virtual Display".to_string());
+        assert_eq!(select_output(&c, &sel), Some(1));
     }
 }
