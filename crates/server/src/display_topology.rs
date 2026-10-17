@@ -166,6 +166,8 @@ fn attach_display(device_name: &str, width: u32, height: u32, vsync: u32) -> any
 /// display's own mode list, so the attach uses a `DEVMODE` the driver
 /// accepts verbatim.
 fn find_driver_mode(device_wide: &[u16], width: u32, height: u32, vsync: u32) -> Option<DEVMODEW> {
+    let mut listed: Vec<String> = Vec::new();
+    let mut found = None;
     for i in 0.. {
         let mut devmode = DEVMODEW {
             dmSize: size_of::<DEVMODEW>() as u16,
@@ -182,16 +184,31 @@ fn find_driver_mode(device_wide: &[u16], width: u32, height: u32, vsync: u32) ->
         }
         .as_bool()
         {
-            return None;
+            break;
         }
-        if devmode.dmPelsWidth == width
+        if listed.len() < 8 {
+            listed.push(format!(
+                "{}x{}@{} bpp={}",
+                devmode.dmPelsWidth,
+                devmode.dmPelsHeight,
+                devmode.dmDisplayFrequency,
+                devmode.dmBitsPerPel
+            ));
+        }
+        if found.is_none()
+            && devmode.dmPelsWidth == width
             && devmode.dmPelsHeight == height
             && devmode.dmDisplayFrequency == vsync
         {
-            return Some(devmode);
+            found = Some(devmode);
         }
     }
-    None
+    info!(
+        modes = ?listed,
+        matched = found.is_some(),
+        "driver mode list for the display"
+    );
+    found
 }
 
 /// Lossy string from a null-terminated UTF-16 fixed buffer.
