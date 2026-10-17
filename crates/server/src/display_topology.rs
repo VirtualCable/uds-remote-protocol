@@ -123,10 +123,15 @@ fn current_devmode(device_name: &str) -> Option<DEVMODEW> {
 /// Whether the display device `dd` (an adapter entry from the desktop
 /// enumeration) is one of our IddCx virtual displays. The adapter's own
 /// `DeviceString` may read "Microsoft Basic Render Driver" on hosts without
-/// a real GPU, hiding our marker, so the connected monitor's `DeviceString`
-/// (the reliable identity, same rule as capture's `gdi_name`) is checked too.
+/// a real GPU, hiding our marker, so the `DeviceID`s (the adapter's carries
+/// `ROOT\udsdisp` from our INF) and the connected monitors' strings are
+/// checked too — same identity rule as capture's `gdi_name`.
 fn is_uds_display(dd: &DISPLAY_DEVICEW) -> bool {
-    if utf16_z(&dd.DeviceString).contains(UDS_DISPLAY_MARKER) {
+    let matches = |s: &str| {
+        let s = s.to_lowercase();
+        s.contains(&UDS_DISPLAY_MARKER.to_lowercase()) || s.contains("udsdisp")
+    };
+    if matches(&utf16_z(&dd.DeviceString)) || matches(&utf16_z(&dd.DeviceID)) {
         return true;
     }
     let wide: Vec<u16> = utf16_z(&dd.DeviceName).encode_utf16().chain(std::iter::once(0)).collect();
@@ -141,7 +146,7 @@ fn is_uds_display(dd: &DISPLAY_DEVICEW) -> bool {
         {
             break;
         }
-        if utf16_z(&mon.DeviceString).contains(UDS_DISPLAY_MARKER) {
+        if matches(&utf16_z(&mon.DeviceString)) || matches(&utf16_z(&mon.DeviceID)) {
             return true;
         }
     }
