@@ -74,6 +74,7 @@ fn stack_uds_displays_below(height: u32) {
         }
     }
     if uds.is_empty() || bottom == 0 {
+        info!(uds_displays = uds.len(), bottom, "no UDS display stacking needed");
         return;
     }
     for (i, name) in uds.iter().enumerate() {
