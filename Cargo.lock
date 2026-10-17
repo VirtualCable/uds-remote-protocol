@@ -1832,6 +1832,7 @@ dependencies = [
  "tracing-subscriber",
  "transport",
  "turbojpeg",
+ "udsdisp-ctl",
  "webp",
  "windows 0.62.2",
 ]

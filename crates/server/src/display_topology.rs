@@ -8,6 +8,7 @@
 //! from session 0 do not stick — so it lives in the agent, not the service.
 
 use anyhow::{Context as _, bail};
+use std::time::Duration;
 use tracing::{info, warn};
 use windows::Win32::Graphics::Gdi::{
     CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
@@ -51,11 +52,56 @@ fn ensure_inner(width: u32, height: u32, vsync: u32) -> anyhow::Result<u32> {
             continue;
         }
         let name = utf16_z(&dd.DeviceName);
+        // The IddCx-native nudge (`IddCxMonitorUpdateModes`) makes the OS
+        // re-evaluate the monitor and attach it on its own; the GDI attach
+        // below is the fallback for when that does not happen.
+        nudge_driver_modes(width, height, vsync);
+        std::thread::sleep(Duration::from_millis(500));
+        if is_attached(&name) {
+            info!(device = name, "display attached to the desktop after the driver mode update");
+            attached += 1;
+            continue;
+        }
         attach_display(&name, width, height, vsync)
             .with_context(|| format!("attaching {name} to the desktop"))?;
         attached += 1;
     }
     Ok(attached)
+}
+
+/// Whether `\\.\DISPLAYn` is currently part of the desktop.
+fn is_attached(device_name: &str) -> bool {
+    let wide: Vec<u16> = device_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut dd = DISPLAY_DEVICEW {
+        cb: size_of::<DISPLAY_DEVICEW>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `wide` is null-terminated; `dd` is a correctly sized
+    // out-struct. iDevNum 0 is ignored when a device name is given.
+    if !unsafe { EnumDisplayDevicesW(PCWSTR(wide.as_ptr()), 0, &mut dd, 0) }.as_bool() {
+        return false;
+    }
+    dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP == DISPLAY_DEVICE_ATTACHED_TO_DESKTOP
+}
+
+/// Re-pushes the requested mode to every connected monitor of our IddCx
+/// driver. `IddCxMonitorUpdateModes` forces the OS to re-evaluate the
+/// monitor, which attaches it to the desktop when it was left detached.
+/// Best effort: a missing driver is not an error here.
+fn nudge_driver_modes(width: u32, height: u32, vsync: u32) {
+    let nudge = || -> anyhow::Result<()> {
+        let client = udsdisp_client::client::Client::open()?;
+        let mode = udsdisp_client::client::Mode { width, height, vsync };
+        for mon in client.list()? {
+            if mon.connected {
+                client.set_mode(mon.connector_index, mode)?;
+            }
+        }
+        Ok(())
+    };
+    if let Err(err) = nudge() {
+        warn!(error = %format!("{err:#}"), "driver mode nudge failed");
+    }
 }
 
 /// Attaches `\\.\DISPLAYn` to the desktop with the given mode.
