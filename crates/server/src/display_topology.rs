@@ -52,21 +52,42 @@ fn ensure_inner(width: u32, height: u32, vsync: u32) -> anyhow::Result<u32> {
             continue;
         }
         let name = utf16_z(&dd.DeviceName);
-        // The IddCx-native nudge (`IddCxMonitorUpdateModes`) makes the OS
-        // re-evaluate the monitor and attach it on its own; the GDI attach
-        // below is the fallback for when that does not happen.
-        nudge_driver_modes(width, height, vsync);
-        std::thread::sleep(Duration::from_millis(500));
-        if is_attached(&name) {
-            info!(device = name, "display attached to the desktop after the driver mode update");
-            attached += 1;
-            continue;
-        }
-        attach_display(&name, width, height, vsync)
+        attach_with_retries(&name, width, height, vsync)
             .with_context(|| format!("attaching {name} to the desktop"))?;
         attached += 1;
     }
     Ok(attached)
+}
+
+/// Attach attempts before giving up (the IddCx monitor can take seconds to
+/// become fully ready after arrival; a detached display rejects mode sets
+/// with `DISP_CHANGE_BADMODE` until then).
+const ATTACH_ATTEMPTS: u32 = 20;
+
+/// Attaches `\\.\DISPLAYn`, retrying while the monitor settles. Each round
+/// first re-pushes the mode through the driver (`IddCxMonitorUpdateModes`
+/// forces the OS to re-evaluate the monitor, which attaches it on its own)
+/// and then tries the GDI attach as a fallback.
+fn attach_with_retries(
+    device_name: &str,
+    width: u32,
+    height: u32,
+    vsync: u32,
+) -> anyhow::Result<()> {
+    let mut last_err = anyhow::anyhow!("no attach attempt run");
+    for attempt in 1..=ATTACH_ATTEMPTS {
+        nudge_driver_modes(width, height, vsync);
+        std::thread::sleep(Duration::from_millis(500));
+        if is_attached(device_name) {
+            info!(device = device_name, attempt, "display attached after the driver mode update");
+            return Ok(());
+        }
+        match attach_display(device_name, width, height, vsync) {
+            Ok(()) => return Ok(()),
+            Err(err) => last_err = err,
+        }
+    }
+    Err(last_err.context(format!("giving up after {ATTACH_ATTEMPTS} attempts")))
 }
 
 /// Whether `\\.\DISPLAYn` is currently part of the desktop.
