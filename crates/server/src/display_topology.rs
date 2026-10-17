@@ -63,7 +63,7 @@ fn stack_uds_displays_below(height: u32) {
             continue;
         }
         let name = utf16_z(&dd.DeviceName);
-        if utf16_z(&dd.DeviceString).contains(UDS_DISPLAY_MARKER) {
+        if is_uds_display(&dd) {
             uds.push(name);
             continue;
         }
@@ -118,6 +118,34 @@ fn current_devmode(device_name: &str) -> Option<DEVMODEW> {
     unsafe { EnumDisplaySettingsW(PCWSTR(wide.as_ptr()), ENUM_CURRENT_SETTINGS, &raw mut dm) }
         .as_bool()
         .then_some(dm)
+}
+
+/// Whether the display device `dd` (an adapter entry from the desktop
+/// enumeration) is one of our IddCx virtual displays. The adapter's own
+/// `DeviceString` may read "Microsoft Basic Render Driver" on hosts without
+/// a real GPU, hiding our marker, so the connected monitor's `DeviceString`
+/// (the reliable identity, same rule as capture's `gdi_name`) is checked too.
+fn is_uds_display(dd: &DISPLAY_DEVICEW) -> bool {
+    if utf16_z(&dd.DeviceString).contains(UDS_DISPLAY_MARKER) {
+        return true;
+    }
+    let wide: Vec<u16> = utf16_z(&dd.DeviceName).encode_utf16().chain(std::iter::once(0)).collect();
+    for dev_num in 0..4u32 {
+        let mut mon = DISPLAY_DEVICEW {
+            cb: u32::try_from(size_of::<DISPLAY_DEVICEW>()).expect("struct fits in u32"),
+            ..Default::default()
+        };
+        // SAFETY: `wide` is null-terminated; `mon` is a sized out-struct.
+        if !unsafe { EnumDisplayDevicesW(PCWSTR(wide.as_ptr()), dev_num, &raw mut mon, 0) }
+            .as_bool()
+        {
+            break;
+        }
+        if utf16_z(&mon.DeviceString).contains(UDS_DISPLAY_MARKER) {
+            return true;
+        }
+    }
+    false
 }
 
 fn ensure_inner(width: u32, height: u32, vsync: u32) -> u32 {
