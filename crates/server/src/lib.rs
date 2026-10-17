@@ -13,6 +13,8 @@ pub mod audio;
 pub mod audio_wasapi;
 pub mod capture;
 #[cfg(all(windows, feature = "windows-capture"))]
+pub mod display_topology;
+#[cfg(all(windows, feature = "windows-capture"))]
 pub mod dxgi;
 pub mod input;
 pub mod mic;

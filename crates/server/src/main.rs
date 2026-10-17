@@ -1207,6 +1207,11 @@ async fn run() -> Result<()> {
     // without a peer agent are unaffected.
     #[cfg(all(windows, feature = "windows-capture"))]
     let _session_mutex = server::session_mutex::acquire()?;
+    // The OS does not always extend the desktop onto a freshly attached
+    // IddCx monitor (VMs on the Basic Render driver don't); DXGI can only
+    // duplicate outputs that are part of the desktop.
+    #[cfg(all(windows, feature = "windows-capture"))]
+    server::display_topology::ensure_uds_displays_attached(1920, 1080, 60);
     let ticket: [u8; protocol::TICKET_LENGTH] = if let Some(t) = args.ticket {
         t
     } else {
