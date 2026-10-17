@@ -10,9 +10,8 @@
 use anyhow::{Context as _, bail};
 use tracing::{info, warn};
 use windows::Win32::Graphics::Gdi::{
-    CDS_NORESET, CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
-    DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
-    DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DISP_CHANGE, ENUM_CURRENT_SETTINGS,
+    CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP,
+    DISPLAY_DEVICEW, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, DISP_CHANGE,
     ENUM_DISPLAY_SETTINGS_MODE, EnumDisplayDevicesW, EnumDisplaySettingsW,
 };
 use windows::core::PCWSTR;
@@ -59,49 +58,40 @@ fn ensure_inner(width: u32, height: u32, vsync: u32) -> anyhow::Result<u32> {
     Ok(attached)
 }
 
-/// Attaches `\\.\DISPLAYn` to the desktop at the right of the current
-/// virtual screen extent with the given mode.
+/// Attaches `\\.\DISPLAYn` to the desktop with the given mode.
 ///
-/// A hand-built `DEVMODE` is rejected with `DISP_CHANGE_BADMODE` by display
-/// drivers whose mode list does not match it exactly (IddCx among them), so
-/// the mode is picked from the driver's own enumerated list first; the
-/// hand-built one is only a fallback.
+/// Uses the recipe proven with `udsdisp-ctl set-mode`: no explicit position
+/// (Windows places the display itself) and `CDS_UPDATEREGISTRY` without
+/// `CDS_NORESET`, so the change applies immediately. A hand-built `DEVMODE`
+/// is rejected with `DISP_CHANGE_BADMODE` by drivers whose mode list does
+/// not match it verbatim (IddCx), so the mode is picked from the driver's
+/// own enumerated list first; the hand-built one is only a fallback.
 fn attach_display(device_name: &str, width: u32, height: u32, vsync: u32) -> anyhow::Result<()> {
-    let origin_x = desktop_right_edge();
     let wide: Vec<u16> = device_name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut devmode = find_driver_mode(&wide, width, height, vsync).unwrap_or_else(|| DEVMODEW {
+    let devmode = find_driver_mode(&wide, width, height, vsync).unwrap_or_else(|| DEVMODEW {
         dmSize: size_of::<DEVMODEW>() as u16,
-        dmFields: DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_POSITION,
+        dmFields: DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY,
         dmBitsPerPel: 32,
         dmPelsWidth: width,
         dmPelsHeight: height,
         dmDisplayFrequency: vsync,
         ..Default::default()
     });
-    devmode.dmFields |= DM_POSITION;
-    devmode.Anonymous1.Anonymous2.dmPosition.x = origin_x;
-    devmode.Anonymous1.Anonymous2.dmPosition.y = 0;
     // SAFETY: `wide` is null-terminated; `devmode` is fully initialized.
-    // CDS_UPDATEREGISTRY writes the topology change without applying it;
-    // the trailing null call applies it.
+    // CDS_UPDATEREGISTRY applies the change right away (no CDS_NORESET).
     let result = unsafe {
         ChangeDisplaySettingsExW(
             PCWSTR(wide.as_ptr()),
             Some(&raw const devmode),
             None,
-            CDS_UPDATEREGISTRY | CDS_NORESET,
+            CDS_UPDATEREGISTRY,
             None,
         )
     };
     if result != DISP_CHANGE_OK {
         bail!("ChangeDisplaySettingsExW({device_name}) -> {} ({result:?})", result.0);
     }
-    // SAFETY: null device name applies the pending topology changes.
-    let apply = unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None) };
-    if apply != DISP_CHANGE_OK {
-        bail!("applying the topology change -> {} ({apply:?})", apply.0);
-    }
-    info!(device = device_name, origin_x, width, height, "display attached to the desktop");
+    info!(device = device_name, width, height, "display attached to the desktop");
     Ok(())
 }
 
@@ -135,42 +125,6 @@ fn find_driver_mode(device_wide: &[u16], width: u32, height: u32, vsync: u32) ->
         }
     }
     None
-}
-
-/// Right edge of the current desktop: max over attached displays of
-/// (position.x + width). Falls back to 0 (place right after nothing).
-fn desktop_right_edge() -> i32 {
-    let mut edge = 0;
-    for i in 0..32u32 {
-        let mut dd = DISPLAY_DEVICEW {
-            cb: size_of::<DISPLAY_DEVICEW>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: `dd` is a correctly sized out-struct.
-        if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &mut dd, 0) }.as_bool() {
-            break;
-        }
-        if dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP != DISPLAY_DEVICE_ATTACHED_TO_DESKTOP {
-            continue;
-        }
-        let name = utf16_z(&dd.DeviceName);
-        let mut devmode = DEVMODEW {
-            dmSize: size_of::<DEVMODEW>() as u16,
-            ..Default::default()
-        };
-        // SAFETY: `wide` is null-terminated; `devmode` is a sized out-struct.
-        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        if unsafe { EnumDisplaySettingsW(PCWSTR(wide.as_ptr()), ENUM_CURRENT_SETTINGS, &raw mut devmode) }
-            .as_bool()
-        {
-            // SAFETY: EnumDisplaySettingsW succeeded, so the devmode union
-            // holds the printer/display variant with a valid dmPosition.
-            let pos = unsafe { devmode.Anonymous1.Anonymous2.dmPosition };
-            let right = pos.x + devmode.dmPelsWidth as i32;
-            edge = edge.max(right);
-        }
-    }
-    edge
 }
 
 /// Lossy string from a null-terminated UTF-16 fixed buffer.
