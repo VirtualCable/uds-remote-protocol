@@ -52,11 +52,14 @@ fn open_log() -> io::Result<Option<fs::File>> {
 
 /// Install the global tracing subscriber writing to the service log file.
 /// Also mirrors to stderr, which is what `--console` mode shows.
+///
+/// Idempotent: `run_dispatch` (main thread) and `service_main` (SCM thread)
+/// both call it; only the first call takes effect.
 pub fn init() {
     static LOG: LogFile = LogFile::new();
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_ansi(false)
         .with_writer(|| &LOG)
         .with_max_level(tracing::Level::DEBUG)
-        .init();
+        .try_init();
 }
