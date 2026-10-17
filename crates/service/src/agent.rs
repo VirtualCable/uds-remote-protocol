@@ -30,7 +30,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
-    CreateProcessAsUserW, OpenMutexW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    CREATE_NO_WINDOW, CreateProcessAsUserW, OpenMutexW, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
     STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
@@ -122,7 +122,9 @@ impl Agent {
                 None,
                 None,
                 true,
-                PROCESS_CREATION_FLAGS(0),
+                // No console window on the user's desktop: the agent's
+                // stdout/stderr already go to the log file.
+                CREATE_NO_WINDOW,
                 None,
                 PCWSTR::null(),
                 &raw const startup,
