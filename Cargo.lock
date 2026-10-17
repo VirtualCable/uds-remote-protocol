@@ -1837,6 +1837,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "service"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tracing",
+ "tracing-subscriber",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
