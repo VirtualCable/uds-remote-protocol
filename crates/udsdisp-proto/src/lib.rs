@@ -6,4 +6,5 @@
 //! (`udsdisp-ctl`, the orchestrator service) can use it without pulling the
 //! WDK build machinery in.
 
+pub mod edid;
 pub mod logic;

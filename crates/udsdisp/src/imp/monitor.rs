@@ -16,6 +16,12 @@ const STATUS_BUFFER_TOO_SMALL: NTSTATUS = -1_073_741_789;
 /// `STATUS_NOT_FOUND` (0xC0000225): no monitor on the requested connector.
 const STATUS_NOT_FOUND: NTSTATUS = -1_073_741_275;
 
+/// The mode the EDID advertises: the preferred one (index 0), or 1920x1080@60
+/// when the mode list is empty.
+fn mode_for_edid(modes: &[logic::Mode]) -> logic::Mode {
+    modes.first().copied().unwrap_or(logic::Mode::new(1920, 1080, 60))
+}
+
 /// Fixed container ID for the virtual monitor. A stable ID (instead of a
 /// random per-boot one) lets the OS recognize the monitor across reboots.
 const CONTAINER_ID: bindings::GUID = bindings::GUID {
@@ -47,6 +53,10 @@ pub fn create_and_arrive(
     attrs.SynchronizationScope =
         bindings::_WDF_SYNCHRONIZATION_SCOPE_WdfSynchronizationScopeInheritFromParent;
 
+    // The EDID carries the preferred mode (first of the list) as its
+    // detailed timing. It lives on the stack and only needs to outlive
+    // `IddCxMonitorArrival` below, which copies it.
+    let edid = udsdisp_proto::edid::edid_for_mode(mode_for_edid(&modes));
     let mut monitor_info = bindings::IDDCX_MONITOR_INFO {
         Size: size32::<bindings::IDDCX_MONITOR_INFO>(),
         MonitorType:
@@ -55,10 +65,8 @@ pub fn create_and_arrive(
         MonitorDescription: bindings::IDDCX_MONITOR_DESCRIPTION {
             Size: size32::<bindings::IDDCX_MONITOR_DESCRIPTION>(),
             Type: bindings::IDDCX_MONITOR_DESCRIPTION_TYPE_IDDCX_MONITOR_DESCRIPTION_TYPE_EDID,
-            // EDID-less: no description data, so the OS sources modes from
-            // EvtIddCxMonitorGetDefaultDescriptionModes instead.
-            DataSize: 0,
-            pData: core::ptr::null_mut(),
+            DataSize: edid.len() as u32,
+            pData: edid.as_ptr().cast_mut().cast(),
         },
         MonitorContainerId: CONTAINER_ID,
     };
