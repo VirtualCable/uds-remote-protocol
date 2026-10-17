@@ -13,7 +13,7 @@ use windows::Win32::Graphics::Gdi::{
     CDS_NORESET, CDS_TYPE, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
     DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
     DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DISP_CHANGE, ENUM_CURRENT_SETTINGS,
-    EnumDisplayDevicesW, EnumDisplaySettingsW,
+    ENUM_DISPLAY_SETTINGS_MODE, EnumDisplayDevicesW, EnumDisplaySettingsW,
 };
 use windows::core::PCWSTR;
 
@@ -61,10 +61,15 @@ fn ensure_inner(width: u32, height: u32, vsync: u32) -> anyhow::Result<u32> {
 
 /// Attaches `\\.\DISPLAYn` to the desktop at the right of the current
 /// virtual screen extent with the given mode.
+///
+/// A hand-built `DEVMODE` is rejected with `DISP_CHANGE_BADMODE` by display
+/// drivers whose mode list does not match it exactly (IddCx among them), so
+/// the mode is picked from the driver's own enumerated list first; the
+/// hand-built one is only a fallback.
 fn attach_display(device_name: &str, width: u32, height: u32, vsync: u32) -> anyhow::Result<()> {
     let origin_x = desktop_right_edge();
     let wide: Vec<u16> = device_name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut devmode = DEVMODEW {
+    let mut devmode = find_driver_mode(&wide, width, height, vsync).unwrap_or_else(|| DEVMODEW {
         dmSize: size_of::<DEVMODEW>() as u16,
         dmFields: DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_POSITION,
         dmBitsPerPel: 32,
@@ -72,7 +77,8 @@ fn attach_display(device_name: &str, width: u32, height: u32, vsync: u32) -> any
         dmPelsHeight: height,
         dmDisplayFrequency: vsync,
         ..Default::default()
-    };
+    });
+    devmode.dmFields |= DM_POSITION;
     devmode.Anonymous1.Anonymous2.dmPosition.x = origin_x;
     devmode.Anonymous1.Anonymous2.dmPosition.y = 0;
     // SAFETY: `wide` is null-terminated; `devmode` is fully initialized.
@@ -97,6 +103,38 @@ fn attach_display(device_name: &str, width: u32, height: u32, vsync: u32) -> any
     }
     info!(device = device_name, origin_x, width, height, "display attached to the desktop");
     Ok(())
+}
+
+/// Picks a driver-reported mode matching `width`x`height`@`vsync` from the
+/// display's own mode list, so the attach uses a `DEVMODE` the driver
+/// accepts verbatim.
+fn find_driver_mode(device_wide: &[u16], width: u32, height: u32, vsync: u32) -> Option<DEVMODEW> {
+    for i in 0.. {
+        let mut devmode = DEVMODEW {
+            dmSize: size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        // SAFETY: `device_wide` is null-terminated; `devmode` is a sized
+        // out-struct.
+        if !unsafe {
+            EnumDisplaySettingsW(
+                PCWSTR(device_wide.as_ptr()),
+                ENUM_DISPLAY_SETTINGS_MODE(i),
+                &raw mut devmode,
+            )
+        }
+        .as_bool()
+        {
+            return None;
+        }
+        if devmode.dmPelsWidth == width
+            && devmode.dmPelsHeight == height
+            && devmode.dmDisplayFrequency == vsync
+        {
+            return Some(devmode);
+        }
+    }
+    None
 }
 
 /// Right edge of the current desktop: max over attached displays of
