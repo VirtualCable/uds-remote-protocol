@@ -97,7 +97,7 @@ impl Agent {
         // no console, and its diagnostics are otherwise lost.
         let log_handle = open_agent_log()?;
         let startup = STARTUPINFOW {
-            cb: size_of::<STARTUPINFOW>() as u32,
+            cb: u32::try_from(size_of::<STARTUPINFOW>()).expect("struct fits in u32"),
             lpDesktop: PWSTR(desktop.as_mut_ptr()),
             dwFlags: STARTF_USESTDHANDLES,
             hStdOutput: log_handle.0,
@@ -264,10 +264,10 @@ pub fn watch_loop(stop: &AtomicBool) {
         }
     }
     // Service stopping: do not leave an orphaned agent behind.
-    if let Some(a) = &agent {
-        if a.is_alive() {
-            info!("service stopping: terminating the session agent");
-            a.kill();
-        }
+    if let Some(a) = &agent
+        && a.is_alive()
+    {
+        info!("service stopping: terminating the session agent");
+        a.kill();
     }
 }

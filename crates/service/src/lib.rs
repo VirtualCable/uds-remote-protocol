@@ -3,6 +3,7 @@
 //! All real functionality is Windows-only; on other platforms this crate is
 //! an empty shell so the workspace still builds and lints cleanly.
 
+mod adapter;
 #[cfg(windows)]
 mod agent;
 #[cfg(windows)]
@@ -20,7 +21,10 @@ pub fn run() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("--install") => install::install(),
         Some("--uninstall") => install::uninstall(),
-        Some("--console") => service_main::run_console(),
+        Some("--console") => {
+            service_main::run_console();
+            Ok(())
+        }
         None => service_main::run_dispatch(),
         Some(other) => anyhow::bail!(
             "unknown argument `{other}`; usage: udsrp-service [--install|--uninstall|--console]"

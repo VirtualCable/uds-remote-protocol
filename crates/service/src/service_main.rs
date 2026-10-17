@@ -12,6 +12,7 @@ use windows::Win32::System::Services::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
+use crate::adapter;
 use crate::agent;
 use crate::install::SERVICE_NAME;
 use crate::logging;
@@ -39,11 +40,10 @@ pub fn run_dispatch() -> Result<()> {
 }
 
 /// Debug mode: run the service body in the foreground console.
-pub fn run_console() -> Result<()> {
+pub fn run_console() {
     logging::init();
     info!("console mode: running service body in the foreground (Ctrl+C to stop)");
     service_body();
-    Ok(())
 }
 
 /// `ServiceMain` callback invoked by the SCM dispatcher.
@@ -74,22 +74,50 @@ fn service_main_impl() -> Result<()> {
     Ok(())
 }
 
-/// M1 IddCx lifecycle: on start, reclaim any orphaned monitors (a crashed
+/// M1 IddCx lifecycle + §12.4 mouse mitigation: on start, **enable** the
+/// udsdisp adapter device (it is kept disabled when idle so console agents
+/// like vdagent ≤0.10 keep working), reclaim any orphaned monitors (a crashed
 /// previous instance leaves them attached — the IOCTL channel outlives its
-/// creator) and attach one monitor; on stop, detach it. A missing driver
-/// (dev machine without udsdisp installed) is logged and tolerated.
+/// creator) and attach one monitor; on stop, detach it and **disable** the
+/// adapter again. A missing driver (dev machine without udsdisp installed) is
+/// logged and tolerated.
 struct DisplayGuard {
     client: Option<udsdisp_client::client::Client>,
+    adapter_enabled: bool,
 }
 
 impl DisplayGuard {
     fn attach() -> Self {
-        let client = match udsdisp_client::client::Client::open() {
-            Ok(client) => client,
+        // The device interface takes a moment to appear after the PnP state
+        // change; retry the open for a few seconds.
+        let enabled = match adapter::set_enabled(true) {
+            Ok(found) => found,
             Err(err) => {
-                warn!(error = %format!("{err:#}"), "udsdisp driver not available; running without virtual display");
-                return Self { client: None };
+                error!(error = %format!("{err:#}"), "cannot enable the udsdisp adapter");
+                false
             }
+        };
+        let client = if enabled {
+            let mut attempt = None;
+            for _ in 0..20 {
+                if let Ok(client) = udsdisp_client::client::Client::open() {
+                    attempt = Some(client);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            if attempt.is_none() {
+                warn!("udsdisp device interface never appeared after enabling the adapter");
+            }
+            attempt
+        } else {
+            None
+        };
+        let Some(client) = client else {
+            return Self {
+                client: None,
+                adapter_enabled: enabled,
+            };
         };
         match client.remove_all() {
             Ok(0) => {}
@@ -103,6 +131,7 @@ impl DisplayGuard {
         }
         Self {
             client: Some(client),
+            adapter_enabled: enabled,
         }
     }
 
@@ -112,6 +141,13 @@ impl DisplayGuard {
                 Ok(()) => info!("virtual monitor detached"),
                 Err(err) => warn!(error = %format!("{err:#}"), "cannot detach virtual monitor"),
             }
+        }
+        if self.adapter_enabled {
+            match adapter::set_enabled(false) {
+                Ok(_) => info!("udsdisp adapter disabled"),
+                Err(err) => warn!(error = %format!("{err:#}"), "cannot disable the udsdisp adapter"),
+            }
+            self.adapter_enabled = false;
         }
     }
 }
@@ -151,6 +187,6 @@ fn report_status(handle: SERVICE_STATUS_HANDLE, state: SERVICE_STATUS_CURRENT_ST
         ..Default::default()
     };
     // SAFETY: `status` is a valid, initialized struct; SetServiceStatus copies it.
-    unsafe { SetServiceStatus(handle, &status) }.context("SetServiceStatus")?;
+    unsafe { SetServiceStatus(handle, &raw const status) }.context("SetServiceStatus")?;
     Ok(())
 }
