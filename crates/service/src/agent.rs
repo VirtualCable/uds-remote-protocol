@@ -18,11 +18,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tracing::{error, info, warn};
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{
+    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows::Win32::Storage::FileSystem::{
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_END, FILE_GENERIC_WRITE, FILE_SHARE_READ, OPEN_ALWAYS,
+    SetFilePointerEx,
+};
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
-    OpenMutexW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW, TerminateProcess,
-    WaitForSingleObject, CreateProcessAsUserW, SYNCHRONIZATION_SYNCHRONIZE,
+    CreateProcessAsUserW, OpenMutexW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
+    STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
@@ -87,9 +93,15 @@ impl Agent {
         .collect();
         let mut desktop: Vec<u16> =
             "winsta0\\default".encode_utf16().chain(std::iter::once(0)).collect();
+        // Redirect the agent's stdout/stderr to a log file: the process has
+        // no console, and its diagnostics are otherwise lost.
+        let log_handle = open_agent_log()?;
         let startup = STARTUPINFOW {
             cb: size_of::<STARTUPINFOW>() as u32,
             lpDesktop: PWSTR(desktop.as_mut_ptr()),
+            dwFlags: STARTF_USESTDHANDLES,
+            hStdOutput: log_handle.0,
+            hStdError: log_handle.0,
             ..Default::default()
         };
         let mut info = PROCESS_INFORMATION::default();
@@ -103,7 +115,7 @@ impl Agent {
                 Some(PWSTR(cmdline.as_mut_ptr())),
                 None,
                 None,
-                false,
+                true,
                 PROCESS_CREATION_FLAGS(0),
                 None,
                 PCWSTR::null(),
@@ -173,6 +185,33 @@ impl Agent {
 fn agent_exe_path() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("resolving own executable path")?;
     Ok(exe.with_file_name("server.exe"))
+}
+
+/// Opens (creating and appending to) the agent log file and makes the handle
+/// inheritable so the spawned agent can use it as stdout/stderr.
+fn open_agent_log() -> Result<OwnedHandle> {
+    let path = format!(r"{}\agent.log", crate::logging::STATE_DIR);
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` is a null-terminated path; no template handle.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_GENERIC_WRITE.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }
+    .context("opening the agent log file")?;
+    // SAFETY: `handle` is valid; appending to the end of the file.
+    unsafe {
+        let _ = SetFilePointerEx(handle, 0, None, FILE_END);
+        SetHandleInformation(handle, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT)
+            .context("making the agent log handle inheritable")?;
+    }
+    Ok(OwnedHandle(handle))
 }
 
 /// Service body: keep one agent running in the console session until the SCM
