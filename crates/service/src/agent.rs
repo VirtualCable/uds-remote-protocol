@@ -85,7 +85,7 @@ impl Agent {
         let ticket_hex = protocol::hex::encode(ticket);
         let mut cmdline: Vec<u16> = format!(
             "\"{}\" --key {key_hex} --ticket {ticket_hex} --bind 0.0.0.0:14433 \
-             --source dxgi --output-name \"UDS Virtual Display\" --preset vp9-balanced",
+             --source dxgi --output-name \"UDS\" --preset vp9-balanced",
             exe.display()
         )
         .encode_utf16()

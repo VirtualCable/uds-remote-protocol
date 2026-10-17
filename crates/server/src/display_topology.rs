@@ -52,17 +52,20 @@ fn ensure_inner(width: u32, height: u32, vsync: u32) -> anyhow::Result<u32> {
             continue;
         }
         let name = utf16_z(&dd.DeviceName);
-        attach_with_retries(&name, width, height, vsync)
-            .with_context(|| format!("attaching {name} to the desktop"))?;
-        attached += 1;
+        // Stale GDI entries of past monitor incarnations ("ghosts") share
+        // the marker but have no live monitor behind them; a failed attach
+        // on one must not stop the others — log and keep going.
+        match attach_with_retries(&name, width, height, vsync) {
+            Ok(()) => attached += 1,
+            Err(err) => warn!(error = %format!("{err:#}"), "cannot attach {name}"),
+        }
     }
     Ok(attached)
 }
 
-/// Attach attempts before giving up (the IddCx monitor can take seconds to
-/// become fully ready after arrival; a detached display rejects mode sets
-/// with `DISP_CHANGE_BADMODE` until then).
-const ATTACH_ATTEMPTS: u32 = 20;
+/// Attach attempts per candidate display (ghosts from past monitor
+/// incarnations never attach, so this also bounds the time lost on them).
+const ATTACH_ATTEMPTS: u32 = 6;
 
 /// Attaches `\\.\DISPLAYn`, retrying while the monitor settles. Each round
 /// first re-pushes the mode through the driver (`IddCxMonitorUpdateModes`
