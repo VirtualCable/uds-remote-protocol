@@ -1202,6 +1202,11 @@ async fn main() -> ExitCode {
 async fn run() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args = parse_args()?;
+    // Orchestrated mode (Windows agent): hold the session mutex so the
+    // service can watch us and a second agent cannot start. Manual/dev runs
+    // without a peer agent are unaffected.
+    #[cfg(all(windows, feature = "windows-capture"))]
+    let _session_mutex = server::session_mutex::acquire()?;
     let ticket: [u8; protocol::TICKET_LENGTH] = if let Some(t) = args.ticket {
         t
     } else {

@@ -1,7 +1,6 @@
 //! Service entry points: SCM dispatch (production) and `--console` (debug).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tracing::{error, info, warn};
@@ -13,6 +12,7 @@ use windows::Win32::System::Services::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
+use crate::agent;
 use crate::install::SERVICE_NAME;
 use crate::logging;
 
@@ -116,12 +116,10 @@ impl DisplayGuard {
     }
 }
 
-/// M0 service body: idle loop until a stop is requested. M2+ spawns the
-/// session agent and runs the named-mutex watchdog here.
+/// Service body: watch loop that keeps one session agent alive in the
+/// console session (spawn, watchdog, respawn with a crash-loop cap).
 fn service_body() {
-    while !STOP_REQUESTED.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(250));
-    }
+    agent::watch_loop(&STOP_REQUESTED);
 }
 
 /// `HandlerEx` callback: the SCM asks us to stop/shutdown.

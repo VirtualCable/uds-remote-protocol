@@ -4,6 +4,8 @@
 //! an empty shell so the workspace still builds and lints cleanly.
 
 #[cfg(windows)]
+mod agent;
+#[cfg(windows)]
 mod install;
 #[cfg(windows)]
 mod logging;
