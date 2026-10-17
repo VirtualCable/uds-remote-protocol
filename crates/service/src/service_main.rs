@@ -6,10 +6,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tracing::{error, info};
 use windows::Win32::System::Services::{
-    RegisterServiceCtrlHandlerExW, SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP,
-    SERVICE_RUNNING, SERVICE_STATUS, SERVICE_STATUS_CURRENT_STATE, SERVICE_STATUS_HANDLE,
-    SERVICE_STOPPED, SERVICE_TABLE_ENTRYW, SERVICE_WIN32_OWN_PROCESS, SetServiceStatus,
-    StartServiceCtrlDispatcherW,
+    RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
+    SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_STATUS,
+    SERVICE_STATUS_CURRENT_STATE, SERVICE_STATUS_HANDLE, SERVICE_STOPPED, SERVICE_TABLE_ENTRYW,
+    SERVICE_WIN32_OWN_PROCESS, SetServiceStatus, StartServiceCtrlDispatcherW,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
@@ -95,9 +95,17 @@ extern "system" fn control_handler(
 }
 
 fn report_status(handle: SERVICE_STATUS_HANDLE, state: SERVICE_STATUS_CURRENT_STATE) -> Result<()> {
+    // Without ACCEPT_STOP the SCM refuses to send us control requests at
+    // all — the service becomes un-stoppable until the process dies.
+    let accepted = if state == SERVICE_RUNNING {
+        SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN
+    } else {
+        0
+    };
     let status = SERVICE_STATUS {
         dwServiceType: SERVICE_WIN32_OWN_PROCESS,
         dwCurrentState: state,
+        dwControlsAccepted: accepted,
         ..Default::default()
     };
     // SAFETY: `status` is a valid, initialized struct; SetServiceStatus copies it.
