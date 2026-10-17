@@ -136,11 +136,15 @@ impl DisplayGuard {
     }
 
     fn detach(&mut self) {
-        if let Some(client) = &self.client {
+        // Drop the client handle BEFORE disabling the adapter: an open
+        // device-interface handle makes the PnP query-remove fail
+        // (`SetupDiChangeState` -> ERROR_INVALID_DATA).
+        if let Some(client) = self.client.take() {
             match client.remove(0) {
                 Ok(()) => info!("virtual monitor detached"),
                 Err(err) => warn!(error = %format!("{err:#}"), "cannot detach virtual monitor"),
             }
+            drop(client);
         }
         if self.adapter_enabled {
             match adapter::set_enabled(false) {
