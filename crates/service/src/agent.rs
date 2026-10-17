@@ -78,8 +78,8 @@ impl Agent {
         let key_hex = protocol::hex::encode(key);
         let ticket_hex = protocol::hex::encode(ticket);
         let mut cmdline: Vec<u16> = format!(
-            "\"{}\" --key {key_hex} --ticket {ticket_hex} --source dxgi \
-             --output-name \"UDS Virtual Display\" --preset vp9-balanced",
+            "\"{}\" --key {key_hex} --ticket {ticket_hex} --bind 0.0.0.0:14433 \
+             --source dxgi --output-name \"UDS Virtual Display\" --preset vp9-balanced",
             exe.display()
         )
         .encode_utf16()
@@ -222,6 +222,13 @@ pub fn watch_loop(stop: &AtomicBool) {
                 agent = None;
             }
             Some(_) => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+    // Service stopping: do not leave an orphaned agent behind.
+    if let Some(a) = &agent {
+        if a.is_alive() {
+            info!("service stopping: terminating the session agent");
+            a.kill();
         }
     }
 }
