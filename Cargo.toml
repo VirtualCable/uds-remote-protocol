@@ -17,6 +17,7 @@ members = [
     "crates/udscredprov-ctl",
     "crates/service",
     "crates/udsdisp-proto",
+    "crates/service-proto",
 ]
 # The Windows kernel audio driver lives in its own workspace (drivers/):
 # it needs panic="abort" profiles (workspace-wide setting), no_std, and a
@@ -33,6 +34,7 @@ repository = "https://github.com/VirtualCable/uds-remote-protocol"
 [workspace.dependencies]
 # Internal dependencies
 protocol = { path = "crates/protocol" }
+service-proto = { path = "crates/service-proto" }
 transport = { path = "crates/transport" }
 crypt = { path = "crates/crypt" }
 codec = { path = "crates/codec" }

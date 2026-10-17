@@ -20,6 +20,7 @@ opus = ["codec/codec-opus"]
 
 [dependencies]
 protocol.workspace = true
+service-proto.workspace = true
 transport.workspace = true
 crypt.workspace = true
 codec.workspace = true

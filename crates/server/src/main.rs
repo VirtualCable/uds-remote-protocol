@@ -100,6 +100,26 @@ fn parse_args() -> Result<Args> {
     let mut key_seen = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
+        if arg == "--agent-config-stdin" {
+            // Orchestrated mode (M3): the service hands us the whole config —
+            // secrets included — over an anonymous pipe on stdin, so argv
+            // stays clean. Read it before any other flag is processed.
+            let frame = read_config_frame()?;
+            let config = service_proto::decode_agent_config(&frame)
+                .context("decoding the agent config frame")?;
+            args.key = config.key;
+            args.ticket = Some(config.ticket);
+            args.bind = config.bind.parse().context("config bind address")?;
+            anyhow::ensure!(
+                !config.output_name.is_empty(),
+                "config output_name must not be empty"
+            );
+            args.output = server::capture::OutputSelector::NameContains(config.output_name);
+            args.preset = config.preset;
+            args.source = "dxgi".to_string();
+            key_seen = true;
+            continue;
+        }
         if arg == "--no-audio" {
             args.audio = false;
             continue;
@@ -134,9 +154,22 @@ fn parse_args() -> Result<Args> {
         }
     }
     if !key_seen {
-        bail!("--key <hex64> is required");
+        bail!("--key <hex64> or --agent-config-stdin is required");
     }
     Ok(args)
+}
+
+/// Reads the service→agent config frame from stdin (until the service closes
+/// its write end). Portable: works on any OS, though only the Windows
+/// orchestrated mode uses it today.
+fn read_config_frame() -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut buf = Vec::with_capacity(256);
+    std::io::stdin()
+        .lock()
+        .read_to_end(&mut buf)
+        .context("reading the agent config frame from stdin")?;
+    Ok(buf)
 }
 
 /// Session legs after UDP detection (§4.2): the reliable control stream is

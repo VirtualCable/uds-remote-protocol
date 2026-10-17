@@ -19,18 +19,21 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::{error, info, warn};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
+use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_END, FILE_GENERIC_WRITE, FILE_SHARE_READ, OPEN_ALWAYS,
-    SetFilePointerEx,
+    SetFilePointerEx, WriteFile,
 };
+use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
     CreateProcessAsUserW, OpenMutexW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
     STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
 };
-use windows::core::{HSTRING, PCWSTR, PWSTR};
+use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 
 /// Name of the mutex the session agent holds while running (also acts as a
 /// single-instance guard). `Global\` so session 0 and the user session see
@@ -66,8 +69,11 @@ impl Agent {
     /// into the active console session with the given key + ticket. Returns
     /// `Ok(None)` when there is no interactive session to spawn into.
     ///
-    /// The credentials are logged so the lab client can connect; M3 replaces
-    /// this with the service↔agent pipe.
+    /// The configuration (secrets included) is handed over through an
+    /// anonymous pipe connected to the agent's stdin (`--agent-config-stdin`):
+    /// the command line stays free of secrets, which any process in the
+    /// session could otherwise read (M3). Credentials are also logged so the
+    /// lab client can connect.
     pub fn spawn_in_console_session(key: &[u8; 32], ticket: &[u8; 48]) -> Result<Option<Self>> {
         let session_id = unsafe { WTSGetActiveConsoleSessionId() };
         if session_id == 0xFFFF_FFFF {
@@ -83,16 +89,15 @@ impl Agent {
         let exe = agent_exe_path()?;
         let key_hex = protocol::hex::encode(key);
         let ticket_hex = protocol::hex::encode(ticket);
-        let mut cmdline: Vec<u16> = format!(
-            "\"{}\" --key {key_hex} --ticket {ticket_hex} --bind 0.0.0.0:14433 \
-             --source dxgi --output-name \"UDS\" --preset vp9-balanced",
-            exe.display()
-        )
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+        let mut cmdline: Vec<u16> = format!("\"{}\" --agent-config-stdin", exe.display())
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let mut desktop: Vec<u16> =
             "winsta0\\default".encode_utf16().chain(std::iter::once(0)).collect();
+        // Config pipe: the read end becomes the agent's stdin (inheritable);
+        // we keep the write end and send the frame once the process exists.
+        let (pipe_read, pipe_write) = create_inheritable_pipe()?;
         // Redirect the agent's stdout/stderr to a log file: the process has
         // no console, and its diagnostics are otherwise lost.
         let log_handle = open_agent_log()?;
@@ -100,6 +105,7 @@ impl Agent {
             cb: u32::try_from(size_of::<STARTUPINFOW>()).expect("struct fits in u32"),
             lpDesktop: PWSTR(desktop.as_mut_ptr()),
             dwFlags: STARTF_USESTDHANDLES,
+            hStdInput: pipe_read.0,
             hStdOutput: log_handle.0,
             hStdError: log_handle.0,
             ..Default::default()
@@ -124,10 +130,21 @@ impl Agent {
             )
         }
         .with_context(|| format!("CreateProcessAsUserW on session {session_id}"))?;
-        // The thread handle is unused; close it immediately.
+        // The thread handle is unused; close it immediately. The child owns a
+        // copy of the pipe read end now; close ours so the agent sees EOF when
+        // we finish writing (and so we do not hold its stdin open forever).
         let _thread = OwnedHandle(info.hThread);
+        drop(pipe_read);
+        let config = service_proto::AgentConfig {
+            key: *key,
+            ticket: *ticket,
+            bind: "0.0.0.0:14433".to_owned(),
+            output_name: "UDS".to_owned(),
+            preset: "vp9-balanced".to_owned(),
+        };
+        write_all_and_close(&pipe_write, &service_proto::encode_agent_config(&config))?;
         info!(session_id, pid = info.dwProcessId, exe = %exe.display(), "session agent spawned");
-        info!(key = key_hex, ticket = ticket_hex, "lab credentials (M3 will pass them by pipe)");
+        info!(key = key_hex, ticket = ticket_hex, "lab credentials (also piped to the agent)");
         Ok(Some(Self {
             process: OwnedHandle(info.hProcess),
             spawned_at: Instant::now(),
@@ -179,6 +196,47 @@ impl Agent {
             let _ = TerminateProcess(self.process.0, 1);
         }
     }
+}
+
+/// Creates an anonymous pipe whose read end is inheritable (for a child's
+/// stdin); the write end stays non-inheritable so grandchildren cannot hold
+/// the pipe open past our write.
+fn create_inheritable_pipe() -> Result<(OwnedHandle, OwnedHandle)> {
+    let attrs = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).expect("struct fits in u32"),
+        lpSecurityDescriptor: std::ptr::null_mut(),
+        bInheritHandle: BOOL::from(true),
+    };
+    let mut read = HANDLE::default();
+    let mut write = HANDLE::default();
+    // SAFETY: `attrs` is correctly sized; both out pointers are valid.
+    unsafe { CreatePipe(&raw mut read, &raw mut write, Some(&raw const attrs), 0) }
+        .context("CreatePipe for the agent config")?;
+    // SAFETY: `write` is a valid handle we own; clearing the inherit flag is
+    // always safe on our own handle.
+    unsafe { SetHandleInformation(write, HANDLE_FLAG_INHERIT.0, HANDLE_FLAGS(0)) }
+        .context("making the config pipe write end non-inheritable")?;
+    Ok((OwnedHandle(read), OwnedHandle(write)))
+}
+
+/// Writes the whole config frame to the pipe and closes our end (the agent
+/// reads until EOF). A dead/unreadable agent fails the write, which fails the
+/// spawn and lets the watchdog respawn it.
+fn write_all_and_close(pipe: &OwnedHandle, data: &[u8]) -> Result<()> {
+    let mut written = 0usize;
+    while written < data.len() {
+        let mut n = 0u32;
+        // SAFETY: `pipe` is a valid pipe write end we own; the slice and the
+        // out pointer are valid for the duration of the call. Synchronous
+        // pipe: no OVERLAPPED.
+        unsafe {
+            WriteFile(pipe.0, Some(&data[written..]), Some(&raw mut n), None)
+                .context("writing the agent config frame")?;
+        }
+        anyhow::ensure!(n > 0, "config pipe write made no progress");
+        written += n as usize;
+    }
+    Ok(())
 }
 
 /// Path of `server.exe` next to the running service executable.
