@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use windows::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
     SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_STATUS,
@@ -65,15 +65,59 @@ fn service_main_impl() -> Result<()> {
 
     report_status(status_handle, SERVICE_RUNNING)?;
     info!("service started");
+    let mut display = DisplayGuard::attach();
     service_body();
+    display.detach();
 
     report_status(status_handle, SERVICE_STOPPED)?;
     info!("service stopped");
     Ok(())
 }
 
-/// M0 service body: idle loop until a stop is requested. M1+ attaches the
-/// IddCx monitor, spawns the session agent and runs the watchdog here.
+/// M1 IddCx lifecycle: on start, reclaim any orphaned monitors (a crashed
+/// previous instance leaves them attached — the IOCTL channel outlives its
+/// creator) and attach one monitor; on stop, detach it. A missing driver
+/// (dev machine without udsdisp installed) is logged and tolerated.
+struct DisplayGuard {
+    client: Option<udsdisp_client::client::Client>,
+}
+
+impl DisplayGuard {
+    fn attach() -> Self {
+        let client = match udsdisp_client::client::Client::open() {
+            Ok(client) => client,
+            Err(err) => {
+                warn!(error = %format!("{err:#}"), "udsdisp driver not available; running without virtual display");
+                return Self { client: None };
+            }
+        };
+        match client.remove_all() {
+            Ok(0) => {}
+            Ok(n) => warn!(removed = n, "reclaimed orphaned virtual monitors"),
+            Err(err) => warn!(error = %format!("{err:#}"), "cannot list/remove existing monitors"),
+        }
+        let mode = udsdisp_client::client::Mode::new(1920, 1080, 60);
+        match client.create(0, mode) {
+            Ok(()) => info!(mode = ?mode, "virtual monitor attached on connector 0"),
+            Err(err) => error!(error = %format!("{err:#}"), "cannot attach virtual monitor"),
+        }
+        Self {
+            client: Some(client),
+        }
+    }
+
+    fn detach(&mut self) {
+        if let Some(client) = &self.client {
+            match client.remove(0) {
+                Ok(()) => info!("virtual monitor detached"),
+                Err(err) => warn!(error = %format!("{err:#}"), "cannot detach virtual monitor"),
+            }
+        }
+    }
+}
+
+/// M0 service body: idle loop until a stop is requested. M2+ spawns the
+/// session agent and runs the named-mutex watchdog here.
 fn service_body() {
     while !STOP_REQUESTED.load(Ordering::Relaxed) {
         std::thread::sleep(Duration::from_millis(250));

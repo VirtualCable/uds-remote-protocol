@@ -15,6 +15,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+udsdisp-ctl = { path = "../udsdisp-ctl" }
 windows = { workspace = true, features = [
     "Win32_System_Services",
 ] }

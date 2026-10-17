@@ -8,6 +8,10 @@ authors.workspace = true
 repository.workspace = true
 publish = false
 
+[lib]
+name = "udsdisp_client"
+path = "src/lib.rs"
+
 [dependencies]
 anyhow.workspace = true
 udsdisp = { path = "../udsdisp" }

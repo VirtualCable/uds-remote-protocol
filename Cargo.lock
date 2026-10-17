@@ -1843,6 +1843,7 @@ dependencies = [
  "anyhow",
  "tracing",
  "tracing-subscriber",
+ "udsdisp-ctl",
  "windows 0.62.2",
 ]
 
