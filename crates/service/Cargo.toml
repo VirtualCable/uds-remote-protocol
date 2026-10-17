@@ -18,3 +18,7 @@ tracing-subscriber.workspace = true
 windows = { workspace = true, features = [
     "Win32_System_Services",
 ] }
+
+[[bin]]
+name = "udsrp-service"
+path = "src/main.rs"
