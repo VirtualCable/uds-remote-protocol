@@ -16,6 +16,7 @@ members = [
     "crates/udscredprov",
     "crates/udscredprov-ctl",
     "crates/service",
+    "crates/udsdisp-proto",
 ]
 # The Windows kernel audio driver lives in its own workspace (drivers/):
 # it needs panic="abort" profiles (workspace-wide setting), no_std, and a

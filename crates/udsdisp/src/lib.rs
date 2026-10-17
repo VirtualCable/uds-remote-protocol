@@ -6,7 +6,10 @@
 //! virtual monitors whose resolution is dictated by the remote client; see
 //! `doc/plan/iddcx-pantalla-virtual.md` for the spike plan.
 
-pub mod logic;
+// The host-independent logic (modes, IOCTL wire protocol) lives in the pure
+// `udsdisp-proto` crate; re-exported so the driver's `crate::logic` paths
+// and external callers keep working unchanged.
+pub use udsdisp_proto::logic;
 
 #[cfg(windows)]
 mod imp;

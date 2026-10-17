@@ -3,7 +3,7 @@
 
 use anyhow::Context as _;
 use udsdisp_client::client::{Client, Mode};
-use udsdisp::logic;
+use udsdisp_proto::logic;
 
 /// CLI entry.
 pub fn run() -> anyhow::Result<()> {

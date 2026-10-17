@@ -2273,6 +2273,7 @@ name = "udsdisp"
 version = "0.1.0"
 dependencies = [
  "bindgen 0.73.2",
+ "udsdisp-proto",
  "wdk",
  "wdk-build",
  "wdk-sys",
@@ -2284,9 +2285,13 @@ name = "udsdisp-ctl"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "udsdisp",
+ "udsdisp-proto",
  "windows 0.62.2",
 ]
+
+[[package]]
+name = "udsdisp-proto"
+version = "0.1.0"
 
 [[package]]
 name = "unicode-ident"

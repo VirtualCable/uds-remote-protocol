@@ -2,7 +2,7 @@
 //!
 //! Windows-only: the control channel is a device interface (GUID in
 //! `udsdisp::logic`) opened through SetupAPI + CreateFile, with the wire
-//! protocol encoded/decoded by `udsdisp::logic` (unit-tested on Linux).
+//! protocol encoded/decoded by `udsdisp_proto::logic` (unit-tested on Linux).
 //! Used by the `udsdisp-ctl` CLI and by the orchestrator service.
 
 // The `windows` crate FFI methods take raw pointers; implicit borrows are
@@ -10,8 +10,8 @@
 #![allow(clippy::borrow_as_ptr)]
 
 use anyhow::{Context as _, bail};
-use udsdisp::logic;
-pub use udsdisp::logic::{CursorStatus, Mode, MonitorStatus};
+use udsdisp_proto::logic;
+pub use udsdisp_proto::logic::{CursorStatus, Mode, MonitorStatus};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA,
     SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,
