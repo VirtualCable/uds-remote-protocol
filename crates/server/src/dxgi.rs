@@ -407,32 +407,43 @@ fn wide_to_string(buf: &[u16]) -> String {
     String::from_utf16_lossy(&buf[..end])
 }
 
-/// Resolves the GDI device string (monitor description, e.g. `"UDS Virtual
-/// Display"`) for a DXGI output device name (`\\.\DISPLAYn`). DXGI may
-/// report an IddCx output under a generic adapter ("Microsoft Basic Render
-/// Driver"), so this GDI string is the reliable identity of the monitor.
-/// Returns an empty string when it cannot be resolved.
+/// Resolves GDI identity strings for a DXGI output device name
+/// (`\\.\DISPLAYn`): the display adapter's DeviceString and the first
+/// connected monitor's DeviceString. DXGI may report an IddCx output under
+/// a generic adapter ("Microsoft Basic Render Driver"), so these GDI
+/// strings are the reliable identity of the monitor. Returns an empty
+/// string when nothing can be resolved.
 fn gdi_device_string(device_name: &str) -> String {
     let name_wide: Vec<u16> = device_name.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut dd = DISPLAY_DEVICEW {
-        cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
-        ..DISPLAY_DEVICEW::default()
-    };
-    // SAFETY: `dd` is a valid, correctly sized out buffer and `name_wide` is
-    // NUL-terminated for the whole call.
-    let ok = unsafe {
-        EnumDisplayDevicesW(
-            windows::core::PCWSTR(name_wide.as_ptr()),
-            0,
-            &mut dd,
-            0,
-        )
-    };
-    if ok.as_bool() {
-        wide_to_string(&dd.DeviceString)
-    } else {
-        String::new()
+    let mut parts: Vec<String> = Vec::new();
+    for dev_num in 0..=1u32 {
+        let mut dd = DISPLAY_DEVICEW {
+            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            ..DISPLAY_DEVICEW::default()
+        };
+        // SAFETY: `dd` is a valid, correctly sized out buffer and
+        // `name_wide` is NUL-terminated for the whole call.
+        let ok = unsafe {
+            EnumDisplayDevicesW(
+                windows::core::PCWSTR(name_wide.as_ptr()),
+                dev_num,
+                &mut dd,
+                0,
+            )
+        };
+        if !ok.as_bool() {
+            break;
+        }
+        let s = wide_to_string(&dd.DeviceString);
+        if !s.is_empty() {
+            parts.push(s);
+        }
+        let id = wide_to_string(&dd.DeviceID);
+        if !id.is_empty() {
+            parts.push(id);
+        }
     }
+    parts.join(" | ")
 }
 
 /// Enumerates every output of every adapter, adapter-major (the order
@@ -491,7 +502,7 @@ fn init_duplication(selector: &OutputSelector) -> anyhow::Result<DupInit> {
     let pos = select_output(&candidates, selector).with_context(|| {
         let available = candidates
             .iter()
-            .map(|c| format!("{} on {}", c.name, c.adapter))
+            .map(|c| format!("{} on {} [{}]", c.name, c.adapter, c.gdi_name))
             .collect::<Vec<_>>()
             .join(", ");
         format!("no output matches {selector:?} (available: {available})")
