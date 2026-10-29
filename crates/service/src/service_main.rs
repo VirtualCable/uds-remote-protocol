@@ -182,7 +182,7 @@ impl DisplayGuard {
 
 /// Whether connector 0 currently has a connected virtual monitor.
 fn monitor_connected(client: &udsdisp_client::client::Client) -> bool {
-    client.list().map_or(false, |mons| {
+    client.list().is_ok_and(|mons| {
         mons.iter().any(|m| m.connector_index == 0 && m.connected)
     })
 }
