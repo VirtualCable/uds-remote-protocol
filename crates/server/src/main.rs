@@ -1233,7 +1233,15 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // Default to `info` when RUST_LOG is unset: the service spawns us with a
+    // plain SYSTEM environment and the agent log is the only diagnostics
+    // channel (no console with CREATE_NO_WINDOW).
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
     let args = parse_args()?;
     // Orchestrated mode (Windows agent): hold the session mutex so the
     // service can watch us and a second agent cannot start. Manual/dev runs

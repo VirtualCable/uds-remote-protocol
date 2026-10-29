@@ -131,7 +131,13 @@ fn load_credentials() -> Result<Option<Credentials>> {
     else {
         bail!("expected 3 lines (username, domain, password)");
     };
-    Ok(Some(Credentials::new(user.trim(), domain.trim(), password)))
+    // An empty domain on a domain-joined machine resolves against the DC;
+    // "." pins the logon to the local account database.
+    let domain = match domain.trim() {
+        "" => ".",
+        d => d,
+    };
+    Ok(Some(Credentials::new(user.trim(), domain, password)))
 }
 
 // ---------------------------------------------------------------------------
