@@ -28,6 +28,11 @@ use windows::Win32::Storage::FileSystem::{
     SetFilePointerEx, WriteFile,
 };
 use windows::Win32::System::Pipes::CreatePipe;
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+    SetInformationJobObject,
+};
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateProcessAsUserW, OpenMutexW, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
@@ -58,9 +63,16 @@ impl Drop for OwnedHandle {
     }
 }
 
-/// A running session agent: its process handle and when it was spawned.
+/// A running session agent: its process handle, the kill-on-close job it
+/// lives in, and when it was spawned. The job handle is the symmetric-kill
+/// mechanism (M5): when the service dies — even a hard kill — the kernel
+/// closes the job's last handle and every process in it is terminated, so an
+/// orphaned agent never lingers holding the session mutex or the network
+/// port.
 pub struct Agent {
     process: OwnedHandle,
+    /// `None` when job assignment failed (logged; liveness still works).
+    _job: Option<OwnedHandle>,
     spawned_at: Instant,
 }
 
@@ -137,6 +149,15 @@ impl Agent {
         // we finish writing (and so we do not hold its stdin open forever).
         let _thread = OwnedHandle(info.hThread);
         drop(pipe_read);
+        let job = match assign_kill_on_close_job(info.hProcess) {
+            Ok(job) => Some(job),
+            Err(err) => {
+                // Non-fatal: the watchdog still tracks the process handle and
+                // the mutex; only the orphan-on-hard-kill guarantee is lost.
+                warn!(error = %format!("{err:#}"), "cannot put the agent in a kill-on-close job");
+                None
+            }
+        };
         let config = service_proto::AgentConfig {
             key: *key,
             ticket: *ticket,
@@ -149,6 +170,7 @@ impl Agent {
         info!(key = key_hex, ticket = ticket_hex, "lab credentials (also piped to the agent)");
         Ok(Some(Self {
             process: OwnedHandle(info.hProcess),
+            _job: job,
             spawned_at: Instant::now(),
         }))
     }
@@ -198,6 +220,31 @@ impl Agent {
             let _ = TerminateProcess(self.process.0, 1);
         }
     }
+}
+
+/// Puts `process` into a fresh job object configured with
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`: when the service process dies for
+/// any reason (clean exit forgotten paths, `taskkill /F`, crash), its job
+/// handle is closed and the kernel terminates every process in the job.
+/// Returns the job handle (the caller owns it for the agent's lifetime).
+fn assign_kill_on_close_job(process: HANDLE) -> Result<OwnedHandle> {
+    // SAFETY: null attributes/name create an unnamed job with default security.
+    let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.context("CreateJobObject")?;
+    let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: `job` is valid; `info` is a correctly sized input struct.
+    unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&raw const info).cast(),
+            u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                .expect("struct fits in u32"),
+        )
+        .context("SetInformationJobObject(KILL_ON_JOB_CLOSE)")?;
+        AssignProcessToJobObject(job, process).context("AssignProcessToJobObject")?;
+    }
+    Ok(OwnedHandle(job))
 }
 
 /// Creates an anonymous pipe whose read end is inheritable (for a child's
