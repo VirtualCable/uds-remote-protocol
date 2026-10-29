@@ -126,8 +126,11 @@ impl DisplayGuard {
             Err(err) => warn!(error = %format!("{err:#}"), "cannot list/remove existing monitors"),
         }
         let mode = udsdisp_client::client::Mode::new(1920, 1080, 60);
-        // The attach races the driver stack at boot (ERROR_OPERATION_IN_PROGRESS
-        // right after the device interface appears); retry for a few seconds.
+        // The attach races the driver stack at boot: the first attempt can
+        // report an error (ERROR_OPERATION_IN_PROGRESS, or even
+        // ERROR_ALREADY_EXISTS) while the driver finishes creating the
+        // monitor behind our back. After every failed attempt, re-check the
+        // connector list — if our monitor is there, the attach is done.
         let mut last_err = None;
         for _ in 0..20 {
             match client.create(0, mode) {
@@ -137,6 +140,11 @@ impl DisplayGuard {
                     break;
                 }
                 Err(err) => {
+                    if monitor_connected(&client) {
+                        warn!(error = %format!("{err:#}"), "attach reported an error but the monitor is connected; continuing");
+                        last_err = None;
+                        break;
+                    }
                     last_err = Some(err);
                     std::thread::sleep(std::time::Duration::from_millis(500));
                 }
@@ -170,6 +178,13 @@ impl DisplayGuard {
             self.adapter_enabled = false;
         }
     }
+}
+
+/// Whether connector 0 currently has a connected virtual monitor.
+fn monitor_connected(client: &udsdisp_client::client::Client) -> bool {
+    client.list().map_or(false, |mons| {
+        mons.iter().any(|m| m.connector_index == 0 && m.connected)
+    })
 }
 
 /// Service body: watch loop that keeps one session agent alive in the
