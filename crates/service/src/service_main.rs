@@ -65,6 +65,7 @@ fn service_main_impl() -> Result<()> {
 
     report_status(status_handle, SERVICE_RUNNING)?;
     info!("service started");
+    crate::credprov::spawn(&STOP_REQUESTED);
     let mut display = DisplayGuard::attach();
     service_body();
     display.detach();

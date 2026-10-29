@@ -1848,7 +1848,9 @@ dependencies = [
  "service-proto",
  "tracing",
  "tracing-subscriber",
+ "udscredprov",
  "udsdisp-ctl",
+ "widestring",
  "windows 0.62.2",
 ]
 
