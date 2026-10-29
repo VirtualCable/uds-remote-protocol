@@ -126,9 +126,24 @@ impl DisplayGuard {
             Err(err) => warn!(error = %format!("{err:#}"), "cannot list/remove existing monitors"),
         }
         let mode = udsdisp_client::client::Mode::new(1920, 1080, 60);
-        match client.create(0, mode) {
-            Ok(()) => info!(mode = ?mode, "virtual monitor attached on connector 0"),
-            Err(err) => error!(error = %format!("{err:#}"), "cannot attach virtual monitor"),
+        // The attach races the driver stack at boot (ERROR_OPERATION_IN_PROGRESS
+        // right after the device interface appears); retry for a few seconds.
+        let mut last_err = None;
+        for _ in 0..20 {
+            match client.create(0, mode) {
+                Ok(()) => {
+                    info!(mode = ?mode, "virtual monitor attached on connector 0");
+                    last_err = None;
+                    break;
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+            }
+        }
+        if let Some(err) = last_err {
+            error!(error = %format!("{err:#}"), "cannot attach virtual monitor");
         }
         Self {
             client: Some(client),
