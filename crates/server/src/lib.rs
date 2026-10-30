@@ -21,6 +21,7 @@ pub mod display_topology;
 pub mod dxgi;
 pub mod input;
 pub mod mic;
+pub mod pacer;
 pub mod privacy;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod remote_signal;

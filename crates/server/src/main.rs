@@ -53,6 +53,7 @@ use crypt::consts;
 use protocol::fragment::Fragmenter;
 use protocol::{self, ControlMessage, CursorMessage, Probe, ProbeAck, channel};
 use server::audio::AudioSource;
+use server::pacer::{Pacer, PacerRate};
 use server::synthetic::SyntheticSource;
 use tokio::sync::mpsc;
 use transport::{
@@ -178,12 +179,18 @@ fn read_config_frame() -> Result<Vec<u8>> {
 struct Legs<T: ReliableTransport> {
     udp: Option<Box<EncryptedDatagram<UdpTransport>>>,
     stream: Box<EncryptedStream<T>>,
+    /// Burst pacer for the UDP leg (§12.6); inert on the stream fallback,
+    /// where the kernel's TCP flow control already paces.
+    pacer: Pacer,
 }
 
 impl<T: ReliableTransport> Legs<T> {
     async fn send_fragment(&mut self, frag: &[u8]) -> transport::Result<()> {
         match &mut self.udp {
-            Some(d) => d.send(channel::DISPLAY, frag).await,
+            Some(d) => {
+                self.pacer.pace(frag.len()).await;
+                d.send(channel::DISPLAY, frag).await
+            }
             None => self.stream.send(channel::DISPLAY, frag).await,
         }
     }
@@ -503,6 +510,7 @@ fn handle_metrics(
     fps_shared: &AtomicU32,
     video_ceiling_kbps: u32,
     audio_ceiling_kbps: u32,
+    pacer_rate: &PacerRate,
     rtt_micros: u64,
     jitter_micros: u64,
     loss_permille: u16,
@@ -546,6 +554,9 @@ fn handle_metrics(
     if let Err(e) = encoder.set_bitrate(t.video_kbps) {
         warn!("set_bitrate failed: {e}");
     }
+    // UDP burst pacing follows the video target (§12.6): level changes move
+    // the token-bucket rate together with the encoder.
+    pacer_rate.set_from_video_kbps(t.video_kbps);
     if let Some(ac) = audio_control {
         // The audio thread applies the new target at the next frame (§12.5).
         ac.set_target_kbps(t.audio_kbps);
@@ -823,7 +834,9 @@ async fn serve<T: ReliableTransport>(
             None
         }
     };
-    let mut legs = Legs { udp, stream: Box::new(stream) };
+    let (pacer_rate, _) = PacerRate::new();
+    let mut legs =
+        Legs { udp, stream: Box::new(stream), pacer: Pacer::new(pacer_rate.clone()) };
 
     let fps_shared = Arc::new(AtomicU32::new(args.fps.max(1)));
     let mut frame_rx = spawn_capture(args, Arc::clone(&fps_shared), clock_start);
@@ -886,6 +899,7 @@ async fn serve<T: ReliableTransport>(
         audio_ceiling_kbps,
         audio_control,
         fec_on: false,
+        pacer_rate,
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -1085,6 +1099,8 @@ struct ControlState {
     audio_control: Option<server::audio::AudioControl>,
     /// Current FEC state (for the loss hysteresis, §12.5).
     fec_on: bool,
+    /// UDP burst pacer rate knob (§12.6); retuned on every level change.
+    pacer_rate: PacerRate,
 }
 
 /// Handles one packet from the reliable stream: input events (§10) and
@@ -1119,6 +1135,7 @@ fn handle_stream_packet(
                 fps_shared,
                 ctl.video_ceiling_kbps,
                 ctl.audio_ceiling_kbps,
+                &ctl.pacer_rate,
                 rtt_micros,
                 jitter_micros,
                 loss_permille,
