@@ -22,6 +22,9 @@ pub enum ClientCommand {
     /// still requires the server's `AudioInConfig` announcement and a
     /// configured [`crate::mic::MicMode`].
     SetMic(bool),
+    /// The local clipboard changed (M8); the session announces the new
+    /// content to the server, which pulls it on demand.
+    ClipboardChanged(String),
     /// Requests a remote display-mode change. Reserved: the wire protocol
     /// has no `SetDisplayMode` yet (§15.2), so the session currently logs
     /// and ignores it.

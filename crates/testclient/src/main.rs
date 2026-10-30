@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use client::mic::MicMode;
-use client::{ClientCommand, ClientConfig, ClientEvent, Displays, Rect, Session};
+use client::{ClientCommand, ClientConfig, ClientEvent, CommandSender, Displays, Rect, Session};
 use protocol::{self, InputMessage, PointerButton};
 use tracing::{info, warn};
 
@@ -43,6 +43,11 @@ struct Args {
     /// Privacy screen (M7): `--privacy` asks the server to hide the
     /// physical console behind the branded lock overlay.
     privacy: bool,
+    /// Clipboard sync (M8); disabled with `--no-clipboard`.
+    clipboard: bool,
+    /// Lab aid: `--selftest-clipboard TEXT` announces TEXT as the local
+    /// clipboard once, ~3 s into the session (E2E without a desktop).
+    selftest_clipboard: Option<String>,
 }
 
 /// One scripted input action for `--selftest-input`.
@@ -104,6 +109,8 @@ fn parse_args() -> Result<Args> {
         audio_dump: None,
         mic: MicMode::Off,
         privacy: false,
+        clipboard: true,
+        selftest_clipboard: None,
     };
     let mut key_seen = false;
     let mut ticket_seen = false;
@@ -129,6 +136,10 @@ fn parse_args() -> Result<Args> {
             args.privacy = true;
             continue;
         }
+        if arg == "--no-clipboard" {
+            args.clipboard = false;
+            continue;
+        }
         let value = it.next().context(format!("missing value for {arg}"))?;
         match arg.as_str() {
             "--addr" => args.addr = value.parse().context("bad --addr")?,
@@ -145,6 +156,7 @@ fn parse_args() -> Result<Args> {
             "--mic-test-tone" => {
                 args.mic = MicMode::Tone(value.parse().context("bad --mic-test-tone")?);
             }
+            "--selftest-clipboard" => args.selftest_clipboard = Some(value),
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -152,6 +164,90 @@ fn parse_args() -> Result<Args> {
         bail!("--key <hex64> and --ticket <hex96> are required");
     }
     Ok(args)
+}
+
+/// Clipboard watcher (M8): owns the `arboard` clipboard on a dedicated
+/// thread (the handle is not `Sync`), polls for local changes and applies
+/// remote ones. Anti-echo: text we set ourselves is remembered and not
+/// re-announced.
+struct ClipboardWatcher {
+    /// Remote texts to apply locally.
+    set_tx: std::sync::mpsc::Sender<String>,
+}
+
+impl ClipboardWatcher {
+    /// Poll interval for local clipboard changes.
+    const POLL: Duration = Duration::from_millis(500);
+
+    /// Spawns the watcher thread; `None` when no clipboard is available
+    /// (headless box without X11/Wayland, logged).
+    fn spawn(commands: CommandSender) -> Option<Self> {
+        let (set_tx, set_rx) = std::sync::mpsc::channel::<String>();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<bool>();
+        std::thread::spawn(move || {
+            let mut board = match arboard::Clipboard::new() {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!("clipboard unavailable ({e}); clipboard sync disabled");
+                    ready_tx.send(false).ok();
+                    return;
+                }
+            };
+            ready_tx.send(true).ok();
+            // Last text we set ourselves (echo suppression), and last text
+            // we announced (change detection).
+            let mut last_set: Option<String> = None;
+            let mut last_seen: Option<String> = None;
+            loop {
+                // Remote sets first: they are rare and latency-sensitive.
+                while let Ok(text) = set_rx.try_recv() {
+                    if let Err(e) = board.set_text(&text) {
+                        warn!("clipboard set failed: {e}");
+                    } else {
+                        info!(len = text.len(), "remote clipboard applied locally");
+                        last_set = Some(text.clone());
+                        last_seen = Some(text);
+                    }
+                }
+                match board.get_text() {
+                    Ok(text) => {
+                        let fresh = last_seen.as_deref() != Some(text.as_str());
+                        let echo = last_set.as_deref() == Some(text.as_str());
+                        if fresh && !echo {
+                            info!(len = text.len(), "local clipboard changed");
+                            if commands
+                                .try_send(ClientCommand::ClipboardChanged(text.clone()))
+                                .is_err()
+                            {
+                                return; // session gone
+                            }
+                            last_seen = Some(text);
+                        }
+                    }
+                    Err(arboard::Error::ContentNotAvailable) => {
+                        // No text on the clipboard right now (e.g. an image
+                        // was copied): nothing to announce.
+                    }
+                    Err(e) => {
+                        warn!("clipboard read failed: {e}");
+                        return;
+                    }
+                }
+                std::thread::sleep(Self::POLL);
+            }
+        });
+        match ready_rx.recv() {
+            Ok(true) => Some(Self { set_tx }),
+            _ => None,
+        }
+    }
+
+    /// Applies remote clipboard text locally.
+    fn set_local(&self, text: String) {
+        if self.set_tx.send(text).is_err() {
+            warn!("clipboard watcher gone");
+        }
+    }
 }
 
 /// Last cursor state received from the server (§10): the client paints the
@@ -579,6 +675,16 @@ async fn run() -> Result<()> {
     let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
     let mut selftest = args.selftest_input.then(SelfTest::new);
+    // Clipboard sync (M8): watcher thread owns the OS clipboard; the
+    // selftest announces its text once, ~3 s in.
+    let clipboard = if args.clipboard {
+        ClipboardWatcher::spawn(commands.clone())
+    } else {
+        None
+    };
+    let mut selftest_clip = args
+        .selftest_clipboard
+        .map(|text| (Instant::now() + Duration::from_secs(3), text));
     let mut frames = 0u64;
     let start = Instant::now();
     let mut close_sent = false;
@@ -620,6 +726,12 @@ async fn run() -> Result<()> {
                         info!(width, height, "cursor shape");
                         cursor.shape = Some(CursorShape { width, height, hot_x, hot_y, rgba });
                     }
+                    ClientEvent::ClipboardData { text } => {
+                        info!(len = text.len(), "remote clipboard data");
+                        if let Some(watcher) = &clipboard {
+                            watcher.set_local(text);
+                        }
+                    }
                     ClientEvent::Error(e) => warn!("session error: {e}"),
                     ClientEvent::Disconnected => {
                         info!("session disconnected");
@@ -644,6 +756,13 @@ async fn run() -> Result<()> {
                         info!(?msg, "selftest input");
                         let _ = commands.try_send(ClientCommand::Input(msg));
                     }
+                }
+                if let Some((when, text)) = &selftest_clip
+                    && Instant::now() >= *when
+                {
+                    info!(len = text.len(), "selftest clipboard announce");
+                    let _ = commands.try_send(ClientCommand::ClipboardChanged(text.clone()));
+                    selftest_clip = None;
                 }
             }
         }

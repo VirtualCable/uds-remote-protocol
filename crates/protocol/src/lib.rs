@@ -9,6 +9,7 @@ pub mod channel;
 pub mod fragment;
 pub mod hex;
 pub mod jitter;
+mod clipboard;
 mod control;
 mod cursor;
 mod error;
@@ -18,6 +19,9 @@ mod probe;
 mod quality;
 
 pub use channel::ChannelId;
+pub use clipboard::{
+    ClipboardError, ClipboardMessage, ClipboardSession, FORMAT_TEXT, MAX_CLIPBOARD_PAYLOAD,
+};
 pub use control::{Capability, ControlMessage};
 pub use cursor::{CursorError, CursorMessage, MAX_CURSOR_DIM};
 pub use error::ProtocolError;

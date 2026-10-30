@@ -16,6 +16,9 @@ pub const INPUT: ChannelId = 4;
 /// Channel 5: cursor shape/visibility (S→C, reliable; the client paints the
 /// cursor locally and keeps the last shape as state, so loss is intolerable).
 pub const CURSOR: ChannelId = 5;
+/// Channel 6: clipboard (bidirectional, reliable; offer/request/data pull
+/// model — payloads must not be dropped once a generation was announced).
+pub const CLIPBOARD: ChannelId = 6;
 
 /// Last ID reserved for UDS core channels (`0x0000..=0x00FF`).
 pub const CORE_MAX: ChannelId = 0x00FF;

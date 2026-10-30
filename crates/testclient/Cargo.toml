@@ -25,3 +25,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 flume.workspace = true
 minifb = "0.28"
+arboard = "3"

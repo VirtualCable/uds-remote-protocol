@@ -166,6 +166,7 @@ impl Session {
                     if !core.handle_packet(ch, &buf[..n])? {
                         return Ok(());
                     }
+                    Self::flush_clipboard(&mut stream, core).await?;
                 }
                 msg = core.mic.recv() => {
                     if let Some(payload) = msg {
@@ -249,6 +250,7 @@ impl Session {
                     if !core.handle_packet(ch, &buf[..n])? {
                         return Ok(());
                     }
+                    Self::flush_clipboard(&mut stream, core).await?;
                     // Ask for a keyframe when the stream is broken (decode
                     // errors) or a frame was evicted incomplete; the rate
                     // limit re-asks every 500 ms while the stream stays
@@ -271,6 +273,7 @@ impl Session {
                     if !core.handle_packet(ch, &sbuf[..n])? {
                         return Ok(());
                     }
+                    Self::flush_clipboard(&mut stream, core).await?;
                 }
                 _ = probe_tick.tick() => {
                     leg.dgram
@@ -321,6 +324,17 @@ impl Session {
         }
     }
 
+    /// Flushes queued clipboard answers on the reliable stream (M8).
+    async fn flush_clipboard(
+        stream: &mut EncryptedStream<Box<dyn ReliableTransport>>,
+        core: &mut Core,
+    ) -> Result<()> {
+        for msg in core.clip_out.drain(..) {
+            stream.send(channel::CLIPBOARD, &msg.encode()).await?;
+        }
+        Ok(())
+    }
+
     /// Applies one consumer command; returns `false` when the session must
     /// end (close requested or command channel shut down).
     async fn handle_command(
@@ -334,6 +348,12 @@ impl Session {
                 stream.send(channel::INPUT, &buf[..n]).await?;
             }
             Ok(ClientCommand::SetMic(on)) => core.mic.set_allowed(on),
+            Ok(ClientCommand::ClipboardChanged(text)) => {
+                // Local clipboard changed (M8): announce it; the server will
+                // pull the text if it wants it.
+                let offer = core.clip.local_text_changed(text.as_bytes());
+                stream.send(channel::CLIPBOARD, &offer.encode()).await?;
+            }
             Ok(ClientCommand::Resize { width, height }) => {
                 warn!(
                     width,
@@ -450,6 +470,11 @@ struct Core {
     /// Rate-limit state for keyframe requests (riesgos §2.1).
     last_key_req: Option<Instant>,
     prev_dropped: u64,
+    /// Clipboard wire state (M8).
+    clip: protocol::ClipboardSession,
+    /// Clipboard messages queued for sending (handle_packet is synchronous;
+    /// the receive loops drain this after each packet).
+    clip_out: Vec<protocol::ClipboardMessage>,
 }
 
 impl Core {
@@ -472,6 +497,8 @@ impl Core {
             avsync_log: Instant::now(),
             last_key_req: None,
             prev_dropped: 0,
+            clip: protocol::ClipboardSession::new(),
+            clip_out: Vec::new(),
         }
     }
 
@@ -593,6 +620,42 @@ impl Core {
                     }
                 }
                 Err(e) => warn!("bad cursor message: {e}"),
+            }
+            return Ok(true);
+        }
+        if ch == channel::CLIPBOARD {
+            // Clipboard (M8): offers are pulled automatically; the answers
+            // queue in clip_out and the receive loops flush them on the
+            // reliable stream after this call.
+            use protocol::ClipboardMessage as M;
+            match M::decode(packet) {
+                Ok(M::Offer { seq, formats }) => {
+                    if let Some(req) = self.clip.peer_offer(seq, formats) {
+                        self.clip_out.push(req);
+                    }
+                }
+                Ok(M::Request { seq, format }) => {
+                    let resp = self.clip.peer_request(seq, format);
+                    self.clip_out.push(resp);
+                }
+                Ok(M::Data {
+                    seq,
+                    format,
+                    payload,
+                }) => {
+                    if let Some(bytes) = self.clip.peer_data(seq, format, &payload) {
+                        if let Ok(text) = String::from_utf8(bytes) {
+                            info!(len = text.len(), "clipboard data from remote");
+                            if !emit(&self.events, ClientEvent::ClipboardData { text }) {
+                                return Ok(false);
+                            }
+                        } else {
+                            warn!("clipboard data is not valid UTF-8");
+                        }
+                    }
+                }
+                Ok(M::DataFailed { seq }) => self.clip.peer_data_failed(seq),
+                Err(e) => warn!("bad clipboard message: {e}"),
             }
             return Ok(true);
         }

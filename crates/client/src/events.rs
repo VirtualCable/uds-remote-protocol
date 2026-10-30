@@ -87,6 +87,12 @@ pub enum ClientEvent {
         /// RGBA pixels, `width * height * 4` bytes.
         rgba: Vec<u8>,
     },
+    /// Text pulled from the remote clipboard (M8); the consumer should
+    /// apply it to the local clipboard.
+    ClipboardData {
+        /// Clipboard text (UTF-8).
+        text: String,
+    },
     /// Non-fatal session condition worth surfacing (e.g. the video stream
     /// broke and a keyframe was requested). Fatal errors end
     /// [`crate::Session::run`] with `Err` instead.
@@ -135,6 +141,10 @@ impl std::fmt::Debug for ClientEvent {
                 .field("height", height)
                 .field("hot_x", hot_x)
                 .field("hot_y", hot_y)
+                .finish(),
+            Self::ClipboardData { text } => f
+                .debug_struct("ClipboardData")
+                .field("len", &text.len())
                 .finish(),
             Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
             Self::Disconnected => f.debug_struct("Disconnected").finish(),

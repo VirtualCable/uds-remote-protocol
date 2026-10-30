@@ -867,6 +867,14 @@ async fn serve<T: ReliableTransport>(
         announce_mic(&mut legs).await?;
     }
 
+    // Clipboard (M8): OS bridge + wire session state. Best-effort — when the
+    // platform has no backend the channel simply stays silent.
+    let mut clipboard = server::clipboard::spawn();
+    if clipboard.is_some() {
+        info!("clipboard bridge active");
+    }
+    let mut clip_session = protocol::ClipboardSession::new();
+
     // Link-quality state (§12): created on the first MetricsReport, with the
     // first reported RTT as the baseline.
     let mut ctl = ControlState {
@@ -943,11 +951,83 @@ async fn serve<T: ReliableTransport>(
                 let (ch, n) = res?;
                 if ch == channel::AUDIO_IN {
                     forward_mic(&mut mic_tx, &ctrl_buf[..n]);
+                } else if ch == channel::CLIPBOARD {
+                    handle_clipboard_packet(&mut legs, &mut clip_session, clipboard.as_ref(), &ctrl_buf[..n]).await;
                 } else {
                     handle_stream_packet(&mut ctl, &mut encoder, &fps_shared, ch, &ctrl_buf[..n]);
                 }
             }
+            ev = recv_clipboard(&mut clipboard) => {
+                match ev {
+                    Some(server::clipboard::ClipboardEvent::TextChanged(text)) => {
+                        let offer = clip_session.local_text_changed(text.as_bytes());
+                        if let Err(e) = legs.stream.send(channel::CLIPBOARD, &offer.encode()).await {
+                            warn!("clipboard offer send failed: {e}");
+                        }
+                    }
+                    None => {
+                        warn!("clipboard thread ended; clipboard disabled for this session");
+                        clipboard = None;
+                    }
+                }
+            }
         }
+    }
+}
+
+/// Awaits the next OS clipboard event; pends forever when there is no
+/// backend (the branch is then inert) and yields `None` when the backend
+/// thread died.
+async fn recv_clipboard(
+    bridge: &mut Option<server::clipboard::ClipboardBridge>,
+) -> Option<server::clipboard::ClipboardEvent> {
+    match bridge {
+        Some(b) => b.events.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Handles one packet from the clipboard channel (M8): offers are pulled,
+/// requests answered from the session cache, and data applied to the OS
+/// clipboard through the backend.
+async fn handle_clipboard_packet<T: ReliableTransport>(
+    legs: &mut Legs<T>,
+    session: &mut protocol::ClipboardSession,
+    bridge: Option<&server::clipboard::ClipboardBridge>,
+    buf: &[u8],
+) {
+    use protocol::ClipboardMessage as M;
+    match M::decode(buf) {
+        Ok(M::Offer { seq, formats }) => {
+            if let Some(req) = session.peer_offer(seq, formats)
+                && let Err(e) = legs.stream.send(channel::CLIPBOARD, &req.encode()).await
+            {
+                warn!("clipboard request send failed: {e}");
+            }
+        }
+        Ok(M::Request { seq, format }) => {
+            let resp = session.peer_request(seq, format);
+            if let Err(e) = legs.stream.send(channel::CLIPBOARD, &resp.encode()).await {
+                warn!("clipboard data send failed: {e}");
+            }
+        }
+        Ok(M::Data {
+            seq,
+            format,
+            payload,
+        }) => {
+            if let Some(bytes) = session.peer_data(seq, format, &payload) {
+                if let Ok(text) = String::from_utf8(bytes) {
+                    if let Some(b) = bridge {
+                        b.send_command(server::clipboard::ClipboardCommand::SetText(text));
+                    }
+                } else {
+                    warn!("clipboard data is not valid UTF-8");
+                }
+            }
+        }
+        Ok(M::DataFailed { seq }) => session.peer_data_failed(seq),
+        Err(e) => warn!("bad clipboard message: {e}"),
     }
 }
 
