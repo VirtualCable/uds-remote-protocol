@@ -10,6 +10,7 @@ use protocol::ChannelId;
 
 use crate::error::{Result, TransportError};
 use crate::traits::DatagramTransport;
+use std::sync::Arc;
 
 /// Encrypted datagram channel over a [`DatagramTransport`] (direct UDP or the
 /// launcher's local tunnel UDP relay).
@@ -112,6 +113,76 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
 
     /// Valid datagrams received so far; with [`Self::lost_estimate`] it gives
     /// a loss rate over any window (§12.2).
+    #[must_use]
+    pub fn received(&self) -> u64 {
+        self.rx.received()
+    }
+
+    /// Splits into independent send/receive halves sharing the socket, so a
+    /// paced sender task (§12.6) can run concurrently with the receive loop
+    /// without lock convoys.
+    #[must_use]
+    pub fn into_split(self) -> (DatagramSink<T>, DatagramSource<T>) {
+        let inner = Arc::new(self.inner);
+        (
+            DatagramSink { inner: Arc::clone(&inner), tx: self.tx, tx_buf: self.tx_buf },
+            DatagramSource { inner, rx: self.rx, rx_buf: self.rx_buf },
+        )
+    }
+}
+
+/// Send half of a split [`EncryptedDatagram`]: encrypts and sends, owns the
+/// sequence counter. `Clone` is deliberately not implemented: one sender
+/// task owns pacing and ordering.
+pub struct DatagramSink<T: DatagramTransport> {
+    inner: Arc<T>,
+    tx: DatagramCrypt,
+    tx_buf: Vec<u8>,
+}
+
+impl<T: DatagramTransport> DatagramSink<T> {
+    /// Sends `payload` encrypted on `channel`, as a single datagram.
+    pub async fn send(&mut self, channel: ChannelId, payload: &[u8]) -> Result<()> {
+        if payload.len() > consts::MAX_DATAGRAM_PAYLOAD {
+            return Err(TransportError::TooLarge {
+                size: payload.len(),
+                max: consts::MAX_DATAGRAM_PAYLOAD,
+            });
+        }
+        let n = self.tx.encrypt_into(channel, payload, &mut self.tx_buf)?;
+        self.inner.send(&self.tx_buf[..n]).await
+    }
+}
+
+/// Receive half of a split [`EncryptedDatagram`]: owns the replay window and
+/// the loss counters.
+pub struct DatagramSource<T: DatagramTransport> {
+    inner: Arc<T>,
+    rx: DatagramDecrypt,
+    rx_buf: Vec<u8>,
+}
+
+impl<T: DatagramTransport> DatagramSource<T> {
+    /// Receives the next valid datagram: channel id and plaintext length,
+    /// copied into `buf`. Invalid datagrams are dropped silently.
+    pub async fn recv_into(&mut self, buf: &mut [u8]) -> Result<(ChannelId, usize)> {
+        loop {
+            let n = self.inner.recv_into(&mut self.rx_buf).await?;
+            if let Some(result) =
+                EncryptedDatagram::<T>::try_decrypt(&mut self.rx, &self.rx_buf[..n], buf)?
+            {
+                return Ok(result);
+            }
+        }
+    }
+
+    /// Packet loss estimate derived from sequence gaps (§12.2).
+    #[must_use]
+    pub fn lost_estimate(&self) -> u64 {
+        self.rx.lost_estimate()
+    }
+
+    /// Valid datagrams received so far (§12.2).
     #[must_use]
     pub fn received(&self) -> u64 {
         self.rx.received()

@@ -26,7 +26,7 @@ mod tcp;
 mod traits;
 mod udp;
 
-pub use datagram::EncryptedDatagram;
+pub use datagram::{DatagramSink, DatagramSource, EncryptedDatagram};
 pub use detect::{UdpLeg, udp_detect, udp_offer};
 pub use error::{Result, TransportError};
 pub use stream::{EncryptedStream, RecoverOutcome, StreamSeqs};

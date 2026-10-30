@@ -69,11 +69,12 @@ pub trait ReliableTransport: Send {
 ///
 /// No implementation in Phase 0 (arrives in Phase 1).
 #[async_trait]
-pub trait DatagramTransport: Send {
-    /// Sends a full datagram.
-    async fn send(&mut self, dgram: &[u8]) -> Result<()>;
+pub trait DatagramTransport: Send + Sync {
+    /// Sends a full datagram. Takes `&self` so the transport can be shared
+    /// (`Arc`) between a sender task and a receiver loop (§12.6 pacing).
+    async fn send(&self, dgram: &[u8]) -> Result<()>;
     /// Receives a full datagram into `buf`, returning its size.
-    async fn recv_into(&mut self, buf: &mut [u8]) -> Result<usize>;
+    async fn recv_into(&self, buf: &mut [u8]) -> Result<usize>;
 }
 
 /// Connection factory (client side).

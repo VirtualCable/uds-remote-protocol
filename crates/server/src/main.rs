@@ -55,12 +55,12 @@ use protocol::{self, ControlMessage, CursorMessage, Probe, ProbeAck, channel};
 use server::audio::AudioSource;
 use server::pacer::{Pacer, PacerRate};
 use server::synthetic::SyntheticSource;
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use transport::{
     DirectListener, EncryptedDatagram, EncryptedStream, ReliableTransport, UdpTransport,
     udp_offer,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 struct Args {
     bind: SocketAddr,
@@ -177,27 +177,38 @@ fn read_config_frame() -> Result<Vec<u8>> {
 /// always alive; display traffic goes over the lossy UDP leg when present,
 /// or over the stream as fallback.
 struct Legs<T: ReliableTransport> {
-    udp: Option<Box<EncryptedDatagram<UdpTransport>>>,
+    /// UDP send half, shared with the paced display-sender task (§12.6).
+    udp: Option<Arc<Mutex<transport::DatagramSink<UdpTransport>>>>,
     stream: Box<EncryptedStream<T>>,
-    /// Burst pacer for the UDP leg (§12.6); inert on the stream fallback,
-    /// where the kernel's TCP flow control already paces.
-    pacer: Pacer,
+    /// Display fragments queued for the paced sender task; `None` on the
+    /// stream fallback, where the kernel's TCP flow control already paces.
+    frag_tx: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 impl<T: ReliableTransport> Legs<T> {
-    async fn send_fragment(&mut self, frag: &[u8]) -> transport::Result<()> {
-        match &mut self.udp {
-            Some(d) => {
-                self.pacer.pace(frag.len()).await;
-                d.send(channel::DISPLAY, frag).await
+    /// Queues one display fragment. Returns `Ok(false)` when the paced
+    /// sender's queue is full and the fragment was dropped: the caller must
+    /// treat the frame as broken and force a keyframe on the next one.
+    async fn send_fragment(&mut self, frag: &[u8]) -> transport::Result<bool> {
+        let Some(tx) = &self.frag_tx else {
+            self.stream.send(channel::DISPLAY, frag).await?;
+            return Ok(true);
+        };
+        match tx.try_send(frag.to_vec()) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(transport::TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "display sender task ended",
+                )))
             }
-            None => self.stream.send(channel::DISPLAY, frag).await,
         }
     }
 
     async fn send_control(&mut self, msg: &[u8]) -> transport::Result<()> {
-        match &mut self.udp {
-            Some(d) => d.send(channel::CONTROL, msg).await,
+        match &self.udp {
+            Some(d) => d.lock().await.send(channel::CONTROL, msg).await,
             None => self.stream.send(channel::CONTROL, msg).await,
         }
     }
@@ -205,8 +216,8 @@ impl<T: ReliableTransport> Legs<T> {
     /// Audio datagrams (§9): one Opus frame per datagram on `AUDIO_OUT`,
     /// over the UDP leg when present, else the reliable stream fallback.
     async fn send_audio(&mut self, payload: &[u8]) -> transport::Result<()> {
-        match &mut self.udp {
-            Some(d) => d.send(channel::AUDIO_OUT, payload).await,
+        match &self.udp {
+            Some(d) => d.lock().await.send(channel::AUDIO_OUT, payload).await,
             None => self.stream.send(channel::AUDIO_OUT, payload).await,
         }
     }
@@ -221,12 +232,30 @@ impl<T: ReliableTransport> Legs<T> {
 /// Receives the next UDP datagram; pends forever when the session has no
 /// UDP leg (TCP fallback), so it can sit in a `select!` branch.
 async fn recv_udp(
-    udp: &mut Option<Box<EncryptedDatagram<UdpTransport>>>,
+    udp: &mut Option<transport::DatagramSource<UdpTransport>>,
     buf: &mut [u8],
 ) -> transport::Result<(channel::ChannelId, usize)> {
     match udp {
         Some(d) => d.recv_into(buf).await,
         None => std::future::pending().await,
+    }
+}
+
+/// Paced display sender (§12.6): drains the fragment queue at the shared
+/// pacer rate. Runs in its own task so pacing sleeps never block the session
+/// loop (probes, input and clipboard must stay responsive — a blocked loop
+/// inflates the measured RTT and the quality controller spirals down).
+async fn display_sender(
+    mut rx: mpsc::Receiver<Vec<u8>>,
+    sink: Arc<Mutex<transport::DatagramSink<UdpTransport>>>,
+    mut pacer: Pacer,
+) {
+    while let Some(frag) = rx.recv().await {
+        pacer.pace(frag.len()).await;
+        if let Err(e) = sink.lock().await.send(channel::DISPLAY, &frag).await {
+            warn!("display sender: send failed, ending task: {e}");
+            return;
+        }
     }
 }
 
@@ -496,6 +525,12 @@ async fn recv_audio(rx: &mut Option<mpsc::Receiver<AudioPacket>>) -> Option<Audi
 /// the active preset's bitrate is used when audio is on.
 const AUDIO_CEILING_KBPS: u32 = 64;
 
+/// Display fragment queue depth for the paced sender task (§12.6), in
+/// datagrams. ~2.4 MiB: absorbs one large keyframe at typical codecs; when
+/// it fills (pacing behind schedule), the current frame is dropped and a
+/// keyframe is forced instead of growing latency.
+const DISPLAY_QUEUE_DGRAMS: usize = 2048;
+
 /// Feeds one link-quality report into the quality controller. FEC reacts to
 /// the loss signal on every report (hysteresis, §12.5); when the level
 /// changes, the new targets are applied: video encoder bitrate, capture fps,
@@ -642,8 +677,18 @@ async fn handle_frame<T: ReliableTransport>(
         return Ok(frame_id); // rect codecs: nothing changed on this frame
     }
     // Every fragment carries the frame's capture timestamp (§9.1).
+    let mut dropped = 0u32;
     for frag in Fragmenter::split(0, frame_id, frame.capture_ts_ms, &packet.data) {
-        legs.send_fragment(&frag).await?;
+        if !legs.send_fragment(&frag).await? {
+            dropped += 1;
+        }
+    }
+    if dropped > 0 {
+        // The paced queue is behind: this frame went out incomplete, so the
+        // next reference must be a keyframe (the client's loss recovery
+        // would ask for one anyway — forcing it skips that round trip).
+        debug!(frame_id, dropped, "paced queue full; frame dropped, keyframe forced");
+        encoder.request_keyframe();
     }
     Ok(frame_id.wrapping_add(1))
 }
@@ -822,7 +867,7 @@ async fn serve<T: ReliableTransport>(
             let mut dgram = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
             answer_probes(&mut dgram, &first, clock_start).await?;
             info!("display leg: UDP");
-            Some(Box::new(dgram))
+            Some(dgram)
         }
         other => {
             if let Ok(Err(e)) = other {
@@ -835,8 +880,19 @@ async fn serve<T: ReliableTransport>(
         }
     };
     let (pacer_rate, _) = PacerRate::new();
-    let mut legs =
-        Legs { udp, stream: Box::new(stream), pacer: Pacer::new(pacer_rate.clone()) };
+    // Split the UDP leg: the source stays in this loop (probes, mic), the
+    // sink is shared with the paced display-sender task (§12.6).
+    let (udp_sink, mut udp_src, frag_tx) = match udp {
+        Some(dgram) => {
+            let (sink, src) = dgram.into_split();
+            let sink = Arc::new(Mutex::new(sink));
+            let (tx, rx) = mpsc::channel::<Vec<u8>>(DISPLAY_QUEUE_DGRAMS);
+            tokio::spawn(display_sender(rx, Arc::clone(&sink), Pacer::new(pacer_rate.clone())));
+            (Some(sink), Some(src), Some(tx))
+        }
+        None => (None, None, None),
+    };
+    let mut legs = Legs { udp: udp_sink, stream: Box::new(stream), frag_tx };
 
     let fps_shared = Arc::new(AtomicU32::new(args.fps.max(1)));
     let mut frame_rx = spawn_capture(args, Arc::clone(&fps_shared), clock_start);
@@ -947,7 +1003,7 @@ async fn serve<T: ReliableTransport>(
                     audio_rx = None;
                 }
             }
-            res = recv_udp(&mut legs.udp, &mut udp_buf) => {
+            res = recv_udp(&mut udp_src, &mut udp_buf) => {
                 // Continuous probing (§12.1): answer latency probes for the
                 // whole session, not only during UDP detection.
                 let (ch, n) = res?;

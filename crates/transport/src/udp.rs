@@ -66,23 +66,23 @@ impl UdpTransport {
 
 #[async_trait]
 impl DatagramTransport for UdpTransport {
-    async fn send(&mut self, dgram: &[u8]) -> Result<()> {
+    async fn send(&self, dgram: &[u8]) -> Result<()> {
         self.socket.send(dgram).await?;
         Ok(())
     }
 
-    async fn recv_into(&mut self, buf: &mut [u8]) -> Result<usize> {
+    async fn recv_into(&self, buf: &mut [u8]) -> Result<usize> {
         Ok(self.socket.recv(buf).await?)
     }
 }
 
 #[async_trait]
 impl<T: DatagramTransport + ?Sized> DatagramTransport for Box<T> {
-    async fn send(&mut self, dgram: &[u8]) -> Result<()> {
+    async fn send(&self, dgram: &[u8]) -> Result<()> {
         (**self).send(dgram).await
     }
 
-    async fn recv_into(&mut self, buf: &mut [u8]) -> Result<usize> {
+    async fn recv_into(&self, buf: &mut [u8]) -> Result<usize> {
         (**self).recv_into(buf).await
     }
 }
