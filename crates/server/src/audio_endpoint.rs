@@ -36,9 +36,9 @@ use windows::core::{GUID, HRESULT, IUnknown, Interface as _, PCWSTR, PWSTR};
 const CLSID_POLICY_CONFIG: GUID =
     GUID::from_values(0x870a_f99c, 0x171d, 0x4f9e, [0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9]);
 
-// `IID_IPolicyConfig` (undocumented, kept for reference — we activate via
-// `IID_IUnknown` and index the vtable manually):
-// {F8679F50-850A-41CF-9C72-430F290290C8}.
+/// `IID_IPolicyConfig` (undocumented): {F8679F50-850A-41CF-9C72-430F290290C8}.
+const IID_IPOLICY_CONFIG: GUID =
+    GUID::from_values(0xf867_9f50, 0x850a, 0x41cf, [0x9c, 0x72, 0x43, 0x0f, 0x29, 0x02, 0x90, 0xc8]);
 
 /// `PKEY_Device_FriendlyName`: {A45C254E-DF1C-4EFD-8020-67D146A850E0}, pid 14.
 const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
@@ -61,6 +61,18 @@ const UDS_SPEAKERS_NAME: &str = "UDS Virtual Audio Device";
 /// Roles switched together so every app category lands on our device.
 const ROLES: [ERole; 3] = [eConsole, eMultimedia, eCommunications];
 
+/// `IUnknown` vtable slots we call manually. `QueryInterface` is required:
+/// the `IPolicyConfig` interface pointer is NOT the same pointer as the
+/// object's `IUnknown` (calling `SetDefaultEndpoint` through the `IUnknown`
+/// pointer hits a wrong vtable and fails with RPC_X_NULL_REF_POINTER).
+#[repr(C)]
+struct IUnknownVtbl {
+    query_interface:
+        unsafe extern "system" fn(*mut c_void, *const GUID, *mut *mut c_void) -> HRESULT,
+    add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
+    release: unsafe extern "system" fn(*mut c_void) -> u32,
+}
+
 /// Minimal `IPolicyConfig` vtable: only `SetDefaultEndpoint` (slot 13) is
 /// real; the earlier slots keep the layout honest and are never called.
 #[repr(C)]
@@ -81,9 +93,61 @@ struct IPolicyConfigVtbl {
     set_default_endpoint: unsafe extern "system" fn(*mut c_void, PCWSTR, ERole) -> HRESULT, // 13
 }
 
+/// Raw, reference-counted `IPolicyConfig` pointer.
+struct PolicyConfig {
+    this: *mut c_void,
+}
+
+// The PolicyConfig object is an in-proc MMDevAPI object callable from any
+// COM apartment (the reference C# probe calls it from an MTA thread), so
+// the guard can move across session-task threads.
+unsafe impl Send for PolicyConfig {}
+
+impl PolicyConfig {
+    /// Activates the PolicyConfig object and queries its `IPolicyConfig`.
+    fn create() -> Result<Self> {
+        // SAFETY: standard coclass activation; we only need the IUnknown
+        // pointer to QI for the real interface.
+        let unknown: IUnknown = unsafe { CoCreateInstance(&CLSID_POLICY_CONFIG, None, CLSCTX_ALL) }
+            .context("PolicyConfig activation failed")?;
+        let mut this: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `unknown` is a live COM object; `this` is a valid out
+        // param. On success `this` owns one reference released in Drop.
+        let hr = unsafe {
+            let vtbl = *(unknown.as_raw().cast::<*const IUnknownVtbl>());
+            ((*vtbl).query_interface)(unknown.as_raw(), &IID_IPOLICY_CONFIG, &raw mut this)
+        };
+        hr.ok().context("QueryInterface(IPolicyConfig) failed")?;
+        anyhow::ensure!(!this.is_null(), "QueryInterface(IPolicyConfig) returned null");
+        Ok(Self { this })
+    }
+
+    fn set_default_endpoint(&self, device_id: &str, role: ERole) -> Result<()> {
+        let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+        // SAFETY: `this` is a live IPolicyConfig pointer whose first field
+        // is the vtable pointer; `wide` is null-terminated and outlives the
+        // call.
+        let hr = unsafe {
+            let vtbl = *(self.this.cast::<*const IPolicyConfigVtbl>());
+            ((*vtbl).set_default_endpoint)(self.this, PCWSTR(wide.as_ptr()), role)
+        };
+        hr.ok().context("SetDefaultEndpoint")
+    }
+}
+
+impl Drop for PolicyConfig {
+    fn drop(&mut self) {
+        // SAFETY: `this` owns one reference, released exactly once here.
+        unsafe {
+            let vtbl = *(self.this.cast::<*const IUnknownVtbl>());
+            ((*vtbl).release)(self.this);
+        }
+    }
+}
+
 /// RAII guard: restores the pre-session default endpoints on drop.
 pub struct DefaultEndpointGuard {
-    policy: IUnknown,
+    policy: PolicyConfig,
     /// (role, device id) pairs captured before the switch.
     previous: Vec<(ERole, String)>,
 }
@@ -95,7 +159,7 @@ impl Drop for DefaultEndpointGuard {
         // is fine; the balancing uninit below is harmless either way.
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         for (role, id) in &self.previous {
-            if let Err(err) = set_default_endpoint(&self.policy, id, *role) {
+            if let Err(err) = self.policy.set_default_endpoint(id, *role) {
                 warn!(error = %format!("{err:#}"), role = role.0, "cannot restore the default render endpoint");
             }
         }
@@ -131,11 +195,9 @@ fn switch_default_to_uds_impl() -> Result<Option<DefaultEndpointGuard>> {
     let uds_id = device_id(&uds)?;
     let uds_name = device_friendly_name(&uds).unwrap_or_else(|| UDS_SPEAKERS_NAME.to_string());
 
-    // SAFETY: activation of the undocumented policy class. Requesting
-    // IID_IUnknown is fine: only the vtable layout (indexed manually in
-    // `set_default_endpoint`) matters, and the object pointer is the same.
-    let policy: IUnknown = unsafe { CoCreateInstance(&CLSID_POLICY_CONFIG, None, CLSCTX_ALL) }
-        .context("IPolicyConfig activation failed")?;
+    // The undocumented policy class, with a real IPolicyConfig pointer
+    // (NOT the IUnknown pointer — see `PolicyConfig::create`).
+    let policy = PolicyConfig::create()?;
 
     // Capture the current defaults per role (best-effort per role).
     let mut previous = Vec::new();
@@ -151,21 +213,12 @@ fn switch_default_to_uds_impl() -> Result<Option<DefaultEndpointGuard>> {
     }
 
     for role in ROLES {
-        set_default_endpoint(&policy, &uds_id, role)
+        policy
+            .set_default_endpoint(&uds_id, role)
             .with_context(|| format!("SetDefaultEndpoint failed for role {}", role.0))?;
     }
     info!(endpoint = %uds_name, "default render endpoint switched to UDS virtual speakers");
     Ok(Some(DefaultEndpointGuard { policy, previous }))
-}
-
-fn set_default_endpoint(policy: &IUnknown, device_id: &str, role: ERole) -> Result<()> {
-    let wide: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
-    let this = policy.as_raw();
-    // SAFETY: `this` is a live PolicyConfig object whose first field is the
-    // vtable pointer; `wide` is null-terminated and outlives the call.
-    let vtbl = unsafe { *(this.cast::<*const IPolicyConfigVtbl>()) };
-    let hr = unsafe { ((*vtbl).set_default_endpoint)(this, PCWSTR(wide.as_ptr()), role) };
-    hr.ok().context("SetDefaultEndpoint")
 }
 
 /// Finds the first active render endpoint whose friendly name contains
