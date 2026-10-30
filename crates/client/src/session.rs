@@ -218,9 +218,18 @@ impl Session {
         let mut buf = vec![0u8; 65_536];
         let mut sbuf = vec![0u8; 65_536];
 
-        let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
+        // 5 probes/s: the report period (1 s) gets several samples, so the
+        // period-min filter has something to work with (§12.2).
+        let mut probe_tick = tokio::time::interval(Duration::from_millis(200));
+        let mut report_tick = tokio::time::interval(Duration::from_secs(1));
         let mut rtt_ewma: Option<f64> = None;
         let mut jitter_ewma = 0.0_f64;
+        // Minimum RTT seen in the current report period (§12.2): acks share
+        // the client's recv loop with display decode, so under load a sample
+        // measures our own queueing delay, not the network's. The period min
+        // discards that self-inflicted pollution (the max inflates, the min
+        // stays the true path RTT); the server's baseline windows it again.
+        let mut rtt_period_min: Option<f64> = None;
         // The first ack is delayed by the server's session bring-up (capture
         // thread, encoder init), so it is discarded as warm-up and never
         // feeds the EWMA/baseline.
@@ -242,9 +251,7 @@ impl Session {
                             warmup_acks -= 1;
                             continue;
                         }
-                        let prev = rtt_ewma.unwrap_or(rtt);
-                        jitter_ewma += 0.25 * ((rtt - prev).abs() - jitter_ewma);
-                        rtt_ewma = Some(prev + 0.25 * (rtt - prev));
+                        rtt_period_min = Some(rtt_period_min.map_or(rtt, |m: f64| m.min(rtt)));
                         continue;
                     }
                     if !core.handle_packet(ch, &buf[..n])? {
@@ -279,7 +286,16 @@ impl Session {
                     leg.dgram
                         .send(channel::CONTROL, &protocol::Probe { t1: clock() }.encode())
                         .await?;
-                    let Some(rtt) = rtt_ewma else { continue };
+                }
+                _ = report_tick.tick() => {
+                    // Jitter over min-filtered samples: the raw per-ack
+                    // spread is our own scheduling noise, not the link's.
+                    if let Some(min) = rtt_period_min {
+                        let prev = rtt_ewma.unwrap_or(min);
+                        jitter_ewma += 0.25 * ((min - prev).abs() - jitter_ewma);
+                        rtt_ewma = Some(prev + 0.25 * (min - prev));
+                    }
+                    let Some(rtt) = rtt_period_min.take().or(rtt_ewma) else { continue };
                     let lost = leg.dgram.lost_estimate();
                     let received = leg.dgram.received();
                     let dlost = lost - prev_lost;
@@ -297,6 +313,14 @@ impl Session {
                         jitter_micros: jitter_ewma as u64,
                         loss_permille: (loss_rate * 1000.0) as u16,
                     };
+                    debug!(
+                        rtt_micros = rtt as u64,
+                        jitter_micros = jitter_ewma as u64,
+                        loss_permille = (loss_rate * 1000.0) as u16,
+                        dlost,
+                        drecv,
+                        "metrics report"
+                    );
                     stream.send(channel::CONTROL, &report.encode()?).await?;
                 }
                 msg = core.mic.recv() => {

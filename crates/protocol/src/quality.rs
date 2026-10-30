@@ -78,6 +78,12 @@ pub struct QualityPolicy {
     pub baseline_window: Duration,
     /// RTT / baseline above which a sample counts as bad (queue filling).
     pub rtt_bad_factor: f64,
+    /// Absolute slack added to the RTT bad threshold (microseconds). On fast
+    /// links the baseline collapses to a few hundred µs and 1.5x it flags
+    /// normal scheduling noise as congestion; the threshold is
+    /// `baseline * factor + slack`, so a LAN sample must exceed the baseline
+    /// by a *real* queueing delay to count as bad.
+    pub rtt_bad_slack_micros: u64,
     /// Jitter above which a sample counts as bad (microseconds).
     pub jitter_bad_micros: u64,
     /// Loss rate above which a sample counts as bad.
@@ -108,6 +114,7 @@ impl QualityPolicy {
             baseline_rtt_micros: baseline_rtt_micros.max(1),
             baseline_window: Duration::from_secs(60),
             rtt_bad_factor: 1.5,
+            rtt_bad_slack_micros: 2_000,
             jitter_bad_micros: 15_000,
             loss_bad: 0.01,
             bad_to_down: 2,
@@ -286,12 +293,14 @@ impl QualityController {
 
     /// True when the sample is bad by any signal (§12.2).
     fn is_bad(&self, s: &Sample) -> bool {
-        // Integer-domain compare: bad RTT = baseline * factor (factor scaled
-        // x1024 to avoid float precision lints in the hot path).
+        // Integer-domain compare: bad RTT = baseline * factor + slack (the
+        // factor is scaled x1024 to avoid float precision lints in the hot
+        // path). The slack keeps sub-ms baselines from flagging normal noise.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let factor_x1024 = (self.policy.rtt_bad_factor * 1024.0) as u128;
-        let rtt_bad =
-            u128::from(s.rtt_micros) * 1024 > u128::from(self.baseline_rtt_micros) * factor_x1024;
+        let threshold = u128::from(self.baseline_rtt_micros) * factor_x1024
+            + u128::from(self.policy.rtt_bad_slack_micros) * 1024;
+        let rtt_bad = u128::from(s.rtt_micros) * 1024 > threshold;
         rtt_bad || s.jitter_micros > self.policy.jitter_bad_micros || s.loss > self.policy.loss_bad
     }
 
@@ -343,6 +352,7 @@ mod tests {
             baseline_rtt_micros: 10_000,
             baseline_window: Duration::from_secs(60),
             rtt_bad_factor: 1.5,
+            rtt_bad_slack_micros: 2_000,
             jitter_bad_micros: 15_000,
             loss_bad: 0.01,
             bad_to_down: 2,
