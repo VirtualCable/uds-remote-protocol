@@ -74,16 +74,18 @@ pub struct AudioClient {
 
 impl AudioClient {
     /// Creates the client; when `enabled` is false, packets are counted and
-    /// dropped without decoding.
+    /// dropped without decoding. With `dump`, every decoded frame is also
+    /// appended to that file as raw s16le interleaved PCM (lab/E2E aid —
+    /// the format is the announced spec's rate and channel count).
     #[must_use]
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, dump: Option<std::path::PathBuf>) -> Self {
         let now_ms = Arc::new(AtomicI64::new(-1));
         if !enabled {
             return Self { tx: None, now_ms };
         }
         let (tx, rx) = channel();
         let shared = Arc::clone(&now_ms);
-        std::thread::spawn(move || run(&rx, &shared));
+        std::thread::spawn(move || run(&rx, &shared, dump.as_deref()));
         Self {
             tx: Some(tx),
             now_ms,
@@ -321,6 +323,8 @@ struct ActiveStream {
     now_ms: Arc<AtomicI64>,
     /// Keeps the device stream alive; dropped with the stream state.
     _stream: Option<DeviceStream>,
+    /// Lab aid: every decoded frame is appended here as raw s16le PCM.
+    dump: Option<std::io::BufWriter<std::fs::File>>,
     /// Scratch PCM buffer for one decoded frame (interleaved).
     pcm: Vec<i16>,
     /// Frame duration in ms (for PLC timestamp estimation, §9.1).
@@ -333,7 +337,11 @@ struct ActiveStream {
 }
 
 impl ActiveStream {
-    fn new(spec: &AudioSpec, now_ms: Arc<AtomicI64>) -> Option<Self> {
+    fn new(
+        spec: &AudioSpec,
+        now_ms: Arc<AtomicI64>,
+        dump_path: Option<&std::path::Path>,
+    ) -> Option<Self> {
         let Some(codec) = AudioCodecType::from_wire_id(spec.codec) else {
             warn!(codec = spec.codec, "unknown audio codec id; stream dropped");
             return None;
@@ -355,6 +363,16 @@ impl ActiveStream {
             }
         };
         let (playback, stream) = start_playback(spec.sample_rate, spec.channels);
+        let dump = dump_path.and_then(|path| match std::fs::File::create(path) {
+            Ok(file) => {
+                info!(path = %path.display(), "dumping decoded audio as raw s16le PCM");
+                Some(std::io::BufWriter::new(file))
+            }
+            Err(e) => {
+                warn!(path = %path.display(), "cannot open the audio dump file: {e}");
+                None
+            }
+        });
         let clock_map = playback
             .is_some()
             .then(|| AudioClockMap::new(spec.sample_rate, spec.channels));
@@ -374,6 +392,7 @@ impl ActiveStream {
             last_frame_ts: None,
             now_ms,
             _stream: stream,
+            dump,
             pcm: vec![0i16; preset.frame_samples() * usize::from(spec.channels)],
             frame_ms: u32::from(spec.frame_ms),
             frame_time: Duration::from_millis(u64::from(spec.frame_ms)),
@@ -427,6 +446,16 @@ impl ActiveStream {
                     self.plc_frames += 1;
                 }
                 self.decoded_frames += 1;
+                if let Some(dump) = &mut self.dump {
+                    use std::io::Write as _;
+                    for sample in &self.pcm {
+                        if dump.write_all(&sample.to_le_bytes()).is_err() {
+                            warn!("audio dump write failed; dumping disabled");
+                            self.dump = None;
+                            break;
+                        }
+                    }
+                }
                 if let Some(buf) = &self.playback {
                     if let Ok(mut b) = buf.lock() {
                         // Anchor before the push: after an underrun
@@ -484,20 +513,20 @@ impl ActiveStream {
 /// Audio thread main loop: applies jobs and ticks the active stream once
 /// per frame duration (absolute pacing, like the server's audio thread).
 /// Publishes the audio playback cursor (capture-clock ms) to `now_ms`.
-fn run(rx: &Receiver<AudioJob>, now_ms: &Arc<AtomicI64>) {
+fn run(rx: &Receiver<AudioJob>, now_ms: &Arc<AtomicI64>, dump: Option<&std::path::Path>) {
     let mut stream: Option<ActiveStream> = None;
     loop {
         let Some(st) = &mut stream else {
             // Nothing configured: block until the first job arrives.
             match rx.recv() {
-                Ok(job) => apply(&mut stream, job, now_ms),
+                Ok(job) => apply(&mut stream, job, now_ms, dump),
                 Err(_) => return, // client shutting down
             }
             continue;
         };
         let timeout = st.next_tick.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
-            Ok(job) => apply(&mut stream, job, now_ms),
+            Ok(job) => apply(&mut stream, job, now_ms, dump),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -511,9 +540,16 @@ fn run(rx: &Receiver<AudioJob>, now_ms: &Arc<AtomicI64>) {
     }
 }
 
-fn apply(stream: &mut Option<ActiveStream>, job: AudioJob, now_ms: &Arc<AtomicI64>) {
+fn apply(
+    stream: &mut Option<ActiveStream>,
+    job: AudioJob,
+    now_ms: &Arc<AtomicI64>,
+    dump: Option<&std::path::Path>,
+) {
     match job {
-        AudioJob::Config(spec) => *stream = ActiveStream::new(&spec, Arc::clone(now_ms)),
+        AudioJob::Config(spec) => {
+            *stream = ActiveStream::new(&spec, Arc::clone(now_ms), dump);
+        }
         AudioJob::Packet(payload) => {
             if let Some(st) = stream {
                 st.push_packet(&payload);
@@ -787,7 +823,7 @@ mod tests {
             fec: false,
         };
         let now_ms = Arc::new(AtomicI64::new(-1));
-        let mut st = ActiveStream::new(&spec, Arc::clone(&now_ms)).unwrap();
+        let mut st = ActiveStream::new(&spec, Arc::clone(&now_ms), None).unwrap();
         // Headless CI has no output device; attach a buffer manually to
         // exercise the clock mapping (the pump logic is device-independent).
         let buf: SharedBuffer = Arc::new(Mutex::new(PlaybackBuffer::new(48_000, 2)));
@@ -829,7 +865,7 @@ mod tests {
     /// packets and configs without decoding — the headless fallback.
     #[test]
     fn disabled_client_swallows_everything() {
-        let mut client = AudioClient::new(false);
+        let mut client = AudioClient::new(false, None);
         client.configure(AudioSpec {
             codec: AudioCodecType::Opus.wire_id(),
             sample_rate: 48_000,
@@ -874,7 +910,7 @@ mod tests {
                     }
                     continue;
                 }
-                apply(&mut stream, job, &now_ms);
+                apply(&mut stream, job, &now_ms, None);
             }
             (0, 0)
         });
@@ -932,7 +968,7 @@ mod tests {
                     }
                     continue;
                 }
-                apply(&mut stream, job, &now_ms);
+                apply(&mut stream, job, &now_ms, None);
             }
             (0, 0)
         });

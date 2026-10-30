@@ -192,6 +192,7 @@ async fn session_delivers_frames_cursor_and_input_end_to_end() -> Result<()> {
         ticket: TICKET,
         key: KEY,
         audio: false,
+        audio_dump: None,
         mic: MicMode::Off,
         privacy_screen: false,
     };
@@ -278,6 +279,7 @@ async fn session_falls_back_to_tcp_when_udp_is_silent() -> Result<()> {
         ticket: TICKET,
         key: KEY,
         audio: false,
+        audio_dump: None,
         mic: MicMode::Off,
         privacy_screen: false,
     };

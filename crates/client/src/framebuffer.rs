@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(out, &[0x01, 0, 0, 0]);
         out.clear();
         buf.copy_rect_to(Rect { x: 0, y: 3, w: 1, h: 1 }, &mut out);
-        assert!(out.is_empty());
+        assert!(out.is_empty(), "expected no copied samples, got {out:?}");
     }
 
     #[test]

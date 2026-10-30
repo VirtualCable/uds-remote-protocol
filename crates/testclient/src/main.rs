@@ -35,6 +35,8 @@ struct Args {
     selftest_input: bool,
     /// Audio playback (§9); disabled with `--no-audio`.
     audio: bool,
+    /// Lab aid: `--audio-dump PATH` writes decoded audio as raw s16le PCM.
+    audio_dump: Option<std::path::PathBuf>,
     /// Mic capture (§9.2): off by default, `--mic` captures the default
     /// input device, `--mic-test-tone FREQ` sends a synthetic sine instead.
     mic: MicMode,
@@ -99,6 +101,7 @@ fn parse_args() -> Result<Args> {
         max_frames: None,
         selftest_input: false,
         audio: true,
+        audio_dump: None,
         mic: MicMode::Off,
         privacy: false,
     };
@@ -138,6 +141,7 @@ fn parse_args() -> Result<Args> {
                 ticket_seen = true;
             }
             "--max-frames" => args.max_frames = Some(value.parse().context("bad --max-frames")?),
+            "--audio-dump" => args.audio_dump = Some(value.into()),
             "--mic-test-tone" => {
                 args.mic = MicMode::Tone(value.parse().context("bad --mic-test-tone")?);
             }
@@ -563,6 +567,7 @@ async fn run() -> Result<()> {
         ticket: args.ticket,
         key: args.key,
         audio: args.audio,
+        audio_dump: args.audio_dump,
         mic: args.mic,
         privacy_screen: args.privacy,
     };

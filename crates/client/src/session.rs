@@ -51,6 +51,9 @@ pub struct ClientConfig {
     pub key: [u8; 32],
     /// Audio playback (§9); when false, audio packets are dropped.
     pub audio: bool,
+    /// Lab aid: dump every decoded audio frame to this file as raw s16le
+    /// interleaved PCM (rate/channels from the announced spec).
+    pub audio_dump: Option<std::path::PathBuf>,
     /// Mic capture mode (§9.2); off by default.
     pub mic: MicMode,
     /// Ask the server to hide the physical console behind a privacy screen
@@ -462,7 +465,7 @@ impl Core {
             reasm: Reassembler::new(),
             decoders: HashMap::new(),
             recovery: DecodeRecovery::default(),
-            audio: AudioClient::new(config.audio),
+            audio: AudioClient::new(config.audio, config.audio_dump.clone()),
             mic: MicClient::new(config.mic, clock_start),
             present_queue: PresentQueue::new(),
             avsync_stats: SyncStats::default(),
