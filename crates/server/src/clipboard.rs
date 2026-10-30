@@ -243,25 +243,36 @@ mod windows_impl {
         false
     }
 
+    /// Closes the clipboard on drop so no error path can leak the open
+    /// state (a leaked open blocks every other process from the clipboard).
+    struct ClipboardGuard;
+
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            unsafe {
+                CloseClipboard().ok();
+            }
+        }
+    }
+
     /// Reads the current `CF_UNICODETEXT` content, if any.
     fn read_clipboard_text() -> Option<String> {
         if !open_clipboard() {
             return None;
         }
+        let _guard = ClipboardGuard;
         unsafe {
             let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
             let hglobal = HGLOBAL(handle.0);
             let size = GlobalSize(hglobal);
             let ptr = GlobalLock(hglobal);
             if ptr.is_null() || size < 2 {
-                CloseClipboard().ok();
                 return None;
             }
             let units = std::slice::from_raw_parts(ptr as *const u16, size / 2);
             let end = units.iter().position(|&c| c == 0).unwrap_or(units.len());
             let text = String::from_utf16_lossy(&units[..end]);
             let _ = GlobalUnlock(hglobal);
-            CloseClipboard().ok();
             Some(text)
         }
     }
@@ -275,6 +286,7 @@ mod windows_impl {
         wide.push(0);
         let bytes = wide.len() * 2;
         let ok = open_clipboard() && unsafe {
+            let _guard = ClipboardGuard;
             let result: windows::core::Result<()> = (|| {
                 EmptyClipboard()?;
                 let hglobal = GlobalAlloc(GMEM_MOVEABLE, bytes)?;
@@ -290,7 +302,7 @@ mod windows_impl {
                     return Err(e);
                 }
                 // Ownership of the global passed to the clipboard.
-                CloseClipboard()
+                Ok(())
             })();
             result.is_ok()
         };
