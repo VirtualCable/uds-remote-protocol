@@ -19,6 +19,9 @@ pub const CURSOR: ChannelId = 5;
 /// Channel 6: clipboard (bidirectional, reliable; offer/request/data pull
 /// model — payloads must not be dropped once a generation was announced).
 pub const CLIPBOARD: ChannelId = 6;
+/// Channel 7: storage (bidirectional, reliable; explicit file transfers —
+/// chunked and potentially large, so it must never share the lossy leg).
+pub const STORAGE: ChannelId = 7;
 
 /// Last ID reserved for UDS core channels (`0x0000..=0x00FF`).
 pub const CORE_MAX: ChannelId = 0x00FF;

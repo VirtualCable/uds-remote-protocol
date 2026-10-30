@@ -44,6 +44,27 @@ pub enum ClientCommand {
     /// Ends the session: the loop finishes, `ClientEvent::Disconnected` is
     /// emitted and [`crate::Session::run`] returns.
     Close,
+    /// Lists the server's storage spool (M8, model B); the answer arrives
+    /// as [`crate::ClientEvent::StorageList`].
+    StorageList,
+    /// Uploads a local file into the server spool. The spool name is the
+    /// path's leaf name. Progress ends in `TransferDone`/`TransferError`.
+    StorageUpload {
+        /// Local file to send.
+        path: std::path::PathBuf,
+    },
+    /// Downloads a file from the server spool to a local path.
+    StorageDownload {
+        /// Leaf name in the server spool.
+        name: String,
+        /// Local destination path.
+        dest: std::path::PathBuf,
+    },
+    /// Cancels an active transfer (upload or download).
+    StorageAbort {
+        /// Transfer to cancel.
+        transfer_id: u32,
+    },
 }
 
 /// Sending half of the command channel, handed to the consumer by

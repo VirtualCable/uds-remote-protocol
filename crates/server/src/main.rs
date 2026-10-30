@@ -78,6 +78,8 @@ struct Args {
     audio_preset: String,
     audio_source: String,
     mic_sink: String,
+    /// Storage spool directory (M8); defaults to the per-user spool.
+    spool: Option<std::path::PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -97,6 +99,7 @@ fn parse_args() -> Result<Args> {
         audio_preset: "opus-music".to_string(),
         audio_source: "auto".to_string(),
         mic_sink: "null".to_string(),
+        spool: None,
     };
     let mut key_seen = false;
     let mut it = std::env::args().skip(1);
@@ -151,6 +154,7 @@ fn parse_args() -> Result<Args> {
             "--audio-preset" => args.audio_preset = value,
             "--audio-source" => args.audio_source = value,
             "--mic-sink" => args.mic_sink = value,
+            "--spool" => args.spool = Some(value.into()),
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -944,6 +948,27 @@ async fn serve<T: ReliableTransport>(
     }
     let mut clip_session = protocol::ClipboardSession::new();
 
+    // Storage (M8, model B): spool directory for explicit file transfers.
+    // Best-effort like the clipboard: when the directory cannot be created
+    // the channel answers errors but the session goes on.
+    let mut spool = match server::storage::Spool::open(
+        args.spool
+            .clone()
+            .unwrap_or_else(server::storage::Spool::default_root),
+    ) {
+        Ok(s) => {
+            info!("storage spool active");
+            Some(s)
+        }
+        Err(e) => {
+            warn!("storage spool unavailable: {e}");
+            None
+        }
+    };
+    // Download chunk pump: 4 x 64 KiB per millisecond tick ≈ 256 MiB/s of
+    // headroom; the stream's own backpressure throttles the real rate.
+    let mut storage_tick = tokio::time::interval(Duration::from_millis(1));
+
     // Link-quality state (§12): created on the first MetricsReport, with the
     // first reported RTT as the baseline.
     let mut ctl = ControlState {
@@ -1023,8 +1048,19 @@ async fn serve<T: ReliableTransport>(
                     forward_mic(&mut mic_tx, &ctrl_buf[..n]);
                 } else if ch == channel::CLIPBOARD {
                     handle_clipboard_packet(&mut legs, &mut clip_session, clipboard.as_ref(), &ctrl_buf[..n]).await;
+                } else if ch == channel::STORAGE {
+                    handle_storage_packet(&mut legs, &mut spool, &ctrl_buf[..n]).await;
                 } else {
                     handle_stream_packet(&mut ctl, &mut encoder, &fps_shared, ch, &ctrl_buf[..n]);
+                }
+            }
+            _ = storage_tick.tick(), if spool.as_ref().is_some_and(server::storage::Spool::has_pending) => {
+                if let Some(s) = spool.as_mut() {
+                    for msg in s.pump(4) {
+                        if let Err(e) = legs.stream.send(channel::STORAGE, &msg.encode()).await {
+                            warn!("storage chunk send failed: {e}");
+                        }
+                    }
                 }
             }
             ev = recv_clipboard(&mut clipboard) => {
@@ -1098,6 +1134,42 @@ async fn handle_clipboard_packet<T: ReliableTransport>(
         }
         Ok(M::DataFailed { seq }) => session.peer_data_failed(seq),
         Err(e) => warn!("bad clipboard message: {e}"),
+    }
+}
+
+/// Handles one packet from the storage channel (M8): decodes the message,
+/// applies it to the spool and sends back the immediate responses (chunk
+/// streams are produced by the session loop's pump tick).
+async fn handle_storage_packet<T: ReliableTransport>(
+    legs: &mut Legs<T>,
+    spool: &mut Option<server::storage::Spool>,
+    buf: &[u8],
+) {
+    let msg = match protocol::StorageMessage::decode(buf) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!("bad storage message: {e}");
+            return;
+        }
+    };
+    let responses = if let Some(s) = spool {
+        s.handle(&msg)
+    } else {
+        let id = match &msg {
+            protocol::StorageMessage::PutStart { transfer_id, .. }
+            | protocol::StorageMessage::GetStart { transfer_id, .. } => *transfer_id,
+            _ => 0,
+        };
+        vec![protocol::StorageMessage::Error {
+            transfer_id: id,
+            code: protocol::ERR_IO,
+            message: "storage unavailable on the server".into(),
+        }]
+    };
+    for resp in responses {
+        if let Err(e) = legs.stream.send(channel::STORAGE, &resp.encode()).await {
+            warn!("storage response send failed: {e}");
+        }
     }
 }
 

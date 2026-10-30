@@ -25,9 +25,10 @@ mod events;
 mod framebuffer;
 pub mod mic;
 mod session;
+mod storage;
 
 pub use command::{ClientCommand, CommandSender};
-pub use events::{ClientEvent, Rect};
+pub use events::{ClientEvent, Rect, TransferDirection};
 pub use framebuffer::{DisplayBuffer, Displays, SharedDisplay};
 pub use session::{ClientConfig, Session};
 

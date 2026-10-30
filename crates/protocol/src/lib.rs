@@ -17,6 +17,7 @@ mod hello;
 mod input;
 mod probe;
 mod quality;
+mod storage;
 
 pub use channel::ChannelId;
 pub use clipboard::{
@@ -31,4 +32,9 @@ pub use probe::{Probe, ProbeAck, ProbeError, compute_rtt};
 pub use quality::{
     FEC_OFF_LOSS, FEC_ON_LOSS, LEVEL_DEGRADED, LEVEL_FULL, QualityController, QualityEvent,
     QualityLevel, QualityPolicy, QualityTargets, Sample, fec_update, targets,
+};
+pub use storage::{
+    ERR_BAD_NAME, ERR_BAD_OFFSET, ERR_BAD_TRANSFER, ERR_IO, ERR_NOT_FOUND, ERR_TOO_LARGE,
+    MAX_CHUNK_PAYLOAD, MAX_ERROR_MSG_LEN, MAX_FILE_SIZE, MAX_NAME_LEN, STORAGE_CHUNK_SIZE,
+    StorageError, StorageMessage, validate_name,
 };

@@ -120,7 +120,7 @@ mod tests {
         shared.store(80_000_000, Ordering::Relaxed); // 10 MB/s
         let mut p = Pacer::new(rate);
         let t0 = Instant::now();
-        assert!(p.consume(BUCKET_BYTES as usize, t0).is_zero()); // drain bucket
+        assert!(p.consume(65_536, t0).is_zero()); // drain bucket
         // 10 KB at 10 MB/s = exactly 1 ms of wait.
         assert_eq!(p.consume(10_000, t0), std::time::Duration::from_millis(1));
     }
@@ -131,7 +131,7 @@ mod tests {
         shared.store(80_000_000, Ordering::Relaxed); // 10 MB/s
         let mut p = Pacer::new(rate);
         let t0 = Instant::now();
-        assert!(p.consume(BUCKET_BYTES as usize, t0).is_zero());
+        assert!(p.consume(65_536, t0).is_zero());
         // 10 ms later 100 KB refilled (capped at the bucket size).
         let t1 = t0 + std::time::Duration::from_millis(10);
         assert!(p.consume(10_000, t1).is_zero());

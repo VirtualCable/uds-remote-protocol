@@ -48,6 +48,14 @@ struct Args {
     /// Lab aid: `--selftest-clipboard TEXT` announces TEXT as the local
     /// clipboard once, ~3 s into the session (E2E without a desktop).
     selftest_clipboard: Option<String>,
+    /// Storage (M8): `--upload PATH` sends PATH to the server spool ~2 s
+    /// into the session.
+    upload: Option<std::path::PathBuf>,
+    /// Storage (M8): `--download NAME` pulls NAME from the server spool
+    /// into the current directory ~2 s into the session.
+    download: Option<String>,
+    /// Storage (M8): `--storage-list` requests the spool listing ~2 s in.
+    storage_list: bool,
 }
 
 /// One scripted input action for `--selftest-input`.
@@ -111,6 +119,9 @@ fn parse_args() -> Result<Args> {
         privacy: false,
         clipboard: true,
         selftest_clipboard: None,
+        upload: None,
+        download: None,
+        storage_list: false,
     };
     let mut key_seen = false;
     let mut ticket_seen = false;
@@ -140,6 +151,10 @@ fn parse_args() -> Result<Args> {
             args.clipboard = false;
             continue;
         }
+        if arg == "--storage-list" {
+            args.storage_list = true;
+            continue;
+        }
         let value = it.next().context(format!("missing value for {arg}"))?;
         match arg.as_str() {
             "--addr" => args.addr = value.parse().context("bad --addr")?,
@@ -157,6 +172,8 @@ fn parse_args() -> Result<Args> {
                 args.mic = MicMode::Tone(value.parse().context("bad --mic-test-tone")?);
             }
             "--selftest-clipboard" => args.selftest_clipboard = Some(value),
+            "--upload" => args.upload = Some(value.into()),
+            "--download" => args.download = Some(value),
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -685,6 +702,15 @@ async fn run() -> Result<()> {
     let mut selftest_clip = args
         .selftest_clipboard
         .map(|text| (Instant::now() + Duration::from_secs(3), text));
+    // Storage (M8): requested transfers fire once, ~2 s into the session;
+    // the session is closed when all of them settled (E2E determinism).
+    let storage_at = Instant::now() + Duration::from_secs(2);
+    let mut storage_pending_actions = (args.upload.is_some()
+        || args.download.is_some()
+        || args.storage_list)
+        .then_some(storage_at);
+    let mut transfers_in_flight = 0u32;
+    let transfers_requested = u32::from(args.upload.is_some()) + u32::from(args.download.is_some());
     let mut frames = 0u64;
     let start = Instant::now();
     let mut close_sent = false;
@@ -732,6 +758,35 @@ async fn run() -> Result<()> {
                             watcher.set_local(text);
                         }
                     }
+                    ClientEvent::StorageList { entries } => {
+                        for (name, size) in &entries {
+                            info!(name, size, "UDSRP-STORAGE-LIST");
+                        }
+                        info!(entries = entries.len(), "storage listing done");
+                    }
+                    ClientEvent::TransferDone { direction, name, bytes, .. } => {
+                        match direction {
+                            client::TransferDirection::Upload => {
+                                info!(name, bytes, "UDSRP-UPLOAD-OK");
+                            }
+                            client::TransferDirection::Download => {
+                                info!(name, bytes, "UDSRP-DOWNLOAD-OK");
+                            }
+                        }
+                        transfers_in_flight = transfers_in_flight.saturating_sub(1);
+                        if transfers_requested > 0 && transfers_in_flight == 0 && !close_sent {
+                            close_sent = true;
+                            let _ = commands.try_send(ClientCommand::Close);
+                        }
+                    }
+                    ClientEvent::TransferError { transfer_id, message } => {
+                        warn!(transfer_id, message, "UDSRP-TRANSFER-ERR");
+                        transfers_in_flight = transfers_in_flight.saturating_sub(1);
+                        if transfers_requested > 0 && transfers_in_flight == 0 && !close_sent {
+                            close_sent = true;
+                            let _ = commands.try_send(ClientCommand::Close);
+                        }
+                    }
                     ClientEvent::Error(e) => warn!("session error: {e}"),
                     ClientEvent::Disconnected => {
                         info!("session disconnected");
@@ -763,6 +818,23 @@ async fn run() -> Result<()> {
                     info!(len = text.len(), "selftest clipboard announce");
                     let _ = commands.try_send(ClientCommand::ClipboardChanged(text.clone()));
                     selftest_clip = None;
+                }
+                if storage_pending_actions.is_some_and(|when| Instant::now() >= when) {
+                    storage_pending_actions = None;
+                    if args.storage_list {
+                        let _ = commands.try_send(ClientCommand::StorageList);
+                    }
+                    if let Some(path) = &args.upload {
+                        info!(path = %path.display(), "storage upload requested");
+                        transfers_in_flight += 1;
+                        let _ = commands.try_send(ClientCommand::StorageUpload { path: path.clone() });
+                    }
+                    if let Some(name) = &args.download {
+                        let dest = std::path::PathBuf::from(format!("downloaded-{name}"));
+                        info!(name, dest = %dest.display(), "storage download requested");
+                        transfers_in_flight += 1;
+                        let _ = commands.try_send(ClientCommand::StorageDownload { name: name.clone(), dest });
+                    }
                 }
             }
         }

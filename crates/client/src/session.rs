@@ -166,7 +166,7 @@ impl Session {
                     if !core.handle_packet(ch, &buf[..n])? {
                         return Ok(());
                     }
-                    Self::flush_clipboard(&mut stream, core).await?;
+                    Self::flush_out(&mut stream, core).await?;
                 }
                 msg = core.mic.recv() => {
                     if let Some(payload) = msg {
@@ -188,6 +188,12 @@ impl Session {
                     if !core.avsync_tick() {
                         return Ok(());
                     }
+                    for ev in core.storage.pump() {
+                        if !emit(&core.events, ev) {
+                            return Ok(());
+                        }
+                    }
+                    Self::flush_out(&mut stream, core).await?;
                 }
             }
         }
@@ -257,7 +263,7 @@ impl Session {
                     if !core.handle_packet(ch, &buf[..n])? {
                         return Ok(());
                     }
-                    Self::flush_clipboard(&mut stream, core).await?;
+                    Self::flush_out(&mut stream, core).await?;
                     // Ask for a keyframe when the stream is broken (decode
                     // errors) or a frame was evicted incomplete; the rate
                     // limit re-asks every 500 ms while the stream stays
@@ -280,7 +286,7 @@ impl Session {
                     if !core.handle_packet(ch, &sbuf[..n])? {
                         return Ok(());
                     }
-                    Self::flush_clipboard(&mut stream, core).await?;
+                    Self::flush_out(&mut stream, core).await?;
                 }
                 _ = probe_tick.tick() => {
                     leg.dgram
@@ -314,9 +320,9 @@ impl Session {
                         loss_permille: (loss_rate * 1000.0) as u16,
                     };
                     debug!(
-                        rtt_micros = rtt as u64,
-                        jitter_micros = jitter_ewma as u64,
-                        loss_permille = (loss_rate * 1000.0) as u16,
+                        rtt_micros = rtt,
+                        jitter_micros = jitter_ewma,
+                        loss_permille = loss_rate * 1000.0,
                         dlost,
                         drecv,
                         "metrics report"
@@ -343,18 +349,28 @@ impl Session {
                     if !core.avsync_tick() {
                         return Ok(());
                     }
+                    for ev in core.storage.pump() {
+                        if !emit(&core.events, ev) {
+                            return Ok(());
+                        }
+                    }
+                    Self::flush_out(&mut stream, core).await?;
                 }
             }
         }
     }
 
-    /// Flushes queued clipboard answers on the reliable stream (M8).
-    async fn flush_clipboard(
+    /// Flushes queued clipboard and storage answers on the reliable
+    /// stream (M8).
+    async fn flush_out(
         stream: &mut EncryptedStream<Box<dyn ReliableTransport>>,
         core: &mut Core,
     ) -> Result<()> {
         for msg in core.clip_out.drain(..) {
             stream.send(channel::CLIPBOARD, &msg.encode()).await?;
+        }
+        for msg in core.storage.out.drain(..) {
+            stream.send(channel::STORAGE, &msg.encode()).await?;
         }
         Ok(())
     }
@@ -395,6 +411,22 @@ impl Session {
                     core.last_key_req = Some(Instant::now());
                 }
             }
+            Ok(ClientCommand::StorageList) => core.storage.list(),
+            Ok(ClientCommand::StorageUpload { path }) => {
+                for ev in core.storage.start_upload(&path) {
+                    if !emit(&core.events, ev) {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(ClientCommand::StorageDownload { name, dest }) => {
+                for ev in core.storage.start_download(&name, &dest) {
+                    if !emit(&core.events, ev) {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(ClientCommand::StorageAbort { transfer_id }) => core.storage.abort(transfer_id),
             Ok(ClientCommand::Close) => {
                 info!("close requested by the consumer");
                 return Ok(false);
@@ -404,6 +436,9 @@ impl Session {
                 return Ok(false);
             }
         }
+        // Storage commands queue wire messages instead of sending them
+        // (they also emit events); flush anything they produced.
+        Self::flush_out(stream, core).await?;
         Ok(true)
     }
 }
@@ -499,6 +534,9 @@ struct Core {
     /// Clipboard messages queued for sending (handle_packet is synchronous;
     /// the receive loops drain this after each packet).
     clip_out: Vec<protocol::ClipboardMessage>,
+    /// Storage transfers state (M8, model B); its `out` queue is drained
+    /// by the receive loops like `clip_out`.
+    storage: crate::storage::StorageClient,
 }
 
 impl Core {
@@ -523,6 +561,7 @@ impl Core {
             prev_dropped: 0,
             clip: protocol::ClipboardSession::new(),
             clip_out: Vec::new(),
+            storage: crate::storage::StorageClient::new(),
         }
     }
 
@@ -680,6 +719,21 @@ impl Core {
                 }
                 Ok(M::DataFailed { seq }) => self.clip.peer_data_failed(seq),
                 Err(e) => warn!("bad clipboard message: {e}"),
+            }
+            return Ok(true);
+        }
+        if ch == channel::STORAGE {
+            // Storage (M8, model B): applied to the transfer state; wire
+            // answers queue in storage.out and are flushed by the loops.
+            match protocol::StorageMessage::decode(packet) {
+                Ok(msg) => {
+                    for ev in self.storage.handle(&msg) {
+                        if !emit(&self.events, ev) {
+                            return Ok(false);
+                        }
+                    }
+                }
+                Err(e) => warn!("bad storage message: {e}"),
             }
             return Ok(true);
         }

@@ -29,6 +29,15 @@ pub struct Rect {
     pub h: u32,
 }
 
+/// Direction of a storage transfer (M8, model B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferDirection {
+    /// Local file → server spool.
+    Upload,
+    /// Server spool → local file.
+    Download,
+}
+
 /// Protocol → consumer notifications (§15.3).
 ///
 /// Sent with `try_send` on the consumer-provided channel: when the channel
@@ -93,6 +102,30 @@ pub enum ClientEvent {
         /// Clipboard text (UTF-8).
         text: String,
     },
+    /// Answer to [`crate::ClientCommand::StorageList`] (M8, model B): the
+    /// server spool contents as `(name, size)` pairs.
+    StorageList {
+        /// Spool entries.
+        entries: Vec<(String, u64)>,
+    },
+    /// A storage transfer (M8) finished successfully.
+    TransferDone {
+        /// Transfer identifier.
+        transfer_id: u32,
+        /// Upload (local → server spool) or download (spool → local).
+        direction: TransferDirection,
+        /// Spool file name.
+        name: String,
+        /// Bytes transferred.
+        bytes: u64,
+    },
+    /// A storage transfer (M8) failed or was rejected.
+    TransferError {
+        /// Related transfer, or 0 when not tied to one.
+        transfer_id: u32,
+        /// Human-readable detail.
+        message: String,
+    },
     /// Non-fatal session condition worth surfacing (e.g. the video stream
     /// broke and a keyframe was requested). Fatal errors end
     /// [`crate::Session::run`] with `Err` instead.
@@ -145,6 +178,30 @@ impl std::fmt::Debug for ClientEvent {
             Self::ClipboardData { text } => f
                 .debug_struct("ClipboardData")
                 .field("len", &text.len())
+                .finish(),
+            Self::StorageList { entries } => f
+                .debug_struct("StorageList")
+                .field("entries", &entries.len())
+                .finish(),
+            Self::TransferDone {
+                transfer_id,
+                direction,
+                name,
+                bytes,
+            } => f
+                .debug_struct("TransferDone")
+                .field("transfer_id", transfer_id)
+                .field("direction", direction)
+                .field("name", name)
+                .field("bytes", bytes)
+                .finish(),
+            Self::TransferError {
+                transfer_id,
+                message,
+            } => f
+                .debug_struct("TransferError")
+                .field("transfer_id", transfer_id)
+                .field("message", message)
                 .finish(),
             Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
             Self::Disconnected => f.debug_struct("Disconnected").finish(),
