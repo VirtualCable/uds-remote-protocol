@@ -79,7 +79,7 @@ mod windows_impl {
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, GetMessageW, HWND_MESSAGE, MSG, PostMessageW,
-        RegisterClassW, WINDOW_STYLE, WM_APP, WM_CLIPBOARDUPDATE, WNDCLASSW, WS_OVERLAPPED,
+        RegisterClassW, WM_APP, WM_CLIPBOARDUPDATE, WNDCLASSW, WS_OVERLAPPED,
     };
     use windows::core::w;
 
@@ -93,10 +93,11 @@ mod windows_impl {
     const OPEN_RETRIES: u32 = 10;
 
     /// State shared with the backend thread: the text we last set ourselves
-    /// (echo suppression) and the window handle for wake-ups.
+    /// (echo suppression) and the window handle for wake-ups. The handle is
+    /// stored as `isize` so `Shared` stays `Send` (raw pointers are not).
     struct Shared {
         last_set: Mutex<Option<String>>,
-        hwnd: Mutex<Option<HWND>>,
+        hwnd: Mutex<Option<isize>>,
     }
 
     /// Spawns the listener thread and returns the bridge channels; `None` if
@@ -117,6 +118,7 @@ mod windows_impl {
                 commands: cmd_tx,
                 wake: Box::new(move || {
                     if let Some(hwnd) = *shared.hwnd.lock().unwrap_or_else(|e| e.into_inner()) {
+                        let hwnd = HWND(hwnd as *mut core::ffi::c_void);
                         unsafe {
                             let _ = PostMessageW(Some(hwnd), WM_COMMAND_READY, WPARAM(0), LPARAM(0));
                         }
@@ -186,7 +188,7 @@ mod windows_impl {
                 ready.send(false).ok();
                 return;
             }
-            *shared.hwnd.lock().unwrap_or_else(|e| e.into_inner()) = Some(hwnd);
+            *shared.hwnd.lock().unwrap_or_else(|e| e.into_inner()) = Some(hwnd.0 as isize);
             ready.send(true).ok();
             info!("clipboard: listener ready");
 
@@ -246,7 +248,7 @@ mod windows_impl {
         if !open_clipboard() {
             return None;
         }
-        let out = unsafe {
+        unsafe {
             let handle = GetClipboardData(CF_UNICODETEXT).ok()?;
             let hglobal = HGLOBAL(handle.0);
             let size = GlobalSize(hglobal);
@@ -261,8 +263,7 @@ mod windows_impl {
             let _ = GlobalUnlock(hglobal);
             CloseClipboard().ok();
             Some(text)
-        };
-        out
+        }
     }
 
     /// Replaces the clipboard with `text` (`CF_UNICODETEXT`) and records it
@@ -274,9 +275,9 @@ mod windows_impl {
         wide.push(0);
         let bytes = wide.len() * 2;
         let ok = open_clipboard() && unsafe {
-            let result = (|| {
-                EmptyClipboard().ok()?;
-                let hglobal = GlobalAlloc(GMEM_MOVEABLE, bytes).ok()?;
+            let result: windows::core::Result<()> = (|| {
+                EmptyClipboard()?;
+                let hglobal = GlobalAlloc(GMEM_MOVEABLE, bytes)?;
                 let ptr = GlobalLock(hglobal);
                 if ptr.is_null() {
                     let _ = GlobalFree(Some(hglobal));
@@ -284,7 +285,7 @@ mod windows_impl {
                 }
                 std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
                 let _ = GlobalUnlock(hglobal);
-                if let Err(e) = SetClipboardData(CF_UNICODETEXT, windows::Win32::Foundation::HANDLE(hglobal.0)) {
+                if let Err(e) = SetClipboardData(CF_UNICODETEXT, Some(windows::Win32::Foundation::HANDLE(hglobal.0))) {
                     let _ = GlobalFree(Some(hglobal));
                     return Err(e);
                 }
