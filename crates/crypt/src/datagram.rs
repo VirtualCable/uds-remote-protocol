@@ -233,8 +233,13 @@ impl ReplayWindow {
                 // never been seen: count them as lost (a late arrival would
                 // discount itself below).
                 self.lost += seq - highest - 1;
-                let shift = (seq - highest).min(Self::SIZE);
-                self.bitmap = (self.bitmap << shift) | 1;
+                let shift = seq - highest;
+                self.bitmap = if shift >= Self::SIZE {
+                    // Gap wider than the window: every tracked bit is stale.
+                    1
+                } else {
+                    (self.bitmap << shift) | 1
+                };
                 self.highest = Some(seq);
             }
             Some(highest) => {
@@ -259,5 +264,29 @@ impl ReplayWindow {
         }
         self.accepted += 1;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReplayWindow;
+
+    #[test]
+    fn gap_wider_than_window_resets_bitmap() {
+        let mut w = ReplayWindow::default();
+        w.accept(10).unwrap();
+        // Jump more than SIZE entries ahead: must not panic on shift.
+        w.accept(10 + ReplayWindow::SIZE + 5).unwrap();
+        assert_eq!(w.bitmap, 1);
+        // An old sequence inside the stale region is now simply too old.
+        assert!(w.accept(11).is_err());
+    }
+
+    #[test]
+    fn exact_window_gap_resets_bitmap() {
+        let mut w = ReplayWindow::default();
+        w.accept(0).unwrap();
+        w.accept(ReplayWindow::SIZE).unwrap();
+        assert_eq!(w.bitmap, 1);
     }
 }
