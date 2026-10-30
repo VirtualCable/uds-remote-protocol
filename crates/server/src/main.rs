@@ -250,17 +250,11 @@ async fn display_sender(
     sink: Arc<Mutex<transport::DatagramSink<UdpTransport>>>,
     mut pacer: Pacer,
 ) {
-    info!("display sender task started");
-    let mut sent = 0u64;
     while let Some(frag) = rx.recv().await {
         pacer.pace(frag.len()).await;
         if let Err(e) = sink.lock().await.send(channel::DISPLAY, &frag).await {
             warn!("display sender: send failed, ending task: {e}");
             return;
-        }
-        sent += 1;
-        if sent % 500 == 1 {
-            info!(sent, "display sender alive");
         }
     }
 }
