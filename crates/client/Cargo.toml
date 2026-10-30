@@ -10,17 +10,22 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = []
+default = ["smartcard"]
 vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
 jpeg = ["codec/codec-jpeg"]
 audio = ["codec/codec-opus", "dep:cpal"]
+# Build the real PC/SC backend into the smartcard dispatcher (§17). The
+# dispatcher itself always compiles: without this feature (or without a
+# PC/SC subsystem at runtime) requests are answered SCARD_E_NO_SERVICE.
+smartcard = []
 
 [dependencies]
 protocol.workspace = true
 transport.workspace = true
 crypt.workspace = true
 codec.workspace = true
+smartcard = { workspace = true, features = ["pcsc-backend"] }
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -65,6 +65,14 @@ pub enum ClientCommand {
         /// Transfer to cancel.
         transfer_id: u32,
     },
+    /// Enables or disables smartcard redirection (§17) at runtime. The
+    /// channel is fully server-driven — there is nothing to announce —
+    /// but the dispatcher only runs while enabled; while disabled (or
+    /// without a PC/SC backend) requests are answered
+    /// `SCARD_E_NO_SERVICE`. Note the HELLO capability flag is sent at
+    /// connect time from [`crate::ClientConfig::smartcard`], so toggling
+    /// afterwards does not change what the server believes.
+    SmartcardEnable(bool),
 }
 
 /// Sending half of the command channel, handed to the consumer by

@@ -18,6 +18,10 @@ pub const TICKET_LENGTH: usize = 48;
 /// behind a privacy screen for the duration of the session (M7).
 pub const FLAG_PRIVACY_SCREEN: u8 = 0x01;
 
+/// HELLO flag: the client offers smartcard redirection (§17): it will
+/// answer `SmartcardMessage` requests on `channel::SMARTCARD`.
+pub const FLAG_SMARTCARD: u8 = 0x02;
+
 /// Handshake commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

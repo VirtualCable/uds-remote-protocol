@@ -195,6 +195,7 @@ async fn session_delivers_frames_cursor_and_input_end_to_end() -> Result<()> {
         audio_dump: None,
         mic: MicMode::Off,
         privacy_screen: false,
+        smartcard: false,
     };
     let (session, commands, displays) = Session::new(config, events_tx);
     let session_task = tokio::spawn(session.run());
@@ -282,6 +283,7 @@ async fn session_falls_back_to_tcp_when_udp_is_silent() -> Result<()> {
         audio_dump: None,
         mic: MicMode::Off,
         privacy_screen: false,
+        smartcard: false,
     };
     let (session, commands, displays) = Session::new(config, events_tx);
     let session_task = tokio::spawn(session.run());

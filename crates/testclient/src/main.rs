@@ -56,6 +56,9 @@ struct Args {
     download: Option<String>,
     /// Storage (M8): `--storage-list` requests the spool listing ~2 s in.
     storage_list: bool,
+    /// Smartcard redirection (§17): `--smartcard` offers the channel in
+    /// the HELLO and runs the request dispatcher against the local PC/SC.
+    smartcard: bool,
 }
 
 /// One scripted input action for `--selftest-input`.
@@ -122,6 +125,7 @@ fn parse_args() -> Result<Args> {
         upload: None,
         download: None,
         storage_list: false,
+        smartcard: false,
     };
     let mut key_seen = false;
     let mut ticket_seen = false;
@@ -153,6 +157,10 @@ fn parse_args() -> Result<Args> {
         }
         if arg == "--storage-list" {
             args.storage_list = true;
+            continue;
+        }
+        if arg == "--smartcard" {
+            args.smartcard = true;
             continue;
         }
         let value = it.next().context(format!("missing value for {arg}"))?;
@@ -683,6 +691,7 @@ async fn run() -> Result<()> {
         audio_dump: args.audio_dump,
         mic: args.mic,
         privacy_screen: args.privacy,
+        smartcard: args.smartcard,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);
     let (session, commands, displays) = Session::new(config, events_tx);

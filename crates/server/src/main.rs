@@ -821,6 +821,12 @@ async fn serve<T: ReliableTransport>(
 ) -> Result<()> {
     let mut stream = EncryptedStream::server_handshake(raw, key, None).await?;
     info!("handshake done");
+    if stream
+        .peer_hello()
+        .is_some_and(|h| h.flags & protocol::FLAG_SMARTCARD != 0)
+    {
+        info!("client offers smartcard redirection (§17)");
+    }
 
     // Attach-on-demand (M6): raising the named event asks the service to
     // attach the IddCx monitor; it detaches after an idle timeout once the
@@ -969,6 +975,16 @@ async fn serve<T: ReliableTransport>(
     // headroom; the stream's own backpressure throttles the real rate.
     let mut storage_tick = tokio::time::interval(Duration::from_millis(1));
 
+    // Smartcard (§17): requests will originate at the virtual smart card
+    // reader driver (UMDF; TODO doc/plan §17 — plug it in here when it
+    // exists). Until then a NullSmartcardRelay keeps the channel inert;
+    // the router still resolves replies by request_id, so swapping in the
+    // real origin later is a local change.
+    let (scard_tx, mut scard_rx) = mpsc::unbounded_channel::<protocol::SmartcardMessage>();
+    let scard_router = Arc::new(server::smartcard::SmartcardRouter::new(scard_tx));
+    let _smartcard_relay: Arc<dyn server::smartcard::SmartcardRelay> =
+        Arc::new(server::smartcard::NullSmartcardRelay);
+
     // Link-quality state (§12): created on the first MetricsReport, with the
     // first reported RTT as the baseline.
     let mut ctl = ControlState {
@@ -1050,6 +1066,8 @@ async fn serve<T: ReliableTransport>(
                     handle_clipboard_packet(&mut legs, &mut clip_session, clipboard.as_ref(), &ctrl_buf[..n]).await;
                 } else if ch == channel::STORAGE {
                     handle_storage_packet(&mut legs, &mut spool, &ctrl_buf[..n]).await;
+                } else if ch == channel::SMARTCARD {
+                    scard_router.handle_packet(&ctrl_buf[..n]);
                 } else {
                     handle_stream_packet(&mut ctl, &mut encoder, &fps_shared, ch, &ctrl_buf[..n]);
                 }
@@ -1061,6 +1079,15 @@ async fn serve<T: ReliableTransport>(
                             warn!("storage chunk send failed: {e}");
                         }
                     }
+                }
+            }
+            msg = scard_rx.recv() => {
+                // Smartcard requests produced by the relay origin (§17);
+                // pends forever while the channel is inert.
+                if let Some(msg) = msg
+                    && let Err(e) = legs.stream.send(channel::SMARTCARD, &msg.encode()).await
+                {
+                    warn!("smartcard request send failed: {e}");
                 }
             }
             ev = recv_clipboard(&mut clipboard) => {

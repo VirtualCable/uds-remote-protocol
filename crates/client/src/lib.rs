@@ -25,6 +25,7 @@ mod events;
 mod framebuffer;
 pub mod mic;
 mod session;
+pub mod smartcard;
 mod storage;
 
 pub use command::{ClientCommand, CommandSender};

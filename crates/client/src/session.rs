@@ -59,6 +59,10 @@ pub struct ClientConfig {
     /// Ask the server to hide the physical console behind a privacy screen
     /// for the duration of the session (M7; `FLAG_PRIVACY_SCREEN`).
     pub privacy_screen: bool,
+    /// Offer smartcard redirection (§17; `FLAG_SMARTCARD`): the session
+    /// runs the request dispatcher against the local PC/SC backend (or
+    /// answers `SCARD_E_NO_SERVICE` when there is none).
+    pub smartcard: bool,
 }
 
 /// One client session (§15.3). Build with [`Session::new`], then drive it
@@ -105,15 +109,21 @@ impl Session {
     async fn run_inner(&mut self) -> Result<()> {
         let target = Target::new(self.config.addr, self.config.ticket, self.config.key);
         let (raw, _) = DirectConnector::new().connect(&target).await?;
-        let flags = if self.config.privacy_screen {
-            protocol::FLAG_PRIVACY_SCREEN
-        } else {
-            0
-        };
+        let mut flags = 0u8;
+        if self.config.privacy_screen {
+            flags |= protocol::FLAG_PRIVACY_SCREEN;
+        }
+        if self.config.smartcard {
+            flags |= protocol::FLAG_SMARTCARD;
+        }
         let mut stream: EncryptedStream<Box<dyn ReliableTransport>> =
             EncryptedStream::client_handshake(raw, &self.config.ticket, &self.config.key, flags)
                 .await?;
-        info!(privacy_screen = self.config.privacy_screen, "handshake done");
+        info!(
+            privacy_screen = self.config.privacy_screen,
+            smartcard = self.config.smartcard,
+            "handshake done"
+        );
 
         let clock_start = Instant::now();
         let clock = || micros_since(clock_start);
@@ -360,8 +370,8 @@ impl Session {
         }
     }
 
-    /// Flushes queued clipboard and storage answers on the reliable
-    /// stream (M8).
+    /// Flushes queued clipboard, storage and smartcard answers on the
+    /// reliable stream (M8, §17).
     async fn flush_out(
         stream: &mut EncryptedStream<Box<dyn ReliableTransport>>,
         core: &mut Core,
@@ -371,6 +381,14 @@ impl Session {
         }
         for msg in core.storage.out.drain(..) {
             stream.send(channel::STORAGE, &msg.encode()).await?;
+        }
+        for msg in core.scard_out.drain(..) {
+            stream.send(channel::SMARTCARD, &msg.encode()).await?;
+        }
+        // Smartcard replies produced by the dispatcher threads since the
+        // last flush (bounded by the presentation tick, ~8 ms of latency).
+        while let Ok(msg) = core.scard_rx.try_recv() {
+            stream.send(channel::SMARTCARD, &msg.encode()).await?;
         }
         Ok(())
     }
@@ -427,6 +445,7 @@ impl Session {
                 }
             }
             Ok(ClientCommand::StorageAbort { transfer_id }) => core.storage.abort(transfer_id),
+            Ok(ClientCommand::SmartcardEnable(on)) => core.set_smartcard(on),
             Ok(ClientCommand::Close) => {
                 info!("close requested by the consumer");
                 return Ok(false);
@@ -537,6 +556,15 @@ struct Core {
     /// Storage transfers state (M8, model B); its `out` queue is drained
     /// by the receive loops like `clip_out`.
     storage: crate::storage::StorageClient,
+    /// Smartcard request dispatcher (§17); `None` while disabled.
+    smartcard: Option<crate::smartcard::SmartcardService>,
+    /// Reply channel of the smartcard dispatcher (replies are drained by
+    /// `flush_out` onto the reliable stream).
+    scard_tx: flume::Sender<protocol::SmartcardMessage>,
+    scard_rx: flume::Receiver<protocol::SmartcardMessage>,
+    /// Inline smartcard replies produced while the dispatcher is disabled
+    /// (`SCARD_E_NO_SERVICE` — a request is never left unanswered).
+    scard_out: Vec<protocol::SmartcardMessage>,
 }
 
 impl Core {
@@ -546,6 +574,10 @@ impl Core {
         config: &ClientConfig,
         clock_start: Instant,
     ) -> Self {
+        let (scard_tx, scard_rx) = flume::unbounded();
+        let smartcard = config
+            .smartcard
+            .then(|| crate::smartcard::SmartcardService::start(crate::smartcard::default_backend(), scard_tx.clone()));
         Self {
             events,
             displays,
@@ -562,6 +594,30 @@ impl Core {
             clip: protocol::ClipboardSession::new(),
             clip_out: Vec::new(),
             storage: crate::storage::StorageClient::new(),
+            smartcard,
+            scard_tx,
+            scard_rx,
+            scard_out: Vec::new(),
+        }
+    }
+
+    /// Applies `ClientCommand::SmartcardEnable`: starts or stops the
+    /// request dispatcher (§17). Starting with no PC/SC backend still
+    /// answers every request, with `SCARD_E_NO_SERVICE`.
+    fn set_smartcard(&mut self, on: bool) {
+        match (on, self.smartcard.is_some()) {
+            (true, false) => {
+                info!("smartcard redirection enabled");
+                self.smartcard = Some(crate::smartcard::SmartcardService::start(
+                    crate::smartcard::default_backend(),
+                    self.scard_tx.clone(),
+                ));
+            }
+            (false, true) => {
+                info!("smartcard redirection disabled");
+                self.smartcard = None;
+            }
+            _ => {}
         }
     }
 
@@ -734,6 +790,28 @@ impl Core {
                     }
                 }
                 Err(e) => warn!("bad storage message: {e}"),
+            }
+            return Ok(true);
+        }
+        if ch == channel::SMARTCARD {
+            // Smartcard (§17): requests go to the dispatcher service
+            // (replies flow back through scard_rx and are flushed by the
+            // loops). With no service the request is still answered —
+            // SCARD_E_NO_SERVICE — because an unanswered request hangs
+            // the server side.
+            match protocol::SmartcardMessage::decode(packet) {
+                Ok(msg) if msg.is_request() => {
+                    if let Some(service) = &self.smartcard {
+                        service.enqueue(msg);
+                    } else {
+                        self.scard_out.push(protocol::SmartcardMessage::Error {
+                            request_id: msg.request_id(),
+                            code: smartcard::SCARD_E_NO_SERVICE,
+                        });
+                    }
+                }
+                Ok(msg) => warn!(?msg, "unexpected smartcard reply from the server"),
+                Err(e) => warn!("bad smartcard message: {e}"),
             }
             return Ok(true);
         }

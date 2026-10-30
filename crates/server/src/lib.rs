@@ -27,5 +27,6 @@ pub mod privacy;
 pub mod remote_signal;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod session_mutex;
+pub mod smartcard;
 pub mod storage;
 pub mod synthetic;

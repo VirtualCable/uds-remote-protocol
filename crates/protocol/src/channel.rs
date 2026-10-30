@@ -22,6 +22,9 @@ pub const CLIPBOARD: ChannelId = 6;
 /// Channel 7: storage (bidirectional, reliable; explicit file transfers —
 /// chunked and potentially large, so it must never share the lossy leg).
 pub const STORAGE: ChannelId = 7;
+/// Channel 8: smartcard redirection (S→C requests / C→S replies, reliable;
+/// APDUs tolerate neither loss nor reordering — the volume is trivial).
+pub const SMARTCARD: ChannelId = 8;
 
 /// Last ID reserved for UDS core channels (`0x0000..=0x00FF`).
 pub const CORE_MAX: ChannelId = 0x00FF;
