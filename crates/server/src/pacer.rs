@@ -17,8 +17,12 @@ pub const DEFAULT_PACER_BPS: u64 = 100_000_000;
 /// Never pace below this, even under heavy congestion (§12.4 floor spirit:
 /// below this the display leg degrades into the TCP fallback's territory).
 pub const MIN_PACER_BPS: u64 = 25_000_000;
-/// Never pace above this: beyond it, intermediate buffers melt again.
-pub const MAX_PACER_BPS: u64 = 2_000_000_000;
+/// Never pace above this: beyond it, intermediate buffers melt again. The
+/// drain rate must stay under a modest Gigabit link's line rate — draining
+/// faster than the wire reproduces the self-inflicted burst loss this pacer
+/// exists to prevent. Far above any useful value anyway (8x headroom over a
+/// 10 Mbps video ceiling is 80 Mbps).
+pub const MAX_PACER_BPS: u64 = 200_000_000;
 /// Rate multiplier over the video target bitrate. Keyframes are ~10-20x the
 /// average frame and must not stall for a whole frame interval, so the pacer
 /// runs well above the encoder's average.
