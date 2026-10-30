@@ -10,6 +10,8 @@
 
 pub mod audio;
 #[cfg(all(windows, feature = "windows-capture"))]
+pub mod audio_endpoint;
+#[cfg(all(windows, feature = "windows-capture"))]
 pub mod audio_wasapi;
 pub mod capture;
 #[cfg(all(windows, feature = "windows-capture"))]

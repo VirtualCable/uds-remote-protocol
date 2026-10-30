@@ -836,6 +836,24 @@ async fn serve<T: ReliableTransport>(
     // Announce the display codec/geometry before the first frame (§8.3/§8.4).
     announce_display(&mut legs, &mut encoder, width, height).await?;
 
+    // Audio endpoint policy (§9, driver-audio plan §8): point the session
+    // default render endpoint at the UDS virtual speakers so app audio
+    // reaches our loopback capture; the previous default is restored when
+    // the session ends. Best-effort, and must happen BEFORE the WASAPI
+    // capture below opens the default endpoint.
+    #[cfg(all(windows, feature = "windows-capture"))]
+    let _audio_endpoint_guard = if args.audio {
+        match server::audio_endpoint::switch_default_to_uds() {
+            Ok(guard) => guard,
+            Err(e) => {
+                warn!("cannot switch the default audio endpoint: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     // Audio (§9): announced right after the display, only when the pipeline
     // actually started (best-effort: a missing codec feature disables it).
     let (mut audio_rx, audio_ceiling_kbps, audio_control) =
