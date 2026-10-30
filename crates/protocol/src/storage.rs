@@ -40,9 +40,11 @@ const TAG_GET_ABORT: u8 = 12;
 /// Wire tag for [`StorageMessage::Error`].
 const TAG_ERROR: u8 = 13;
 
-/// Chunk payload size senders should use (the stream record budget leaves
-/// ample room above this; 64 KiB keeps per-write syscalls reasonable).
-pub const STORAGE_CHUNK_SIZE: usize = 64 * 1024;
+/// Chunk payload size senders should use. The reliable stream record
+/// budget is 65 517 bytes; a chunk message adds 17 bytes of header
+/// (tag + id + offset + len), so 65 500 is the largest payload that
+/// always fits in one record.
+pub const STORAGE_CHUNK_SIZE: usize = 65_500;
 
 /// Maximum chunk payload accepted on the wire (sanity cap on decode).
 pub const MAX_CHUNK_PAYLOAD: u32 = 1024 * 1024;
