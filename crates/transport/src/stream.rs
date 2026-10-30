@@ -19,6 +19,11 @@ pub struct EncryptedStream<T: ReliableTransport> {
     peer_hello: Option<Hello>,
     // Reusable receive buffer (no allocs on the hot path, riesgos r2 §2.1).
     rx_buf: Vec<u8>,
+    /// Bytes of the current record already read (header + body). Kept
+    /// across calls so `recv_into` is cancellation-safe (see its docs).
+    rx_filled: usize,
+    /// Declared body length once the header is fully read.
+    rx_record_len: Option<usize>,
 }
 
 /// Stream sequence numbers of one end (recovery, §4.3).
@@ -53,6 +58,8 @@ impl<T: ReliableTransport> EncryptedStream<T> {
             rx: StreamDecrypt::new(rx_key),
             peer_hello: None,
             rx_buf: Vec::with_capacity(2048),
+            rx_filled: 0,
+            rx_record_len: None,
         }
     }
 
@@ -218,15 +225,37 @@ impl<T: ReliableTransport> EncryptedStream<T> {
 
     /// Receives a full record: returns the channel and the length of the
     /// decrypted payload, copied into `buf`.
+    ///
+    /// Cancellation-safe: the read progress (`rx_filled`, `rx_record_len`)
+    /// lives in `self`, so a `select!` that drops this future mid-record
+    /// resumes exactly where it stopped instead of losing the bytes
+    /// already pulled from the transport and desynchronizing the stream.
+    /// (Large records arrive in several TCP segments and genuinely pend;
+    /// small ones used to complete synchronously, hiding the hazard.)
     pub async fn recv_into(&mut self, buf: &mut [u8]) -> Result<(ChannelId, usize)> {
-        let mut header = [0u8; consts::STREAM_HEADER_SIZE];
-        read_full(&mut self.inner, &mut header).await?;
-        let len = u16::from_be_bytes([header[8], header[9]]) as usize;
-
-        self.rx_buf.clear();
-        self.rx_buf.extend_from_slice(&header);
-        self.rx_buf.resize(consts::STREAM_HEADER_SIZE + len, 0);
-        read_full(&mut self.inner, &mut self.rx_buf[consts::STREAM_HEADER_SIZE..]).await?;
+        // Phase 1: header (STREAM_HEADER_SIZE bytes).
+        if self.rx_record_len.is_none() {
+            self.rx_buf.resize(consts::STREAM_HEADER_SIZE, 0);
+            while self.rx_filled < consts::STREAM_HEADER_SIZE {
+                self.rx_filled += self
+                    .inner
+                    .recv_into(&mut self.rx_buf[self.rx_filled..consts::STREAM_HEADER_SIZE])
+                    .await?;
+            }
+            let len = u16::from_be_bytes([self.rx_buf[8], self.rx_buf[9]]) as usize;
+            self.rx_buf.resize(consts::STREAM_HEADER_SIZE + len, 0);
+            self.rx_record_len = Some(len);
+        }
+        // Phase 2: body.
+        let total = consts::STREAM_HEADER_SIZE + self.rx_record_len.expect("set above");
+        while self.rx_filled < total {
+            self.rx_filled += self
+                .inner
+                .recv_into(&mut self.rx_buf[self.rx_filled..total])
+                .await?;
+        }
+        self.rx_filled = 0;
+        self.rx_record_len = None;
 
         let (channel, plain) = self.rx.decrypt(&self.rx_buf)?;
         if plain.len() > buf.len() {
