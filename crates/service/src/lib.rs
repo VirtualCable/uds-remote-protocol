@@ -9,6 +9,8 @@ mod agent;
 #[cfg(windows)]
 mod credprov;
 #[cfg(windows)]
+mod display;
+#[cfg(windows)]
 mod install;
 #[cfg(windows)]
 mod logging;

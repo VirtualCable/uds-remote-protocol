@@ -418,7 +418,7 @@ fn gdi_device_string(device_name: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     for dev_num in 0..=1u32 {
         let mut dd = DISPLAY_DEVICEW {
-            cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
+            cb: u32::try_from(std::mem::size_of::<DISPLAY_DEVICEW>()).expect("struct fits in u32"),
             ..DISPLAY_DEVICEW::default()
         };
         // SAFETY: `dd` is a valid, correctly sized out buffer and

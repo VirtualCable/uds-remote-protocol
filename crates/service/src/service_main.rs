@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use windows::Win32::System::Services::{
     RegisterServiceCtrlHandlerExW, SERVICE_ACCEPT_SHUTDOWN, SERVICE_ACCEPT_STOP,
     SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_RUNNING, SERVICE_STATUS,
@@ -12,7 +12,6 @@ use windows::Win32::System::Services::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
-use crate::adapter;
 use crate::agent;
 use crate::install::SERVICE_NAME;
 use crate::logging;
@@ -66,125 +65,12 @@ fn service_main_impl() -> Result<()> {
     report_status(status_handle, SERVICE_RUNNING)?;
     info!("service started");
     crate::credprov::spawn(&STOP_REQUESTED);
-    let mut display = DisplayGuard::attach();
+    crate::display::spawn(&STOP_REQUESTED);
     service_body();
-    display.detach();
 
     report_status(status_handle, SERVICE_STOPPED)?;
     info!("service stopped");
     Ok(())
-}
-
-/// M1 IddCx lifecycle + §12.4 mouse mitigation: on start, **enable** the
-/// udsdisp adapter device (it is kept disabled when idle so console agents
-/// like vdagent ≤0.10 keep working), reclaim any orphaned monitors (a crashed
-/// previous instance leaves them attached — the IOCTL channel outlives its
-/// creator) and attach one monitor; on stop, detach it and **disable** the
-/// adapter again. A missing driver (dev machine without udsdisp installed) is
-/// logged and tolerated.
-struct DisplayGuard {
-    client: Option<udsdisp_client::client::Client>,
-    adapter_enabled: bool,
-}
-
-impl DisplayGuard {
-    fn attach() -> Self {
-        // The device interface takes a moment to appear after the PnP state
-        // change; retry the open for a few seconds.
-        let enabled = match adapter::set_enabled(true) {
-            Ok(found) => found,
-            Err(err) => {
-                error!(error = %format!("{err:#}"), "cannot enable the udsdisp adapter");
-                false
-            }
-        };
-        let client = if enabled {
-            let mut attempt = None;
-            for _ in 0..20 {
-                if let Ok(client) = udsdisp_client::client::Client::open() {
-                    attempt = Some(client);
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(300));
-            }
-            if attempt.is_none() {
-                warn!("udsdisp device interface never appeared after enabling the adapter");
-            }
-            attempt
-        } else {
-            None
-        };
-        let Some(client) = client else {
-            return Self {
-                client: None,
-                adapter_enabled: enabled,
-            };
-        };
-        match client.remove_all() {
-            Ok(0) => {}
-            Ok(n) => warn!(removed = n, "reclaimed orphaned virtual monitors"),
-            Err(err) => warn!(error = %format!("{err:#}"), "cannot list/remove existing monitors"),
-        }
-        let mode = udsdisp_client::client::Mode::new(1920, 1080, 60);
-        // The attach races the driver stack at boot: the first attempt can
-        // report an error (ERROR_OPERATION_IN_PROGRESS, or even
-        // ERROR_ALREADY_EXISTS) while the driver finishes creating the
-        // monitor behind our back. After every failed attempt, re-check the
-        // connector list — if our monitor is there, the attach is done.
-        let mut last_err = None;
-        for _ in 0..20 {
-            match client.create(0, mode) {
-                Ok(()) => {
-                    info!(mode = ?mode, "virtual monitor attached on connector 0");
-                    last_err = None;
-                    break;
-                }
-                Err(err) => {
-                    if monitor_connected(&client) {
-                        warn!(error = %format!("{err:#}"), "attach reported an error but the monitor is connected; continuing");
-                        last_err = None;
-                        break;
-                    }
-                    last_err = Some(err);
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
-            }
-        }
-        if let Some(err) = last_err {
-            error!(error = %format!("{err:#}"), "cannot attach virtual monitor");
-        }
-        Self {
-            client: Some(client),
-            adapter_enabled: enabled,
-        }
-    }
-
-    fn detach(&mut self) {
-        // Drop the client handle BEFORE disabling the adapter: an open
-        // device-interface handle makes the PnP query-remove fail
-        // (`SetupDiChangeState` -> ERROR_INVALID_DATA).
-        if let Some(client) = self.client.take() {
-            match client.remove(0) {
-                Ok(()) => info!("virtual monitor detached"),
-                Err(err) => warn!(error = %format!("{err:#}"), "cannot detach virtual monitor"),
-            }
-            drop(client);
-        }
-        if self.adapter_enabled {
-            match adapter::set_enabled(false) {
-                Ok(_) => info!("udsdisp adapter disabled"),
-                Err(err) => warn!(error = %format!("{err:#}"), "cannot disable the udsdisp adapter"),
-            }
-            self.adapter_enabled = false;
-        }
-    }
-}
-
-/// Whether connector 0 currently has a connected virtual monitor.
-fn monitor_connected(client: &udsdisp_client::client::Client) -> bool {
-    client.list().is_ok_and(|mons| {
-        mons.iter().any(|m| m.connector_index == 0 && m.connected)
-    })
 }
 
 /// Service body: watch loop that keeps one session agent alive in the

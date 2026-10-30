@@ -6,13 +6,19 @@
 //! DXGI capture can only duplicate outputs that are part of the desktop.
 //! The fix must run in the interactive session — display topology changes
 //! from session 0 do not stick — so it lives in the agent, not the service.
+//!
+//! All changes here are **volatile** (no `CDS_UPDATEREGISTRY`, M6): they hold
+//! until the display is detached or the session ends, and never poison the
+//! persisted display configuration — when the IddCx monitor detaches, the
+//! desktop bounding box simply shrinks back (no reboot to recover the
+//! physical console, see doc/plan/servicio-y-sesion.md §3.2.2).
 
 use anyhow::bail;
 use std::time::Duration;
 use tracing::{info, warn};
 use windows::Win32::Foundation::POINTL;
 use windows::Win32::Graphics::Gdi::{
-    CDS_NORESET, CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW,
+    CDS_NORESET, CDS_TYPE, ChangeDisplaySettingsExW, DEVMODEW,
     DISPLAY_DEVICE_ATTACHED_TO_DESKTOP, DISPLAY_DEVICEW, DM_BITSPERPEL, DM_DISPLAYFREQUENCY,
     DM_PELSHEIGHT, DM_PELSWIDTH, DM_POSITION, DISP_CHANGE, ENUM_CURRENT_SETTINGS,
     ENUM_DISPLAY_SETTINGS_MODE, EnumDisplayDevicesW, EnumDisplaySettingsW,
@@ -39,6 +45,46 @@ pub fn ensure_uds_displays_attached(width: u32, height: u32, vsync: u32) {
         n => info!(attached = n, "attached UDS virtual display(s) to the desktop"),
     }
     stack_uds_displays_below(height);
+}
+
+/// Waits until a UDS virtual display is attached to the desktop (the service
+/// attaches the IddCx monitor on demand when a remote session starts, M6),
+/// then reconciles the topology (attach stragglers + stack below). Returns
+/// `false` on timeout — callers continue anyway so dev runs without the
+/// driver still work.
+pub fn wait_for_uds_display(timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if uds_display_attached() {
+            ensure_uds_displays_attached(1920, 1080, 60);
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            warn!("timed out waiting for the UDS virtual display; capturing what exists");
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Whether any UDS virtual display is currently attached to the desktop.
+fn uds_display_attached() -> bool {
+    for i in 0..32u32 {
+        let mut dd = DISPLAY_DEVICEW {
+            cb: u32::try_from(size_of::<DISPLAY_DEVICEW>()).expect("struct fits in u32"),
+            ..Default::default()
+        };
+        // SAFETY: `dd` is a correctly sized out-struct.
+        if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &raw mut dd, 0) }.as_bool() {
+            break;
+        }
+        if dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP == DISPLAY_DEVICE_ATTACHED_TO_DESKTOP
+            && is_uds_display(&dd)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Moves every attached UDS virtual display to `(0, desktop_bottom + i*h)`,
@@ -86,13 +132,14 @@ fn stack_uds_displays_below(height: u32) {
         dm.dmFields |= DM_POSITION;
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: `wide` is null-terminated; `dm` is fully initialized.
-        // CDS_NORESET stages the change; the final null call applies it.
+        // CDS_NORESET stages the (volatile) change; the final null call
+        // applies it. No CDS_UPDATEREGISTRY: nothing is persisted (M6).
         let result = unsafe {
             ChangeDisplaySettingsExW(
                 PCWSTR(wide.as_ptr()),
                 Some(&raw const dm),
                 None,
-                CDS_UPDATEREGISTRY | CDS_NORESET,
+                CDS_NORESET,
                 None,
             )
         };
@@ -102,9 +149,9 @@ fn stack_uds_displays_below(height: u32) {
             warn!(device = %name, "reposition rejected: {}", result.0);
         }
     }
-    // Apply all staged changes at once.
-    // SAFETY: null device/devmode applies the staged registry changes.
-    unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_UPDATEREGISTRY, None) };
+    // Apply all staged changes at once (volatile).
+    // SAFETY: null device/devmode applies the staged changes.
+    unsafe { ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None) };
 }
 
 /// Current settings of `\\.\DISPLAYn` (position included).
@@ -249,12 +296,12 @@ fn nudge_driver_modes(width: u32, height: u32, vsync: u32) {
 
 /// Attaches `\\.\DISPLAYn` to the desktop with the given mode.
 ///
-/// Uses the recipe proven with `udsdisp-ctl set-mode`: no explicit position
-/// (Windows places the display itself) and `CDS_UPDATEREGISTRY` without
-/// `CDS_NORESET`, so the change applies immediately. A hand-built `DEVMODE`
-/// is rejected with `DISP_CHANGE_BADMODE` by drivers whose mode list does
-/// not match it verbatim (IddCx), so the mode is picked from the driver's
-/// own enumerated list first; the hand-built one is only a fallback.
+/// No explicit position (Windows places the display itself) and no
+/// `CDS_NORESET`, so the (volatile, M6) change applies immediately.
+/// A hand-built `DEVMODE` is rejected with `DISP_CHANGE_BADMODE` by drivers
+/// whose mode list does not match it verbatim (IddCx), so the mode is picked
+/// from the driver's own enumerated list first; the hand-built one is only
+/// a fallback.
 fn attach_display(device_name: &str, width: u32, height: u32, vsync: u32) -> anyhow::Result<()> {
     let wide: Vec<u16> = device_name.encode_utf16().chain(std::iter::once(0)).collect();
     let devmode = find_driver_mode(&wide, width, height, vsync).unwrap_or_else(|| DEVMODEW {
@@ -267,13 +314,13 @@ fn attach_display(device_name: &str, width: u32, height: u32, vsync: u32) -> any
         ..Default::default()
     });
     // SAFETY: `wide` is null-terminated; `devmode` is fully initialized.
-    // CDS_UPDATEREGISTRY applies the change right away (no CDS_NORESET).
+    // No CDS_NORESET: the change applies right away (and stays volatile).
     let result = unsafe {
         ChangeDisplaySettingsExW(
             PCWSTR(wide.as_ptr()),
             Some(&raw const devmode),
             None,
-            CDS_UPDATEREGISTRY,
+            CDS_TYPE(0),
             None,
         )
     };

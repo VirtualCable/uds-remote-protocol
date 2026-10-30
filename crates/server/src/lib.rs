@@ -20,5 +20,7 @@ pub mod input;
 pub mod mic;
 pub mod privacy;
 #[cfg(all(windows, feature = "windows-capture"))]
+pub mod remote_signal;
+#[cfg(all(windows, feature = "windows-capture"))]
 pub mod session_mutex;
 pub mod synthetic;
