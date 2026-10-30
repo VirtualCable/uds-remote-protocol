@@ -23,6 +23,9 @@ const MAX_SUBDEVICES: u32 = 4;
 
 /// Builds a null-terminated UTF-16 literal from an ASCII byte string.
 const fn wide<const N: usize>(s: &[u8]) -> [u16; N] {
+    // N must leave room for at least one trailing NUL: callers pass the
+    // array as PWSTR and PortCls scans it with wcslen.
+    assert!(s.len() < N, "wide() array too small for NUL terminator");
     let mut out = [0u16; N];
     let mut i = 0;
     while i < s.len() {
@@ -34,7 +37,7 @@ const fn wide<const N: usize>(s: &[u8]) -> [u16; N] {
 
 // Reference strings — must match the KSNAME_* strings in udsaudio.inx.
 static NAME_TOPO_SPEAKER: [u16; 15] = wide(b"UDSTopoSpeaker");
-static NAME_WAVE_SPEAKER: [u16; 14] = wide(b"UDSWaveSpeaker");
+static NAME_WAVE_SPEAKER: [u16; 15] = wide(b"UDSWaveSpeaker");
 static NAME_TOPO_MIC: [u16; 12] = wide(b"UDSTopoMic");
 static NAME_WAVE_MIC: [u16; 11] = wide(b"UDSWaveMic");
 
