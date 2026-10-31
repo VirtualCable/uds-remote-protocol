@@ -7,7 +7,8 @@
 //! conversion, remix, resampling, capture ring) lives in `codec::audio_dsp`.
 //!
 //! [`SilenceGate`] implements the PoC-level DTX policy (§9.1): frames that
-//! are exact digital silence are sent only as keepalives.
+//! are exact digital silence go out only as a clean silence onset (optional
+//! keepalives, disabled by default).
 
 /// A source of audio frames: interleaved signed 16-bit PCM, exactly
 /// `frame_samples * channels` samples per frame.
@@ -26,12 +27,13 @@ pub trait AudioSource: Send {
     fn fill_frame(&mut self, out: &mut [i16]) -> anyhow::Result<()>;
 }
 
-/// Keepalive cadence for silent frames (PoC-level DTX, §9.1): one frame in
-/// every `SILENCE_KEEPALIVE_EVERY` is still sent while the source produces
-/// exact silence — at 20 ms frames that is 2 packets/s, enough to keep the
-/// client's jitter buffer alive and the UDP leg warm without spending
-/// bitrate on silence. The sequence counter does NOT advance for skipped
-/// frames (the client sees fewer frames, not losses).
+/// Default keepalive cadence for silent frames (PoC-level DTX, §9.1): one
+/// frame in every `SILENCE_KEEPALIVE_EVERY` is still sent while the source
+/// produces exact silence — at 20 ms frames that is 2 packets/s. Kept for
+/// future gateway/NAT needs; production default is **no keepalives** (see
+/// [`SilenceGate::without_keepalives`]): the video leg already keeps the
+/// UDP path warm, and keepalives arriving every ~500 ms flapped the
+/// client's A/V clock liveness (silent desktop ⇒ stutter).
 pub const SILENCE_KEEPALIVE_EVERY: u32 = 25;
 
 /// PoC-level discontinuous transmission (§9.1): a frame is "silent" when
@@ -39,19 +41,41 @@ pub const SILENCE_KEEPALIVE_EVERY: u32 = 25;
 /// desktop (including its `AUDCLNT_BUFFERFLAGS_SILENT` packets, which the
 /// capture pipeline materializes as zeros). The first silent frame after
 /// activity always goes out (a clean silence onset), then one keepalive per
-/// `SILENCE_KEEPALIVE_EVERY` frames.
+/// `keepalive_every` frames — or none when keepalives are disabled. The
+/// sequence counter does NOT advance for skipped frames (the client sees
+/// fewer frames, not losses).
 #[derive(Debug, Default)]
 pub struct SilenceGate {
     /// Consecutive silent frames seen so far.
     silent_run: u32,
+    /// One silent frame in every N is sent as a keepalive; 0 disables
+    /// keepalives (only the silence onset goes out).
+    keepalive_every: u32,
 }
 
 impl SilenceGate {
     /// Creates a gate in the "activity" state (the first silent frame is
-    /// sent).
+    /// sent), without keepalives.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::without_keepalives()
+    }
+
+    /// Creates a gate that sends one keepalive every `n` silent frames
+    /// (0 = never, the production default).
+    #[must_use]
+    pub fn with_keepalive_every(n: u32) -> Self {
+        Self {
+            silent_run: 0,
+            keepalive_every: n,
+        }
+    }
+
+    /// Creates a gate with keepalives disabled: only the first silent frame
+    /// after activity goes out.
+    #[must_use]
+    pub fn without_keepalives() -> Self {
+        Self::with_keepalive_every(0)
     }
 
     /// Returns true when this frame must be encoded and sent.
@@ -61,8 +85,10 @@ impl SilenceGate {
             return true;
         }
         self.silent_run = self.silent_run.saturating_add(1);
-        // Send the 1st silent frame, then every Nth (runs 1, 26, 51, ...).
-        (self.silent_run - 1).is_multiple_of(SILENCE_KEEPALIVE_EVERY)
+        // Send the 1st silent frame (clean onset), then every Nth.
+        self.silent_run == 1
+            || (self.keepalive_every != 0
+                && (self.silent_run - 1).is_multiple_of(self.keepalive_every))
     }
 }
 
@@ -209,15 +235,24 @@ mod gate_tests {
 
     #[test]
     fn silence_sends_first_then_every_nth() {
-        let mut gate = SilenceGate::new();
+        let mut gate = SilenceGate::with_keepalive_every(SILENCE_KEEPALIVE_EVERY);
         let silent = [0i16; 1920];
         let sent = (0..100).filter(|_| gate.should_send(&silent)).count();
         assert_eq!(sent, 4, "frames 1, 26, 51, 76 of 100");
     }
 
     #[test]
-    fn activity_resets_the_silent_run() {
+    fn without_keepalives_only_the_onset_goes_out() {
         let mut gate = SilenceGate::new();
+        let silent = [0i16; 1920];
+        assert!(gate.should_send(&silent), "silence onset is sent");
+        let sent = (1..200).filter(|_| gate.should_send(&silent)).count();
+        assert_eq!(sent, 0, "no keepalives after the onset");
+    }
+
+    #[test]
+    fn activity_resets_the_silent_run() {
+        let mut gate = SilenceGate::with_keepalive_every(SILENCE_KEEPALIVE_EVERY);
         let silent = [0i16; 960];
         let tone = [1i16; 960];
         assert!(gate.should_send(&silent)); // 1st: sent

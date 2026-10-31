@@ -489,9 +489,11 @@ fn spawn_audio(
                 warn!("audio source failed: {e:#}");
                 return;
             }
-            // PoC DTX (§9.1): silent frames go out only as keepalives, and
-            // skipped frames do not advance `seq` (the client sees fewer
-            // frames, not losses).
+            // PoC DTX (§9.1): only the silence onset goes out (keepalives
+            // disabled — the video leg keeps UDP warm, and ~500 ms-spaced
+            // keepalives flapped the client's A/V clock liveness). Skipped
+            // frames do not advance `seq` (the client sees fewer frames,
+            // not losses).
             if gate.should_send(&pcm) {
                 packet.clear();
                 match encoder.encode(&pcm, &mut packet) {
