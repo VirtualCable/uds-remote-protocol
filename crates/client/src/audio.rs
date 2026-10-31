@@ -35,6 +35,17 @@ type DeviceStream = cpal::Stream;
 #[cfg(not(feature = "audio"))]
 type DeviceStream = ();
 
+/// No decodes for this long marks the audio clock unusable: the published
+/// cursor freezes at its last anchor, so the A/V sync must fall back to
+/// presenting video immediately instead of holding frames against a dead
+/// clock (silent desktop ⇒ the server sends no audio packets).
+const CLOCK_STALE_AFTER: Duration = Duration::from_millis(500);
+
+/// Decoded frames required after a stale period before the audio clock is
+/// trusted again (hysteresis): a single stray packet must not re-engage the
+/// hold-against-audio path.
+const CLOCK_REARM_FRAMES: u32 = 3;
+
 /// Audio stream parameters announced by the server (`AudioConfig`, §9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AudioSpec {
@@ -306,6 +317,12 @@ impl AudioClockMap {
     }
 }
 
+/// Whether the audio clock is stale: never primed, or no decode within
+/// [`CLOCK_STALE_AFTER`] of `now`.
+fn clock_is_stale(last_decode_at: Option<Instant>, now: Instant) -> bool {
+    last_decode_at.is_none_or(|t| now.duration_since(t) >= CLOCK_STALE_AFTER)
+}
+
 /// One active audio stream on the pump thread.
 struct ActiveStream {
     decoder: Box<dyn codec::AudioDecoder>,
@@ -334,6 +351,12 @@ struct ActiveStream {
     decoded_frames: u64,
     plc_frames: u64,
     last_log: Instant,
+    /// Last time a frame was decoded (packet or PLC); the A/V clock goes
+    /// stale when no decode happens for [`CLOCK_STALE_AFTER`].
+    last_decode_at: Option<Instant>,
+    /// Consecutive decodes since the clock went stale; the cursor is
+    /// published again once it reaches [`CLOCK_REARM_FRAMES`].
+    frames_since_stale: u32,
 }
 
 impl ActiveStream {
@@ -400,6 +423,8 @@ impl ActiveStream {
             decoded_frames: 0,
             plc_frames: 0,
             last_log: Instant::now(),
+            last_decode_at: None,
+            frames_since_stale: 0,
         })
     }
 
@@ -413,9 +438,26 @@ impl ActiveStream {
         }
     }
 
+    /// Marks the published audio cursor unusable (`-1`) when no frame has
+    /// been decoded for [`CLOCK_STALE_AFTER`]. The presentation loop treats
+    /// that as "no audio clock" and presents video immediately, so a silent
+    /// desktop cannot stall the present queue (§9.1). PLC frames count as
+    /// decodes: they conceal real-time gaps and keep the clock alive.
+    fn refresh_clock_liveness(&mut self) {
+        if clock_is_stale(self.last_decode_at, Instant::now()) {
+            self.frames_since_stale = 0;
+            self.now_ms.store(-1, Ordering::Relaxed);
+        }
+    }
+
     /// Pops one frame from the jitter buffer, decodes it (PLC on loss) and
     /// queues it for playback. Called once per frame duration.
     fn tick(&mut self) {
+        // Clock liveness runs every tick, decode or not: with a silent
+        // desktop the server sends no audio packets at all, and without this
+        // check the published cursor would freeze at its last anchor and
+        // stall the whole video presentation queue against a dead clock.
+        self.refresh_clock_liveness();
         let Some(output) = self.jitter.pop() else {
             return; // still priming
         };
@@ -446,6 +488,8 @@ impl ActiveStream {
                     self.plc_frames += 1;
                 }
                 self.decoded_frames += 1;
+                self.last_decode_at = Some(Instant::now());
+                self.frames_since_stale = self.frames_since_stale.saturating_add(1);
                 if let Some(dump) = &mut self.dump {
                     use std::io::Write as _;
                     for sample in &self.pcm {
@@ -474,8 +518,12 @@ impl ActiveStream {
             }
             Err(e) => warn!("audio decode failed: {e}"),
         }
-        // Publish the audio cursor for the presentation loop (§9.1).
-        if let (Some(buf), Some(clock)) = (&self.playback, &mut self.clock_map)
+        // Publish the audio cursor for the presentation loop (§9.1) when
+        // the clock is live: after a stale period the first few frames keep
+        // the unusable marker so one stray packet cannot re-engage the
+        // hold-against-audio path.
+        if self.frames_since_stale >= CLOCK_REARM_FRAMES
+            && let (Some(buf), Some(clock)) = (&self.playback, &mut self.clock_map)
             && let Ok(b) = buf.lock()
         {
             let pos = b.play_pos();
@@ -766,6 +814,29 @@ mod tests {
         let pos = buf.play_pos();
         assert_eq!(buf.pop_or_silence(), 0);
         assert_eq!(buf.play_pos(), pos + 1, "underrun advances the cursor in real time");
+    }
+
+    #[test]
+    fn clock_staleness_tracks_decode_activity() {
+        let now = Instant::now();
+        let ago = |d: Duration| now.checked_sub(d).expect("test instant is far from the epoch");
+        assert!(clock_is_stale(None, now), "never primed is stale");
+        assert!(!clock_is_stale(Some(now), now), "just decoded is live");
+        assert!(
+            !clock_is_stale(
+                Some(ago(CLOCK_STALE_AFTER.saturating_sub(Duration::from_millis(1)))),
+                now
+            ),
+            "a decode inside the window keeps the clock live"
+        );
+        assert!(
+            clock_is_stale(Some(ago(CLOCK_STALE_AFTER)), now),
+            "no decode for CLOCK_STALE_AFTER marks the clock stale"
+        );
+        assert!(
+            clock_is_stale(Some(ago(Duration::from_secs(60))), now),
+            "a long-silent desktop is stale"
+        );
     }
 
     #[test]
