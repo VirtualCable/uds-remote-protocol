@@ -2,31 +2,42 @@
 // Copyright (c) 2026, Virtual Cable S.L.
 // All rights reserved.
 
-//! # udsscard (spike)
+//! # udsscard
 //!
-//! UMDF 2 virtual smart card reader. Goal of the spike: prove that an UMDF 2
-//! driver can expose the SmartCardReader device interface and satisfy the
-//! minimal IOCTL set SCardSvr exercises, with one always-present fake card
-//! (fixed ATR, `90 00` to every APDU). If `SCardListReaders` /
-//! `certutil -scinfo` see it, the real reader (remote card over the uds-rp
-//! channel, doc/plan section 17) is a port of this skeleton.
+//! UMDF 2 virtual smart card reader. The driver itself knows nothing about
+//! the remote card: a userland counterpart (the uds-rp server service, or
+//! the `udsscard-ctl` test tool) owns two named pipes
+//! (`udsscard-proto`):
+//!
+//! * Command pipe (userland → driver): `InjectCard(atr)` / `EjectCard`.
+//! * I/O pipe (driver → userland): each `IOCTL_SMARTCARD_TRANSMIT` is
+//!   forwarded as a raw APDU and the synchronous reply is returned to the
+//!   caller. Transmit handling is serialized with a mutex by design; the
+//!   WDF queue is parallel, so other IOCTLs are not blocked by a slow card.
+//!
+//! Without a connected counterpart the reader reports "no card". When the
+//! command pipe disconnects, the card is implicitly ejected.
+//!
+//! State is global (single reader). Multi-reader support would key this
+//! state by device object and is deliberately left out for now.
 //!
 //! Reference: BixVReader (vsmartcard) — same IOCTL surface, but UMDF 1/COM.
-//!
-//! This is a spike: state is global (single device), and the pending
-//! `IS_ABSENT` request never completes because the fake card is never
-//! removed. The real driver will track per-reader state and complete
-//! pending presence watches on remote card insertion/removal events.
 
+use std::fs::{File, OpenOptions};
 use std::sync::Mutex;
+use std::time::Duration;
 
+use udsscard_proto::{
+    CMD_PIPE_NAME, Command, IO_PIPE_NAME, IO_RESP_ERROR, IO_RESP_OK, IO_TRANSMIT, read_frame,
+    write_frame,
+};
 use wdk::println;
 use wdk_sys::{
     call_unsafe_wdf_function_binding, GUID, NTSTATUS, PCUNICODE_STRING, PDRIVER_OBJECT,
-    STATUS_BUFFER_TOO_SMALL, STATUS_CANCELLED, STATUS_INVALID_DEVICE_REQUEST,
-    STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED, STATUS_SUCCESS, ULONG, WDFDEVICE,
-    WDFDEVICE_INIT, WDFDRIVER, WDFREQUEST, WDF_DRIVER_CONFIG, WDF_IO_QUEUE_CONFIG,
-    WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES,
+    STATUS_BUFFER_TOO_SMALL, STATUS_CANCELLED, STATUS_DEVICE_NOT_CONNECTED,
+    STATUS_DEVICE_PROTOCOL_ERROR, STATUS_INVALID_PARAMETER, STATUS_NOT_SUPPORTED, STATUS_SUCCESS,
+    ULONG, WDFDEVICE, WDFDEVICE_INIT, WDFDRIVER, WDFREQUEST, WDF_DRIVER_CONFIG,
+    WDF_IO_QUEUE_CONFIG, WDF_NO_HANDLE, WDF_NO_OBJECT_ATTRIBUTES,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,7 +60,6 @@ const fn scard_ctl(code: u32) -> u32 {
 
 const IOCTL_SMARTCARD_POWER: u32 = scard_ctl(1);
 const IOCTL_SMARTCARD_GET_ATTRIBUTE: u32 = scard_ctl(2);
-const IOCTL_SMARTCARD_SET_ATTRIBUTE: u32 = scard_ctl(3);
 const IOCTL_SMARTCARD_TRANSMIT: u32 = scard_ctl(5);
 const IOCTL_SMARTCARD_IS_PRESENT: u32 = scard_ctl(10);
 const IOCTL_SMARTCARD_IS_ABSENT: u32 = scard_ctl(11);
@@ -69,8 +79,6 @@ const SCARD_PROTOCOL_T0: u32 = 0x1;
 const SCARD_PROTOCOL_T1: u32 = 0x2;
 
 // SCARD_ATTR_VALUE(class, tag) = (class << 16) | tag — see WDK winsmcrd.h.
-// Classes: VENDOR_INFO=1, COMMUNICATIONS=2, PROTOCOL=3, MECHANICAL=6,
-// IFD_PROTOCOL=8, ICC_STATE=9, SYSTEM=0x7fff.
 const SCARD_ATTR_VENDOR_NAME: u32 = 0x0001_0100;
 const SCARD_ATTR_VENDOR_IFD_TYPE: u32 = 0x0001_0101;
 const SCARD_ATTR_VENDOR_IFD_VERSION: u32 = 0x0001_0102;
@@ -86,35 +94,36 @@ const SCARD_ATTR_ATR_STRING: u32 = 0x0009_0303;
 const SCARD_ATTR_DEVICE_UNIT: u32 = 0x7FFF_0001;
 const SCARD_ATTR_MAXINPUT: u32 = 0x0007_A007;
 
-/// Fake card ATR ("eUDS-Card", TCK verified in freerdp-integration).
-const FAKE_ATR: [u8; 13] = [
-    0x3B, 0x89, 0x01, 0x45, 0x55, 0x44, 0x53, 0x2D, 0x43, 0x61, 0x72, 0x64, 0x96,
-];
-
 // ---------------------------------------------------------------------------
-// Device state (spike: global, single reader, card always present)
+// Device state (global, single reader)
 // ---------------------------------------------------------------------------
 
-struct DeviceState {
-    /// SCARD_ABSENT/SWALLOWED/NEGOTIABLE/SPECIFIC.
-    state: u32,
+struct Card {
+    atr: Vec<u8>,
+    /// SCARD_SWALLOWED/NEGOTIABLE/SPECIFIC.
+    io_state: u32,
     /// Active protocol after SET_PROTOCOL.
     protocol: u32,
+    /// Powered (after cold/warm reset).
+    powered: bool,
 }
 
-static STATE: Mutex<DeviceState> = Mutex::new(DeviceState {
-    state: SCARD_NEGOTIABLE,
-    protocol: SCARD_PROTOCOL_T1,
-});
+/// `None` = no card inserted.
+static CARD: Mutex<Option<Card>> = Mutex::new(None);
 
 struct SendRequest(WDFREQUEST);
 // SAFETY: WDFREQUEST handles are usable from any thread; WDF serializes
 // access through its own locking and we only store/complete it.
 unsafe impl Send for SendRequest {}
 
-/// Pending IS_ABSENT watch (completes when the card is removed — never, in
-/// this spike).
-static PENDING_ABSENT: Mutex<Option<SendRequest>> = Mutex::new(None);
+/// Presence watches parked until a card is injected.
+static PENDING_PRESENT: Mutex<Vec<SendRequest>> = Mutex::new(Vec::new());
+/// Absence watches parked until the card is ejected.
+static PENDING_ABSENT: Mutex<Vec<SendRequest>> = Mutex::new(Vec::new());
+
+/// Connected I/O pipe to the userland counterpart (`None` when nobody is
+/// attached — reader behaves as an empty slot).
+static IO_PIPE: Mutex<Option<File>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // Diagnostics: file log (WUDFHost debug output needs a viewer; a file in
@@ -179,10 +188,6 @@ extern "C" fn evt_driver_device_add(
     mut device_init: *mut WDFDEVICE_INIT,
 ) -> NTSTATUS {
     log_line("udsscard: EvtDriverDeviceAdd");
-
-    // Note: WdfDeviceInitSetDeviceType is not in the wdk-sys UMDF binding
-    // table; the SmartCardReader device interface below is what SCardSvr
-    // actually keys on.
 
     let mut device: WDFDEVICE = WDF_NO_HANDLE.cast();
     // SAFETY: `device_init` is provided by the framework and valid;
@@ -254,15 +259,110 @@ extern "C" fn evt_driver_device_add(
         return ntstatus;
     }
 
-    log_line(&format!("udsscard: device ready"));
+    // IPC thread: owns the command pipe connection lifecycle. Runs for the
+    // lifetime of the host process (no join on unload — the host is torn
+    // down as a whole).
+    std::thread::spawn(ipc_thread_main);
+
+    log_line("udsscard: device ready");
     STATUS_SUCCESS
+}
+
+// ---------------------------------------------------------------------------
+// IPC thread (command pipe consumer)
+// ---------------------------------------------------------------------------
+
+/// Open a named pipe as a client, retrying while the server side does not
+/// exist yet (`ERROR_FILE_NOT_FOUND`, 2).
+fn open_pipe(name: &str) -> File {
+    loop {
+        match OpenOptions::new().read(true).write(true).open(name) {
+            Ok(f) => {
+                log_line(&format!("udsscard: connected to {name}"));
+                return f;
+            }
+            Err(e) => {
+                log_line(&format!("udsscard: waiting for {name}: {e}"));
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+}
+
+fn ipc_thread_main() {
+    loop {
+        let mut cmd = open_pipe(CMD_PIPE_NAME);
+        // The counterpart creates both pipes before accepting; connect the
+        // I/O pipe right after the command pipe.
+        let io = open_pipe(IO_PIPE_NAME);
+        *IO_PIPE.lock().unwrap() = Some(io);
+
+        // Command loop: inject/eject until the counterpart goes away.
+        loop {
+            match read_frame(&mut cmd) {
+                Ok((tag, payload)) => match Command::parse(tag, payload) {
+                    Some(Command::InjectCard(atr)) => inject_card(atr),
+                    Some(Command::EjectCard) => eject_card(),
+                    None => log_line(&format!("udsscard: unknown cmd frame tag={tag}")),
+                },
+                Err(e) => {
+                    log_line(&format!("udsscard: cmd pipe lost: {e}"));
+                    break;
+                }
+            }
+        }
+
+        // Counterpart disconnected: implicit eject, back to reconnect.
+        *IO_PIPE.lock().unwrap() = None;
+        eject_card();
+    }
+}
+
+/// Insert a card: store its ATR and complete parked presence watches.
+fn inject_card(atr: Vec<u8>) {
+    log_line(&format!("udsscard: card injected ({} bytes ATR)", atr.len()));
+    {
+        let mut card = CARD.lock().unwrap();
+        *card = Some(Card {
+            atr,
+            io_state: SCARD_SWALLOWED,
+            protocol: SCARD_PROTOCOL_T1,
+            powered: false,
+        });
+    }
+    let pending: Vec<SendRequest> = PENDING_PRESENT.lock().unwrap().drain(..).collect();
+    for req in pending {
+        unmark_and_complete(req.0, STATUS_SUCCESS, 0);
+    }
+}
+
+/// Remove the card: drop state and complete parked absence watches.
+fn eject_card() {
+    log_line("udsscard: card ejected");
+    *CARD.lock().unwrap() = None;
+    let pending: Vec<SendRequest> = PENDING_ABSENT.lock().unwrap().drain(..).collect();
+    for req in pending {
+        unmark_and_complete(req.0, STATUS_SUCCESS, 0);
+    }
+}
+
+/// Complete a parked (cancelable) request, unless the cancel callback
+/// already owns it.
+fn unmark_and_complete(request: WDFREQUEST, status: NTSTATUS, information: usize) {
+    // SAFETY: `request` was marked cancelable when parked; unmarking races
+    // with the cancel callback, and STATUS_CANCELLED tells us the callback
+    // won and will complete the request itself.
+    let st = unsafe { call_unsafe_wdf_function_binding!(WdfRequestUnmarkCancelable, request,) };
+    if st != STATUS_CANCELLED {
+        complete(request, status, information);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Request helpers
 // ---------------------------------------------------------------------------
 
-/// Input buffer of a request as a byte slice (empty when shorter than
+/// Input buffer of a request as a byte vector (empty when shorter than
 /// `min_len` — caller then fails the request).
 fn request_input(request: WDFREQUEST, min_len: usize) -> Option<Vec<u8>> {
     let mut buffer: *mut core::ffi::c_void = core::ptr::null_mut();
@@ -312,7 +412,12 @@ fn request_output<'a>(request: WDFREQUEST, min_len: usize) -> Option<&'a mut [u8
 fn complete(request: WDFREQUEST, status: NTSTATUS, information: usize) {
     // SAFETY: `request` is owned by this callback and completed exactly once.
     unsafe {
-        call_unsafe_wdf_function_binding!(WdfRequestCompleteWithInformation, request, status, information as u64,);
+        call_unsafe_wdf_function_binding!(
+            WdfRequestCompleteWithInformation,
+            request,
+            status,
+            information as u64,
+        );
     }
 }
 
@@ -329,6 +434,22 @@ fn write_bytes(request: WDFREQUEST, data: &[u8]) {
         }
         None => complete(request, STATUS_BUFFER_TOO_SMALL, 0),
     }
+}
+
+/// Park a presence/absence watch: mark cancelable and store.
+fn park_watch(request: WDFREQUEST, pending: &'static Mutex<Vec<SendRequest>>) {
+    // SAFETY: `request` is live; the cancel callback is valid. The wdk-sys
+    // binding models WdfRequestMarkCancelable as returning `()`; the cancel
+    // callback covers the race where the request was already being
+    // cancelled.
+    unsafe {
+        call_unsafe_wdf_function_binding!(
+            WdfRequestMarkCancelable,
+            request,
+            Some(evt_request_cancel),
+        );
+    }
+    pending.lock().unwrap().push(SendRequest(request));
 }
 
 // ---------------------------------------------------------------------------
@@ -350,27 +471,24 @@ extern "C" fn evt_io_device_control(
     log_line(&format!("udsscard: IOCTL {io_control_code:#010x}"));
     match io_control_code {
         IOCTL_SMARTCARD_IS_PRESENT => {
-            // Spike: the fake card is always present.
-            complete(request, STATUS_SUCCESS, 0);
+            if CARD.lock().unwrap().is_some() {
+                complete(request, STATUS_SUCCESS, 0);
+            } else {
+                park_watch(request, &PENDING_PRESENT);
+            }
         }
         IOCTL_SMARTCARD_IS_ABSENT => {
-            // Park the watch; SCardSvr keeps it pending and its completion
-            // is the removal event (which never happens for the fake card).
-            // The wdk-sys binding models WdfRequestMarkCancelable as
-            // returning `()`; the cancel callback covers the race where the
-            // request was already being cancelled.
-            // SAFETY: `request` is live; the cancel callback is valid.
-            unsafe {
-                call_unsafe_wdf_function_binding!(
-                    WdfRequestMarkCancelable,
-                    request,
-                    Some(evt_request_cancel),
-                );
+            if CARD.lock().unwrap().is_none() {
+                complete(request, STATUS_SUCCESS, 0);
+            } else {
+                park_watch(request, &PENDING_ABSENT);
             }
-            *PENDING_ABSENT.lock().unwrap() = Some(SendRequest(request));
         }
         IOCTL_SMARTCARD_GET_STATE => {
-            let state = STATE.lock().unwrap().state;
+            let state = match CARD.lock().unwrap().as_ref() {
+                Some(card) => card.io_state,
+                None => SCARD_ABSENT,
+            };
             write_bytes(request, &state.to_le_bytes());
         }
         IOCTL_SMARTCARD_POWER => {
@@ -378,13 +496,22 @@ extern "C" fn evt_io_device_control(
                 complete(request, STATUS_BUFFER_TOO_SMALL, 0);
                 return;
             };
+            let mut guard = CARD.lock().unwrap();
+            let Some(card) = guard.as_mut() else {
+                complete(request, STATUS_DEVICE_NOT_CONNECTED, 0);
+                return;
+            };
             match action {
                 SCARD_COLD_RESET | SCARD_WARM_RESET => {
-                    STATE.lock().unwrap().state = SCARD_NEGOTIABLE;
-                    write_bytes(request, &FAKE_ATR);
+                    card.io_state = SCARD_NEGOTIABLE;
+                    card.powered = true;
+                    let atr = card.atr.clone();
+                    drop(guard);
+                    write_bytes(request, &atr);
                 }
                 SCARD_POWER_DOWN => {
-                    STATE.lock().unwrap().state = SCARD_SWALLOWED;
+                    card.io_state = SCARD_SWALLOWED;
+                    card.powered = false;
                     complete(request, STATUS_SUCCESS, 0);
                 }
                 _ => complete(request, STATUS_INVALID_PARAMETER, 0),
@@ -403,10 +530,14 @@ extern "C" fn evt_io_device_control(
                 complete(request, STATUS_INVALID_PARAMETER, 0);
                 return;
             };
-            let mut state = STATE.lock().unwrap();
-            state.protocol = chosen;
-            state.state = SCARD_SPECIFIC;
-            drop(state);
+            let mut guard = CARD.lock().unwrap();
+            let Some(card) = guard.as_mut() else {
+                complete(request, STATUS_DEVICE_NOT_CONNECTED, 0);
+                return;
+            };
+            card.protocol = chosen;
+            card.io_state = SCARD_SPECIFIC;
+            drop(guard);
             write_bytes(request, &chosen.to_le_bytes());
         }
         IOCTL_SMARTCARD_GET_ATTRIBUTE => {
@@ -416,28 +547,81 @@ extern "C" fn evt_io_device_control(
             };
             get_attribute(request, attr);
         }
-        IOCTL_SMARTCARD_TRANSMIT => {
-            let Some(input) = request_input(request, 8) else {
-                complete(request, STATUS_BUFFER_TOO_SMALL, 0);
-                return;
-            };
-            let send_protocol = u32::from_le_bytes(input[0..4].try_into().expect("4 bytes"));
-            // Fake card: `6D 00` (INS not supported) for every APDU, so
-            // probing tools (certutil -scinfo) finish instead of looping on
-            // phantom successful reads.
-            let mut response = Vec::with_capacity(10);
+        IOCTL_SMARTCARD_TRANSMIT => transmit(request),
+        _ => complete(request, STATUS_NOT_SUPPORTED, 0),
+    }
+}
+
+/// Forward the APDU to the userland counterpart and return its reply.
+///
+/// Input layout (WDK `SCARD_IO_REQUEST`-prefixed buffer): protocol u32,
+/// pci length u32, then `cbPciLength` pci bytes, then the raw APDU. Only
+/// the raw APDU crosses the pipe; the reply gets a fresh header.
+fn transmit(request: WDFREQUEST) {
+    let Some(input) = request_input(request, 8) else {
+        complete(request, STATUS_BUFFER_TOO_SMALL, 0);
+        return;
+    };
+    let send_protocol = u32::from_le_bytes(input[0..4].try_into().expect("4 bytes"));
+    let cb_pci = u32::from_le_bytes(input[4..8].try_into().expect("4 bytes")) as usize;
+    if input.len() < 8 + cb_pci {
+        complete(request, STATUS_INVALID_PARAMETER, 0);
+        return;
+    }
+    let apdu = input[8 + cb_pci..].to_vec();
+
+    if CARD.lock().unwrap().as_ref().is_none_or(|c| !c.powered) {
+        complete(request, STATUS_DEVICE_NOT_CONNECTED, 0);
+        return;
+    }
+
+    // Serialized by design (iteration 1): the queue stays parallel, so
+    // presence watches and attributes are not blocked by a slow card.
+    let mut guard = IO_PIPE.lock().unwrap();
+    let Some(pipe) = guard.as_mut() else {
+        complete(request, STATUS_DEVICE_NOT_CONNECTED, 0);
+        return;
+    };
+    let reply = write_frame(pipe, IO_TRANSMIT, &apdu)
+        .and_then(|()| read_frame(pipe));
+    match reply {
+        Ok((IO_RESP_OK, payload)) => {
+            let mut response = Vec::with_capacity(8 + payload.len());
             response.extend_from_slice(&send_protocol.to_le_bytes());
             response.extend_from_slice(&8u32.to_le_bytes()); // cbPciLength
-            response.extend_from_slice(&[0x6D, 0x00]);
+            response.extend_from_slice(&payload);
+            drop(guard);
             write_bytes(request, &response);
         }
-        _ => complete(request, STATUS_NOT_SUPPORTED, 0),
+        Ok((IO_RESP_ERROR, payload)) => {
+            let code = if payload.len() >= 4 {
+                u32::from_le_bytes(payload[0..4].try_into().expect("4 bytes"))
+            } else {
+                0
+            };
+            log_line(&format!("udsscard: transmit failed at relay, scard error {code:#x}"));
+            drop(guard);
+            complete(request, STATUS_DEVICE_PROTOCOL_ERROR, 0);
+        }
+        Ok((tag, _)) => {
+            log_line(&format!("udsscard: unexpected io reply tag={tag}"));
+            drop(guard);
+            complete(request, STATUS_DEVICE_PROTOCOL_ERROR, 0);
+        }
+        Err(e) => {
+            // The pipe is broken; drop it so the next transmit fails fast
+            // instead of blocking on a dead counterpart.
+            log_line(&format!("udsscard: io pipe error: {e}"));
+            *guard = None;
+            drop(guard);
+            complete(request, STATUS_DEVICE_PROTOCOL_ERROR, 0);
+        }
     }
 }
 
 fn get_attribute(request: WDFREQUEST, attr: u32) {
     log_line(&format!("udsscard: GET_ATTRIBUTE {attr:#010x}"));
-    let state = STATE.lock().unwrap();
+    let guard = CARD.lock().unwrap();
     match attr {
         SCARD_ATTR_VENDOR_NAME => write_bytes(request, b"VirtualCable\0"),
         SCARD_ATTR_VENDOR_IFD_TYPE => write_bytes(request, b"UDS Virtual Reader\0"),
@@ -451,41 +635,41 @@ fn get_attribute(request: WDFREQUEST, attr: u32) {
         }
         SCARD_ATTR_CHARACTERISTICS => write_bytes(request, &0u32.to_le_bytes()),
         SCARD_ATTR_CURRENT_PROTOCOL_TYPE => {
-            write_bytes(request, &state.protocol.to_le_bytes());
+            let protocol = guard.as_ref().map_or(0, |c| c.protocol);
+            write_bytes(request, &protocol.to_le_bytes());
         }
-        // ICC present and interface active (card powered after reset).
-        SCARD_ATTR_ICC_PRESENCE => write_bytes(request, &1u8.to_le_bytes()),
-        SCARD_ATTR_ICC_INTERFACE_STATUS => write_bytes(request, &1u8.to_le_bytes()),
+        SCARD_ATTR_ICC_PRESENCE => {
+            write_bytes(request, &u8::from(guard.is_some()).to_le_bytes());
+        }
+        SCARD_ATTR_ICC_INTERFACE_STATUS => {
+            let active = guard.as_ref().is_some_and(|c| c.powered);
+            write_bytes(request, &u8::from(active).to_le_bytes());
+        }
         SCARD_ATTR_CURRENT_IO_STATE => {
-            write_bytes(request, &state.state.to_le_bytes());
+            let state = guard.as_ref().map_or(SCARD_ABSENT, |c| c.io_state);
+            write_bytes(request, &state.to_le_bytes());
         }
-        SCARD_ATTR_ATR_STRING => write_bytes(request, &FAKE_ATR),
+        SCARD_ATTR_ATR_STRING => match guard.as_ref() {
+            Some(card) => write_bytes(request, &card.atr.clone()),
+            None => complete(request, STATUS_DEVICE_NOT_CONNECTED, 0),
+        },
         SCARD_ATTR_MAXINPUT => write_bytes(request, &255u32.to_le_bytes()),
         _ => complete(request, STATUS_NOT_SUPPORTED, 0),
     }
 }
 
 extern "C" fn evt_request_cancel(request: WDFREQUEST) {
-    log_line(&format!("udsscard: request cancelled"));
-    let mut pending = PENDING_ABSENT.lock().unwrap();
-    if let Some(stored) = pending.as_ref()
-        && stored.0 == request
-    {
-        *pending = None;
+    log_line("udsscard: request cancelled");
+    for pending in [&PENDING_PRESENT, &PENDING_ABSENT] {
+        let mut guard = pending.lock().unwrap();
+        if let Some(pos) = guard.iter().position(|r| r.0 == request) {
+            guard.swap_remove(pos);
+            break;
+        }
     }
-    drop(pending);
     // SAFETY: the request is being cancelled by the framework; completing
     // it with STATUS_CANCELLED is the required response.
     unsafe {
         call_unsafe_wdf_function_binding!(WdfRequestComplete, request, STATUS_CANCELLED,);
     }
 }
-
-// Keep the compiler from pruning constants used only by the real driver later.
-#[allow(dead_code)]
-const _: () = {
-    assert!(IOCTL_SMARTCARD_SET_ATTRIBUTE != 0);
-    assert!(IOCTL_SMARTCARD_TRANSMIT != 0);
-    assert!(SCARD_ABSENT == 1);
-    assert!(STATUS_INVALID_DEVICE_REQUEST != 0);
-};

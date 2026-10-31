@@ -22,6 +22,7 @@ wdk-build = "0.5.1"
 [target.'cfg(windows)'.dependencies]
 wdk = "0.4.1"
 wdk-sys = "0.5.1"
+udsscard-proto = { path = "../../crates/udsscard-proto" }
 
 [features]
 default = []
