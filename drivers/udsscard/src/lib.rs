@@ -152,17 +152,9 @@ extern "C" fn evt_driver_device_add(
 ) -> NTSTATUS {
     println!("udsscard: EvtDriverDeviceAdd");
 
-    let ntstatus = unsafe {
-        call_unsafe_wdf_function_binding!(
-            WdfDeviceInitSetDeviceType,
-            device_init,
-            FILE_DEVICE_SMARTCARD,
-        )
-    };
-    if ntstatus != STATUS_SUCCESS {
-        println!("udsscard: WdfDeviceInitSetDeviceType failed {ntstatus:#010x}");
-        return ntstatus;
-    }
+    // Note: WdfDeviceInitSetDeviceType is not in the wdk-sys UMDF binding
+    // table; the SmartCardReader device interface below is what SCardSvr
+    // actually keys on.
 
     let mut device: WDFDEVICE = WDF_NO_HANDLE.cast();
     // SAFETY: `device_init` is provided by the framework and valid;
@@ -200,7 +192,7 @@ extern "C" fn evt_driver_device_add(
     let mut queue_config = WDF_IO_QUEUE_CONFIG {
         Size: size_of::<WDF_IO_QUEUE_CONFIG>() as ULONG,
         DefaultQueue: 1,
-        DispatchType: wdk_sys::WdfIoQueueDispatchParallel,
+        DispatchType: wdk_sys::WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel,
         EvtIoDeviceControl: Some(evt_io_device_control),
         ..WDF_IO_QUEUE_CONFIG::default()
     };
@@ -238,7 +230,7 @@ fn request_input(request: WDFREQUEST, min_len: usize) -> Option<Vec<u8>> {
     // pointers are valid.
     let ntstatus = unsafe {
         call_unsafe_wdf_function_binding!(
-            WdfRequestGetInputBuffer,
+            WdfRequestRetrieveInputBuffer,
             request,
             min_len,
             &mut buffer,
@@ -261,7 +253,7 @@ fn request_output<'a>(request: WDFREQUEST, min_len: usize) -> Option<&'a mut [u8
     // pointers are valid.
     let ntstatus = unsafe {
         call_unsafe_wdf_function_binding!(
-            WdfRequestGetOutputBuffer,
+            WdfRequestRetrieveOutputBuffer,
             request,
             min_len,
             &mut buffer,
@@ -318,19 +310,18 @@ extern "C" fn evt_io_device_control(
         IOCTL_SMARTCARD_IS_ABSENT => {
             // Park the watch; SCardSvr keeps it pending and its completion
             // is the removal event (which never happens for the fake card).
+            // The wdk-sys binding models WdfRequestMarkCancelable as
+            // returning `()`; the cancel callback covers the race where the
+            // request was already being cancelled.
             // SAFETY: `request` is live; the cancel callback is valid.
-            let ntstatus = unsafe {
+            unsafe {
                 call_unsafe_wdf_function_binding!(
                     WdfRequestMarkCancelable,
                     request,
                     Some(evt_request_cancel),
-                )
-            };
-            if ntstatus == STATUS_SUCCESS {
-                *PENDING_ABSENT.lock().unwrap() = Some(SendRequest(request));
-            } else {
-                complete(request, ntstatus, 0);
+                );
             }
+            *PENDING_ABSENT.lock().unwrap() = Some(SendRequest(request));
         }
         IOCTL_SMARTCARD_GET_STATE => {
             let state = STATE.lock().unwrap().state;
