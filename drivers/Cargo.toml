@@ -1,5 +1,5 @@
 [workspace]
-members = ["udsaudio"]
+members = ["udsaudio", "udsscard"]
 resolver = "3"
 
 # The kernel driver needs its own workspace: panic=abort is a workspace-wide

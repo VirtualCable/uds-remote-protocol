@@ -1,0 +1,60 @@
+;
+; udsscard.inf — UDS virtual smart card reader (UMDF 2)
+;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = SmartCardReader
+ClassGuid   = {50DD5230-BA8A-11D1-BF5D-0000F805F530}
+Provider    = %ManufacturerName%
+CatalogFile = udsscard.cat
+DriverVer   = ; set by stampinf at packaging time
+PnpLockdown = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard,NT$ARCH$.10.0...22000 ; wudfrd.inf introduced in build 22000
+
+[Standard.NT$ARCH$.10.0...22000]
+%DeviceName% = udsscard, Root\udsscard
+
+[SourceDisksFiles]
+udsscard.dll = 1
+
+[SourceDisksNames]
+1 = %DiskName%
+
+; =================== UMDF Device ==================================
+
+[udsscard.NT]
+CopyFiles = UMDriverCopy
+Include = wudfrd.inf
+Needs = WUDFRD.NT
+
+[udsscard.NT.hw]
+Include = wudfrd.inf
+Needs = WUDFRD.NT.HW
+
+[udsscard.NT.Services]
+Include = wudfrd.inf
+Needs = WUDFRD.NT.Services
+
+[udsscard.NT.Wdf]
+UmdfService = udsscard,udsscard_Install
+UmdfServiceOrder = udsscard
+
+[udsscard_Install]
+UmdfLibraryVersion = $UMDFVERSION$
+ServiceBinary = %13%\udsscard.dll
+
+[DestinationDirs]
+UMDriverCopy = 13
+
+[UMDriverCopy]
+udsscard.dll
+
+; =================== Generic ======================================
+
+[Strings]
+ManufacturerName = "Virtual Cable S.L."
+DiskName = "udsscard Installation Disk"
+DeviceName = "UDS Virtual Smart Card Reader"
