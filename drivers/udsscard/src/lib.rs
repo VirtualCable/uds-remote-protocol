@@ -550,9 +550,10 @@ extern "C" fn evt_io_device_control(
 
 /// Forward the APDU to the userland counterpart and return its reply.
 ///
-/// Input layout (WDK `SCARD_IO_REQUEST`-prefixed buffer): protocol u32,
-/// pci length u32, then `cbPciLength` pci bytes, then the raw APDU. Only
-/// the raw APDU crosses the pipe; the reply gets a fresh header.
+/// Input layout (WDK): a `SCARD_IO_REQUEST` (protocol u32, cbPciLength u32)
+/// followed by the raw APDU; `cbPciLength` is the size of that header
+/// itself (8 for T=0/T=1), so the APDU starts at `input[cbPciLength..]`.
+/// Only the raw APDU crosses the pipe; the reply gets a fresh header.
 fn transmit(request: WDFREQUEST) {
     let Some(input) = request_input(request, 8) else {
         complete(request, STATUS_BUFFER_TOO_SMALL, 0);
@@ -560,11 +561,11 @@ fn transmit(request: WDFREQUEST) {
     };
     let send_protocol = u32::from_le_bytes(input[0..4].try_into().expect("4 bytes"));
     let cb_pci = u32::from_le_bytes(input[4..8].try_into().expect("4 bytes")) as usize;
-    if input.len() < 8 + cb_pci {
+    if cb_pci < 8 || input.len() < cb_pci {
         complete(request, STATUS_INVALID_PARAMETER, 0);
         return;
     }
-    let apdu = input[8 + cb_pci..].to_vec();
+    let apdu = input[cb_pci..].to_vec();
     log_line(&format!(
         "udsscard: transmit apdu {}",
         apdu.iter().map(|b| format!("{b:02x}")).collect::<String>()
