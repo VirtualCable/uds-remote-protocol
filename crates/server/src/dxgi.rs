@@ -37,6 +37,13 @@ use crate::capture::{
     MaskShapeKind, OutputCandidate, OutputSelector, Rect,
 };
 
+/// How long a reinit may keep retrying before it is declared fatal (see
+/// [`DxgiSource::reinit`]). Generous on purpose: secure-desktop transitions
+/// (lock, UAC) can hold `DuplicateOutput` denied for seconds.
+const REINIT_BUDGET: Duration = Duration::from_secs(30);
+/// Delay between reinit attempts while the desktop settles.
+const REINIT_RETRY_DELAY: Duration = Duration::from_millis(250);
+
 /// Desktop Duplication source for a single output.
 pub struct DxgiSource {
     selector: OutputSelector,
@@ -85,9 +92,37 @@ impl DxgiSource {
     }
 
     /// Re-creates the duplication after `DXGI_ERROR_ACCESS_LOST`.
+    ///
+    /// `DuplicateOutput` keeps failing for a short window while Windows
+    /// applies a desktop topology change (mode switch, display attach,
+    /// secure desktop transition): `ACCESS_DENIED`/`E_ACCESSDENIED` or a
+    /// transiently missing output. Dying on the first failure would kill
+    /// the session on every topology change, so the reinit is retried with
+    /// backoff for up to [`REINIT_BUDGET`] before giving up.
     fn reinit(&mut self) -> anyhow::Result<()> {
         info!(selector = ?self.selector, "DXGI access lost, reinitializing");
-        let dup = init_duplication(&self.selector)?;
+        let deadline = std::time::Instant::now() + REINIT_BUDGET;
+        let mut attempt = 0u32;
+        let dup = loop {
+            attempt += 1;
+            match init_duplication(&self.selector) {
+                Ok(dup) => break dup,
+                Err(e) if std::time::Instant::now() < deadline => {
+                    if attempt == 1 {
+                        info!(error = %format!("{e:#}"), "reinit not possible yet; retrying");
+                    }
+                    std::thread::sleep(REINIT_RETRY_DELAY);
+                }
+                Err(e) => {
+                    return Err(e.context(format!(
+                        "duplication could not be re-created after {attempt} attempts over {REINIT_BUDGET:?}"
+                    )));
+                }
+            }
+        };
+        if attempt > 1 {
+            info!(attempts = attempt, "DXGI duplication re-acquired");
+        }
         self.output_device.clone_from(&dup.output_name);
         if (dup.width, dup.height) != (self.width, self.height) {
             info!(

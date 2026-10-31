@@ -235,6 +235,8 @@ async fn session_delivers_frames_cursor_and_input_end_to_end() -> Result<()> {
             }
             ClientEvent::CursorShape { .. } => shape = true,
             ClientEvent::CursorVisibility { visible: v } => visible = v,
+            // Periodic telemetry; not part of what this test asserts.
+            ClientEvent::Stats(_) => {}
             other => panic!("unexpected event: {other:?}"),
         }
         connected && announced && dirty >= 3 && shape && visible
