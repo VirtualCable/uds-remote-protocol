@@ -1,0 +1,26 @@
+[package]
+name = "client-gui"
+description = "Reference GUI for the uds-rp client: winit + wgpu window, session view and input"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+client.workspace = true
+codec.workspace = true
+protocol.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+flume.workspace = true
+sha2.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+wgpu_text.workspace = true
+bytemuck.workspace = true
+arboard.workspace = true

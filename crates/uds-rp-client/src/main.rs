@@ -1,0 +1,69 @@
+//! Reference standalone client for the UDS remote protocol.
+//!
+//! Usage: `uds-rp-client [--addr host:port] [--ticket STR] [--key HEX]
+//!         [--no-audio] [--smartcard] [--privacy]`
+//!
+//! Without parameters the connect dialog asks for them; with all three of
+//! `--addr`/`--ticket`/`--key` the client connects immediately. The ticket
+//! is the human string (hashed to the wire form with SHA-384); the key is
+//! the server's shared key in hex.
+
+use std::process::ExitCode;
+
+use anyhow::{Context, Result, bail};
+use client_gui::{ConnectForm, SessionFlags};
+use tracing_subscriber::EnvFilter;
+
+fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .init();
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("uds-rp-client: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
+    let mut form = ConnectForm {
+        addr: String::new(),
+        ticket: String::new(),
+        key_hex: String::new(),
+    };
+    let mut flags = SessionFlags {
+        audio: true,
+        smartcard: false,
+        privacy_screen: false,
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--no-audio" => flags.audio = false,
+            "--smartcard" => flags.smartcard = true,
+            "--privacy" => flags.privacy_screen = true,
+            "--addr" => form.addr = take(&mut it, "--addr")?,
+            "--ticket" => form.ticket = take(&mut it, "--ticket")?,
+            "--key" => form.key_hex = take(&mut it, "--key")?,
+            other => bail!("unknown argument: {other}"),
+        }
+    }
+    let complete = !form.addr.is_empty() && !form.ticket.is_empty() && !form.key_hex.is_empty();
+    let form = if complete {
+        Some(form)
+    } else {
+        // Whatever was passed on the command line prefills the dialog.
+        if form.addr.is_empty() && form.ticket.is_empty() && form.key_hex.is_empty() {
+            None
+        } else {
+            Some(form)
+        }
+    };
+    client_gui::run_gui(form, flags).context("GUI")
+}
+
+fn take(it: &mut std::iter::Skip<std::env::Args>, flag: &str) -> Result<String> {
+    it.next().context(format!("missing value for {flag}"))
+}

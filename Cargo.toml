@@ -21,6 +21,8 @@ members = [
     "crates/smartcard",
     "crates/udsscard-proto",
     "crates/udsscard-ctl",
+    "crates/client-gui",
+    "crates/uds-rp-client",
 ]
 # The Windows kernel audio driver lives in its own workspace (drivers/):
 # it needs panic="abort" profiles (workspace-wide setting), no_std, and a
@@ -45,6 +47,7 @@ codec = { path = "crates/codec" }
 vpx-sys = { path = "crates/vpx-sys" }
 server = { path = "crates/server" }
 client = { path = "crates/client" }
+client-gui = { path = "crates/client-gui" }
 
 # Common external dependencies
 tokio = { version = "1.53", features = ["full"] }
@@ -89,6 +92,11 @@ sha2 = "0.11"
 bytes = "1.12"
 flume = { version = "0.12", features = ["async"] }
 toml = "0.9"
+winit = "0.30"
+wgpu = "30"
+wgpu_text = "30"
+bytemuck = { version = "1", features = ["derive"] }
+arboard = "3"
 
 [workspace.lints.rust]
 missing_docs = "warn"
