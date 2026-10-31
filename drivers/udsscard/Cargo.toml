@@ -25,3 +25,7 @@ wdk-sys = "0.5.1"
 
 [features]
 default = []
+
+# Own workspace: wdk-sys allows a single driver model per dependency graph
+# (drivers/ is WDM, this crate is UMDF).
+[workspace]

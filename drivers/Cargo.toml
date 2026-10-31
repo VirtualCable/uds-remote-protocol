@@ -1,5 +1,7 @@
 [workspace]
-members = ["udsaudio", "udsscard"]
+# udsscard has its own workspace: wdk-sys allows a single driver model per
+# dependency graph (udsaudio is WDM, udsscard is UMDF).
+members = ["udsaudio"]
 resolver = "3"
 
 # The kernel driver needs its own workspace: panic=abort is a workspace-wide
