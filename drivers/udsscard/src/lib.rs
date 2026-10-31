@@ -226,7 +226,7 @@ extern "C" fn evt_driver_device_add(
     // SAFETY: `Parallel` is the active union member for
     // WdfIoQueueDispatchParallel.
     unsafe {
-        queue_config.Settings.Parallel.NumberOfPresentedRequests = -1;
+        queue_config.Settings.Parallel.NumberOfPresentedRequests = u32::MAX; // -1 = unlimited
     }
 
     // SAFETY: `device` is a live handle; `queue_config` is valid; the queue
