@@ -102,6 +102,11 @@ mod win {
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
         SM_YVIRTUALSCREEN,
     };
+    use windows::Win32::Foundation::{LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
+    };
+    use windows::core::BOOL;
 
     /// `XBUTTON1`/`XBUTTON2` values for `MOUSEINPUT.mouseData` (winuser.h).
     const XBUTTON1: u32 = 0x0001;
@@ -109,32 +114,90 @@ mod win {
 
     /// Sends input events to the session the process runs in (§10).
     pub struct SendInputInjector {
-        /// Virtual-desktop origin (monitors can start at negative coords).
-        origin: (i32, i32),
-        /// Virtual-desktop size for absolute-coordinate normalization.
-        size: (i32, i32),
+        /// GDI device name of the captured output (e.g. `\\.\DISPLAY2`).
+        /// Display-local pointer coordinates are translated through this
+        /// monitor's desktop rectangle; without it they are assumed to start
+        /// at the primary monitor's origin.
+        output_device: Option<String>,
     }
 
     impl Default for SendInputInjector {
         fn default() -> Self {
-            Self::new()
+            Self::new(None)
+        }
+    }
+
+    /// One pass over the desktop monitors; the callback gets each monitor's
+    /// device name and rectangle and may stop the enumeration with `false`.
+    fn for_each_monitor(mut f: impl FnMut(&str, RECT) -> bool) {
+        unsafe extern "system" fn tramp(
+            monitor: HMONITOR,
+            _hdc: HDC,
+            _rect: *mut RECT,
+            data: LPARAM,
+        ) -> BOOL {
+            // SAFETY: `data` is the `&mut dyn FnMut` installed by the caller;
+            // `info` is a valid, correctly sized out struct.
+            let f = unsafe { &mut *(data.0 as *mut &mut dyn FnMut(&str, RECT) -> bool) };
+            let mut info = MONITORINFOEXW {
+                monitorInfo: windows::Win32::Graphics::Gdi::MONITORINFO {
+                    cbSize: u32::try_from(std::mem::size_of::<MONITORINFOEXW>()).unwrap_or(0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let ok = unsafe { GetMonitorInfoW(monitor, (&raw mut info).cast()) };
+            if !ok.as_bool() {
+                return true.into();
+            }
+            let name = {
+                let len = info
+                    .szDevice
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(info.szDevice.len());
+                String::from_utf16_lossy(&info.szDevice[..len])
+            };
+            f(&name, info.monitorInfo.rcMonitor).into()
+        }
+        let mut f: &mut dyn FnMut(&str, RECT) -> bool = &mut f;
+        // SAFETY: `f` outlives the call and is only used by `tramp` above.
+        unsafe {
+            let _ = EnumDisplayMonitors(None, None, Some(tramp), LPARAM((&raw mut f) as isize));
         }
     }
 
     impl SendInputInjector {
-        /// Captures the current virtual-desktop geometry.
+        /// Creates an injector bound to the captured `output_device` (GDI
+        /// device name) when known.
         #[must_use]
-        pub fn new() -> Self {
-            // SAFETY: GetSystemMetrics is always safe to call.
-            let (ox, oy, w, h) = unsafe {
-                (
-                    GetSystemMetrics(SM_XVIRTUALSCREEN),
-                    GetSystemMetrics(SM_YVIRTUALSCREEN),
-                    GetSystemMetrics(SM_CXVIRTUALSCREEN),
-                    GetSystemMetrics(SM_CYVIRTUALSCREEN),
-                )
-            };
-            Self { origin: (ox, oy), size: (w.max(1), h.max(1)) }
+        pub fn new(output_device: Option<&str>) -> Self {
+            Self {
+                output_device: output_device.map(str::to_owned),
+            }
+        }
+
+        /// Desktop rectangle of the captured output, resolved on each move
+        /// (monitor topology changes at runtime when the virtual display
+        /// attaches/detaches). Falls back to the primary monitor at the
+        /// desktop origin.
+        fn output_rect(&self) -> (i32, i32, i32, i32) {
+            if let Some(device) = &self.output_device {
+                let mut found = None;
+                for_each_monitor(|name, rect| {
+                    if name == device {
+                        found = Some(rect);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                if let Some(rect) = found {
+                    return (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+                }
+                tracing::warn!(device, "captured output not attached; using primary-origin mapping");
+            }
+            (0, 0, 0, 0)
         }
 
         fn send(inputs: &[INPUT]) {
@@ -186,14 +249,26 @@ mod win {
         }
 
         fn pointer_move(&mut self, _display_id: u8, x: i32, y: i32) {
-            // Display 0 shares its origin with the virtual desktop only when
-            // the primary monitor is top-left; proper multi-monitor mapping
-            // (EnumDisplayMonitors) arrives with multi-display support (§8.3).
-            let (vx, vy) = (x - self.origin.0, y - self.origin.1);
+            // Display-local → virtual-desktop: offset by the captured
+            // monitor's desktop rectangle (extended layouts place it
+            // anywhere, not at the origin).
+            let (left, top, _, _) = self.output_rect();
+            let (dx, dy) = (left + x, top + y);
+            // Refresh the virtual-desktop metrics on every move: the virtual
+            // display attaching/detaching changes them mid-session.
+            // SAFETY: GetSystemMetrics is always safe to call.
+            let (ox, oy, w, h) = unsafe {
+                (
+                    GetSystemMetrics(SM_XVIRTUALSCREEN),
+                    GetSystemMetrics(SM_YVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1),
+                    GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1),
+                )
+            };
             // Normalize to 0..65535 over the virtual desktop.
-            let nx = i32::try_from((i64::from(vx) * 65_535 / i64::from(self.size.0)).clamp(0, 65_535))
+            let nx = i32::try_from((i64::from(dx - ox) * 65_535 / i64::from(w)).clamp(0, 65_535))
                 .unwrap_or(0);
-            let ny = i32::try_from((i64::from(vy) * 65_535 / i64::from(self.size.1)).clamp(0, 65_535))
+            let ny = i32::try_from((i64::from(dy - oy) * 65_535 / i64::from(h)).clamp(0, 65_535))
                 .unwrap_or(0);
             Self::send(&[Self::mouse(
                 MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,

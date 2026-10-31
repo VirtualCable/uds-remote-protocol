@@ -92,6 +92,11 @@ pub struct StandaloneConfig {
     pub fps: u32,
     /// Codec preset name (from `codec::PRESETS`).
     pub preset: String,
+    /// Which desktop output to capture: case-insensitive substring of the
+    /// adapter description or GDI device string. `None` captures the UDS
+    /// virtual display (service default); set it to the physical console
+    /// adapter (e.g. `"QXL"`) to mirror the console session instead.
+    pub output_name: Option<String>,
     /// Channel switches (flat keys in the TOML `[standalone]` section).
     #[serde(flatten)]
     pub channels: ChannelSwitches,
@@ -123,6 +128,7 @@ impl Default for StandaloneConfig {
             height: 1080,
             fps: 30,
             preset: "vp9-balanced".to_string(),
+            output_name: None,
             channels: ChannelSwitches {
                 audio: true,
                 clipboard: true,

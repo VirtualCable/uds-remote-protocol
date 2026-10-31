@@ -28,6 +28,9 @@ pub struct StandaloneRuntime {
     pub bind: String,
     /// Video codec preset name for the session agent.
     pub preset: String,
+    /// Which desktop output the agent captures (substring selector); `None`
+    /// keeps the service default (the UDS virtual display).
+    pub output_name: Option<String>,
     /// Auto-logon credentials for the credential provider, if configured.
     pub creds: Option<Credentials>,
 }
@@ -83,6 +86,7 @@ pub fn load() -> Option<StandaloneRuntime> {
         ticket: server_config::ticket_bytes(&standalone.ticket),
         bind: config.bind.to_string(),
         preset: standalone.preset.clone(),
+        output_name: standalone.output_name.clone(),
         creds,
     })
 }

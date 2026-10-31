@@ -40,6 +40,10 @@ use crate::capture::{
 /// Desktop Duplication source for a single output.
 pub struct DxgiSource {
     selector: OutputSelector,
+    /// GDI device name of the captured output (e.g. `\\.\DISPLAY2`); the
+    /// input injector needs it to translate display-local pointer
+    /// coordinates into virtual-desktop ones.
+    output_device: String,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
@@ -66,6 +70,7 @@ impl DxgiSource {
         let dup = init_duplication(selector)?;
         Ok(Self {
             selector: selector.clone(),
+            output_device: dup.output_name,
             device: dup.device,
             context: dup.context,
             duplication: dup.duplication,
@@ -83,6 +88,7 @@ impl DxgiSource {
     fn reinit(&mut self) -> anyhow::Result<()> {
         info!(selector = ?self.selector, "DXGI access lost, reinitializing");
         let dup = init_duplication(&self.selector)?;
+        self.output_device.clone_from(&dup.output_name);
         if (dup.width, dup.height) != (self.width, self.height) {
             info!(
                 old = ?(self.width, self.height),
@@ -141,6 +147,10 @@ impl FrameSource for DxgiSource {
     fn take_cursor_update(&mut self) -> Option<CursorUpdate> {
         let update = std::mem::take(&mut self.pending_cursor);
         (update.visible.is_some() || update.shape.is_some()).then_some(update)
+    }
+
+    fn output_device(&self) -> Option<&str> {
+        Some(&self.output_device)
     }
 }
 
@@ -386,6 +396,8 @@ impl DxgiSource {
 
 /// Result of [`init_duplication`]: everything the source needs to capture.
 struct DupInit {
+    /// GDI device name of the chosen output (e.g. `\\.\DISPLAY2`).
+    output_name: String,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplication: IDXGIOutputDuplication,
@@ -557,6 +569,7 @@ fn init_duplication(selector: &OutputSelector) -> anyhow::Result<DupInit> {
         "DXGI duplication ready"
     );
     Ok(DupInit {
+        output_name: chosen.candidate.name.clone(),
         device,
         context: context.context("no D3D11 device context returned")?,
         duplication,

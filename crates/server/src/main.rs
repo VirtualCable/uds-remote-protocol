@@ -309,11 +309,20 @@ async fn display_sender(
     }
 }
 
+/// Capture source startup report: geometry plus the captured output's GDI
+/// device name (for input coordinate translation, §10).
+#[derive(Debug)]
+struct ReadyInfo {
+    width: u32,
+    height: u32,
+    output_device: Option<String>,
+}
+
 /// Capture thread → main loop messages.
 #[derive(Debug)]
 enum CaptureMsg {
     /// First message: the source is up (display geometry) or failed.
-    Ready(Result<(u32, u32)>),
+    Ready(Result<ReadyInfo>),
     /// One captured frame (owned, so the encoder can borrow from it).
     Frame(OwnedFrame),
     /// Cursor shape/visibility change observed while capturing (§10).
@@ -355,8 +364,13 @@ fn spawn_capture(
                 return;
             }
         };
-        let dims = source.dimensions();
-        if tx.blocking_send(CaptureMsg::Ready(Ok(dims))).is_err() {
+        let (width, height) = source.dimensions();
+        let ready = ReadyInfo {
+            width,
+            height,
+            output_device: source.output_device(),
+        };
+        if tx.blocking_send(CaptureMsg::Ready(Ok(ready))).is_err() {
             return;
         }
         let sleeps = matches!(source, Source::Synthetic(_));
@@ -745,13 +759,13 @@ async fn handle_frame<T: ReliableTransport>(
 
 /// Real injection on Windows (`SendInput`), logging elsewhere (§10).
 #[cfg(all(windows, feature = "windows-capture"))]
-fn new_injector() -> Box<dyn server::input::InputInjector> {
-    Box::new(server::input::SendInputInjector::new())
+fn new_injector(output_device: Option<&str>) -> Box<dyn server::input::InputInjector> {
+    Box::new(server::input::SendInputInjector::new(output_device))
 }
 
 /// Development injector: logs input events without a Windows session.
 #[cfg(not(all(windows, feature = "windows-capture")))]
-fn new_injector() -> Box<dyn server::input::InputInjector> {
+fn new_injector(_output_device: Option<&str>) -> Box<dyn server::input::InputInjector> {
     Box::new(server::input::LogInjector::default())
 }
 
@@ -952,10 +966,11 @@ async fn serve<T: ReliableTransport>(
 
     let fps_shared = Arc::new(AtomicU32::new(args.fps.max(1)));
     let mut frame_rx = spawn_capture(args, Arc::clone(&fps_shared), clock_start);
-    let (width, height) = match frame_rx.recv().await {
+    let ready = match frame_rx.recv().await {
         Some(CaptureMsg::Ready(r)) => r?,
         other => bail!("capture thread ended before reporting readiness ({other:?})"),
     };
+    let (width, height) = (ready.width, ready.height);
     let mut encoder = build_encoder(args, width, height)?;
 
     // Announce the display codec/geometry before the first frame (§8.3/§8.4).
@@ -1040,7 +1055,7 @@ async fn serve<T: ReliableTransport>(
         quality: None,
         forced_video: false,
         last_keyframe_req: None,
-        injector: new_injector(),
+        injector: new_injector(ready.output_device.as_deref()),
         video_ceiling_kbps: args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS),
         audio_ceiling_kbps,
         audio_control,
@@ -1508,6 +1523,18 @@ impl Source {
             Self::Dxgi { source, .. } => {
                 use server::capture::FrameSource as _;
                 source.dimensions()
+            }
+        }
+    }
+
+    /// GDI device name of the captured output, when the source has one.
+    fn output_device(&self) -> Option<String> {
+        match self {
+            Self::Synthetic(_) => None,
+            #[cfg(all(windows, feature = "windows-capture"))]
+            Self::Dxgi { source, .. } => {
+                use server::capture::FrameSource as _;
+                source.output_device().map(str::to_owned)
             }
         }
     }

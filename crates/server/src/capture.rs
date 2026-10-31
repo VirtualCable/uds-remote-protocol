@@ -167,11 +167,13 @@ pub fn mask_shape_to_rgba(
                     let alpha = match (kind, mask_bit(col, row_i)) {
                         // MaskedColor: mask bit means transparent.
                         (MaskShapeKind::MaskedColor, true) => 0,
-                        // Color: mask bit means XOR with background; a black
-                        // pixel is the classic transparent color key, anything
-                        // else stays opaque (XOR ignored, PoC).
-                        (MaskShapeKind::Color, true) if blue == 0 && green == 0 && red == 0 => 0,
-                        _ => 255,
+                        (MaskShapeKind::MaskedColor, false) => 255,
+                        // Color: BGRA with a real alpha channel — honor it or
+                        // the client paints an opaque black tile around the
+                        // pointer.
+                        (MaskShapeKind::Color, _) => pixel[3],
+                        // Monochrome is handled by the dedicated arm above.
+                        (MaskShapeKind::Monochrome, _) => unreachable!(),
                     };
                     rgba.extend_from_slice(&[red, green, blue, alpha]);
                 }
@@ -255,6 +257,13 @@ pub trait FrameSource {
     /// Takes the cursor update accumulated since the last call, if any.
     /// Default: backend has no cursor information.
     fn take_cursor_update(&mut self) -> Option<CursorUpdate> {
+        None
+    }
+
+    /// GDI device name of the captured output (e.g. `\\.\DISPLAY2`), for
+    /// translating display-local input coordinates into virtual-desktop
+    /// ones. Default: backend does not capture a GDI output.
+    fn output_device(&self) -> Option<&str> {
         None
     }
 }
@@ -400,11 +409,11 @@ mod tests {
     }
 
     #[test]
-    fn color_shape_uses_black_mask_as_transparent() {
-        // 2x1 color cursor, pitch 8, AND mask (2 bits in 1 byte): pixel 0
-        // masked+black → transparent; pixel 1 unmasked red → opaque.
-        let mut buf = vec![0, 0, 0, 0, 0, 0, 255, 0]; // BGRA: black, red
-        buf.push(0b1000_0000); // AND mask: pixel 0 set
+    fn color_shape_honors_the_alpha_channel() {
+        // 2x1 color cursor, pitch 8: pixel 0 transparent (alpha 0), pixel 1
+        // opaque red. The wire format keeps the source alpha verbatim so the
+        // client can composite the pointer shape correctly.
+        let buf = vec![0, 0, 0, 0, 0, 0, 255, 255]; // BGRA: clear, red
         let cur = mask_shape_to_rgba(MaskShapeKind::Color, 2, 1, 8, 1, 0, &buf).unwrap();
         assert_eq!((cur.hot_x, cur.hot_y), (1, 0));
         assert_eq!(cur.rgba, vec![0, 0, 0, 0, 255, 0, 0, 255]);

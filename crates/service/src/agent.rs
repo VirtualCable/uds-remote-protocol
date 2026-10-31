@@ -335,7 +335,7 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
             key: standalone.key,
             ticket: standalone.ticket,
             bind: standalone.bind.clone(),
-            output_name: "UDS".to_owned(),
+            output_name: standalone.output_name.clone().unwrap_or_else(|| "UDS".to_owned()),
             preset: standalone.preset.clone(),
         },
         None => service_proto::AgentConfig {
