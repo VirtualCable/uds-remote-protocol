@@ -44,6 +44,21 @@ const REINIT_BUDGET: Duration = Duration::from_secs(30);
 /// Delay between reinit attempts while the desktop settles.
 const REINIT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
+/// Grace window after a healthy acquire during which an `ACCESS_LOST` is
+/// treated as an ordinary topology change (reinit immediately, no backoff).
+const STORM_GRACE: Duration = Duration::from_secs(5);
+/// First delay between storm re-creations (see [`STORM_BREAKER`]).
+const STORM_DELAY_MIN: Duration = Duration::from_millis(100);
+/// Max delay between storm re-creations.
+const STORM_DELAY_MAX: Duration = Duration::from_secs(2);
+/// How long an `ACCESS_LOST` storm may last before the capture is declared
+/// broken. A poisoned output (seen on QXL after driver churn) invalidates
+/// every new duplication instantly; spinning unthrottled there hung a whole
+/// VM once (≈500 factory+device+duplication creations/s → display-stack
+/// resource exhaustion → qemu watchdog reset). Failing the session releases
+/// everything and lets the next connection retry from scratch.
+const STORM_BREAKER: Duration = Duration::from_secs(120);
+
 /// Desktop Duplication source for a single output.
 pub struct DxgiSource {
     selector: OutputSelector,
@@ -69,12 +84,18 @@ pub struct DxgiSource {
     pending_cursor: CursorUpdate,
     /// Last cursor visibility reported by DXGI (for change detection).
     cursor_visible: bool,
+    /// Last time `AcquireNextFrame` proved the duplication healthy (a frame
+    /// or a clean timeout). Drives the storm throttle/breaker.
+    last_healthy: std::time::Instant,
+    /// Current backoff between storm re-creations; doubles per iteration up
+    /// to [`STORM_DELAY_MAX`], reset on a healthy acquire.
+    storm_delay: Duration,
 }
 
 impl DxgiSource {
     /// Captures the output picked by `selector` (see [`OutputSelector`]).
     pub fn new(selector: &OutputSelector) -> anyhow::Result<Self> {
-        let dup = init_duplication(selector)?;
+        let dup = init_duplication(selector, false)?;
         Ok(Self {
             selector: selector.clone(),
             output_device: dup.output_name,
@@ -88,7 +109,35 @@ impl DxgiSource {
             shape_buf: Vec::new(),
             pending_cursor: CursorUpdate::default(),
             cursor_visible: true,
+            last_healthy: std::time::Instant::now(),
+            storm_delay: STORM_DELAY_MIN,
         })
+    }
+
+    /// Handles `DXGI_ERROR_ACCESS_LOST` from `AcquireNextFrame`.
+    ///
+    /// An `ACCESS_LOST` right after healthy traffic is an ordinary topology
+    /// change: reinit at once. One that arrives when the previous reinit
+    /// never delivered anything means the output invalidates every new
+    /// duplication instantly — a poisoned display stack. That storm is
+    /// throttled with exponential backoff (each re-creation costs a DXGI
+    /// factory, a D3D11 device and a duplication, and ~500 of those per
+    /// second once exhausted a VM's display stack into a watchdog reset)
+    /// and broken off entirely after [`STORM_BREAKER`].
+    fn on_access_lost(&mut self) -> anyhow::Result<()> {
+        let since_healthy = self.last_healthy.elapsed();
+        if since_healthy <= STORM_GRACE {
+            self.storm_delay = STORM_DELAY_MIN;
+            return self.reinit(false);
+        }
+        anyhow::ensure!(
+            since_healthy < STORM_BREAKER,
+            "the output has invalidated every new desktop duplication for {STORM_BREAKER:?}; \
+             the display stack looks poisoned — giving up instead of spinning"
+        );
+        std::thread::sleep(self.storm_delay);
+        self.storm_delay = (self.storm_delay * 2).min(STORM_DELAY_MAX);
+        self.reinit(true)
     }
 
     /// Re-creates the duplication after `DXGI_ERROR_ACCESS_LOST`.
@@ -98,14 +147,20 @@ impl DxgiSource {
     /// secure desktop transition): `ACCESS_DENIED`/`E_ACCESSDENIED` or a
     /// transiently missing output. Dying on the first failure would kill
     /// the session on every topology change, so the reinit is retried with
-    /// backoff for up to [`REINIT_BUDGET`] before giving up.
-    fn reinit(&mut self) -> anyhow::Result<()> {
-        info!(selector = ?self.selector, "DXGI access lost, reinitializing");
+    /// backoff for up to [`REINIT_BUDGET`] before giving up. In `storm`
+    /// mode (caller already throttles) logging drops to `debug` to avoid
+    /// spamming per iteration.
+    fn reinit(&mut self, storm: bool) -> anyhow::Result<()> {
+        if storm {
+            tracing::debug!(selector = ?self.selector, "DXGI access lost, reinitializing (storm)");
+        } else {
+            info!(selector = ?self.selector, "DXGI access lost, reinitializing");
+        }
         let deadline = std::time::Instant::now() + REINIT_BUDGET;
         let mut attempt = 0u32;
         let dup = loop {
             attempt += 1;
-            match init_duplication(&self.selector) {
+            match init_duplication(&self.selector, storm) {
                 Ok(dup) => break dup,
                 Err(e) if std::time::Instant::now() < deadline => {
                     if attempt == 1 {
@@ -159,14 +214,17 @@ impl FrameSource for DxgiSource {
         };
         if let Err(e) = &result {
             if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
+                // A clean timeout also proves the duplication is alive.
+                self.last_healthy = std::time::Instant::now();
                 return Ok(None);
             }
             if e.code() == DXGI_ERROR_ACCESS_LOST {
-                self.reinit()?;
+                self.on_access_lost()?;
                 return Ok(None);
             }
         }
         result.context("AcquireNextFrame failed")?;
+        self.last_healthy = std::time::Instant::now();
         let resource = resource.context("AcquireNextFrame returned no resource")?;
 
         // Every acquired frame MUST be released, even on error paths.
@@ -545,7 +603,7 @@ fn enumerate_outputs(factory: &IDXGIFactory1) -> Vec<EnumeratedOutput> {
 /// Selects the output matching `selector`, creates a D3D11 device on the
 /// adapter owning it (a hard requirement of `DuplicateOutput`) and
 /// duplicates it.
-fn init_duplication(selector: &OutputSelector) -> anyhow::Result<DupInit> {
+fn init_duplication(selector: &OutputSelector, quiet: bool) -> anyhow::Result<DupInit> {
     // SAFETY: COM factory creation with a valid out-param.
     let factory: IDXGIFactory1 =
         unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
@@ -603,13 +661,21 @@ fn init_duplication(selector: &OutputSelector) -> anyhow::Result<DupInit> {
         "unexpected desktop format {:?}",
         dup_desc.ModeDesc.Format
     );
-    info!(
-        adapter = %chosen.candidate.adapter,
-        output = %chosen.candidate.name,
-        width = dup_desc.ModeDesc.Width,
-        height = dup_desc.ModeDesc.Height,
-        "DXGI duplication ready"
-    );
+    if quiet {
+        tracing::debug!(
+            adapter = %chosen.candidate.adapter,
+            output = %chosen.candidate.name,
+            "DXGI duplication ready (storm)"
+        );
+    } else {
+        info!(
+            adapter = %chosen.candidate.adapter,
+            output = %chosen.candidate.name,
+            width = dup_desc.ModeDesc.Width,
+            height = dup_desc.ModeDesc.Height,
+            "DXGI duplication ready"
+        );
+    }
     Ok(DupInit {
         output_name: chosen.candidate.name.clone(),
         device,
