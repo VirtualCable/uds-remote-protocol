@@ -219,6 +219,15 @@ extern "C" fn evt_driver_device_add(
         EvtIoDefault: Some(evt_io_default),
         ..WDF_IO_QUEUE_CONFIG::default()
     };
+    // wdk-sys's `default()` zeroes the struct, but WDF_IO_QUEUE_CONFIG_INIT
+    // sets NumberOfPresentedRequests to -1 (unlimited) for parallel queues.
+    // With 0 the framework presents no request at all and every IOCTL pends
+    // forever (observed: host recycles on idle timeout after ~3 minutes).
+    // SAFETY: `Parallel` is the active union member for
+    // WdfIoQueueDispatchParallel.
+    unsafe {
+        queue_config.Settings.Parallel.NumberOfPresentedRequests = -1;
+    }
 
     // SAFETY: `device` is a live handle; `queue_config` is valid; the queue
     // handle output may be null.
