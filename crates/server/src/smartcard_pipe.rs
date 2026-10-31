@@ -44,7 +44,7 @@ use windows::Win32::System::Pipes::{
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::PCWSTR;
 
-use crate::smartcard::{RouterRelay, SmartcardRelay as _};
+use crate::smartcard::{RelayError, RouterRelay, SmartcardRelay as _};
 
 /// `SCARD_SHARE_SHARED`.
 const SCARD_SHARE_SHARED: u32 = 2;
@@ -490,11 +490,19 @@ fn transmit_loop(
                 warn!(?other, "smartcard pipe origin: unexpected transmit reply");
                 (IO_RESP_ERROR, SCARD_E_UNEXPECTED.to_le_bytes().to_vec())
             }
-            Err(e) => {
-                // Session gone (or timed out): tell the driver the card is
-                // unreachable and stop; the session teardown closes us.
+            Err(RelayError::Disconnected) => {
+                // Session gone: tell the driver the card is unreachable
+                // and stop; the session teardown closes us.
                 write_frame(io, IO_RESP_ERROR, &SCARD_E_UNEXPECTED.to_le_bytes())?;
-                bail!("transmit relay failed: {e}");
+                bail!("transmit relay failed: channel disconnected");
+            }
+            Err(e) => {
+                // One slow operation timed out (§17.9, the eDNI lesson):
+                // report it to the driver and KEEP GOING — tearing the
+                // whole virtual card down for a single late reply wedges
+                // every caller until the next reconnect.
+                warn!("smartcard transmit failed: {e}; reporting to the driver");
+                (IO_RESP_ERROR, SCARD_E_UNEXPECTED.to_le_bytes().to_vec())
             }
         };
         write_frame(io, resp_tag, &payload)?;

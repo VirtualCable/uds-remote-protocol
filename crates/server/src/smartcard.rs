@@ -32,8 +32,10 @@ use protocol::SmartcardMessage;
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
-/// Default reply timeout for regular operations.
-pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default reply timeout for regular operations. Generous on purpose:
+/// real cards (the eDNI lesson, §17.9) can take tens of seconds on a
+/// single Transmit; a tight timeout is worse than a slow reply.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Extra wait granted to `GetStatusChange` on top of its own timeout
 /// (the client parks inside the backend for the full requested time).
