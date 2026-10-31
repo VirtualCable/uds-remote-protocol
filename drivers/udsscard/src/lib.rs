@@ -211,8 +211,12 @@ extern "C" fn evt_driver_device_add(
     let mut queue_config = WDF_IO_QUEUE_CONFIG {
         Size: size_of::<WDF_IO_QUEUE_CONFIG>() as ULONG,
         DefaultQueue: 1,
+        // Virtual device: no power management, so requests must be
+        // dispatched regardless of any framework power state.
+        PowerManaged: wdk_sys::WdfFalse,
         DispatchType: wdk_sys::_WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel,
         EvtIoDeviceControl: Some(evt_io_device_control),
+        EvtIoDefault: Some(evt_io_default),
         ..WDF_IO_QUEUE_CONFIG::default()
     };
 
@@ -312,6 +316,11 @@ fn write_bytes(request: WDFREQUEST, data: &[u8]) {
 // ---------------------------------------------------------------------------
 // IOCTL dispatch
 // ---------------------------------------------------------------------------
+
+extern "C" fn evt_io_default(_queue: wdk_sys::WDFQUEUE, request: WDFREQUEST) {
+    log_line("udsscard: EvtIoDefault (unexpected request)");
+    complete(request, STATUS_NOT_SUPPORTED, 0);
+}
 
 extern "C" fn evt_io_device_control(
     _queue: wdk_sys::WDFQUEUE,
