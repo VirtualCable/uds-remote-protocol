@@ -41,6 +41,9 @@ Needs = WUDFRD.NT.Services
 [udsscard.NT.Wdf]
 UmdfService = udsscard,udsscard_Install
 UmdfServiceOrder = udsscard
+; The smart card subsystem reaches reader drivers from kernel clients;
+; both BixVReader and the inbox USBCCID UMDF driver set this policy.
+UmdfKernelModeClientPolicy = AllowKernelModeClients
 
 [udsscard_Install]
 UmdfLibraryVersion = $UMDFVERSION$
