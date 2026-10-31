@@ -422,11 +422,13 @@ extern "C" fn evt_io_device_control(
                 return;
             };
             let send_protocol = u32::from_le_bytes(input[0..4].try_into().expect("4 bytes"));
-            // Fake card: every APDU succeeds with `90 00`.
+            // Fake card: `6D 00` (INS not supported) for every APDU, so
+            // probing tools (certutil -scinfo) finish instead of looping on
+            // phantom successful reads.
             let mut response = Vec::with_capacity(10);
             response.extend_from_slice(&send_protocol.to_le_bytes());
             response.extend_from_slice(&8u32.to_le_bytes()); // cbPciLength
-            response.extend_from_slice(&[0x90, 0x00]);
+            response.extend_from_slice(&[0x6D, 0x00]);
             write_bytes(request, &response);
         }
         _ => complete(request, STATUS_NOT_SUPPORTED, 0),
