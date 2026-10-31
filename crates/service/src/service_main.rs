@@ -45,7 +45,7 @@ pub fn run_console() {
     let standalone = crate::standalone::load();
     let creds = standalone.as_ref().and_then(|s| s.creds.clone());
     crate::credprov::spawn(&STOP_REQUESTED, creds);
-    crate::display::spawn(&STOP_REQUESTED);
+    crate::display::spawn(&STOP_REQUESTED, needs_virtual_display(standalone.as_ref()));
     service_body(standalone.as_ref());
 }
 
@@ -71,7 +71,7 @@ fn service_main_impl() -> Result<()> {
     let standalone = crate::standalone::load();
     let creds = standalone.as_ref().and_then(|s| s.creds.clone());
     crate::credprov::spawn(&STOP_REQUESTED, creds);
-    crate::display::spawn(&STOP_REQUESTED);
+    crate::display::spawn(&STOP_REQUESTED, needs_virtual_display(standalone.as_ref()));
     service_body(standalone.as_ref());
 
     report_status(status_handle, SERVICE_STOPPED)?;
@@ -83,6 +83,13 @@ fn service_main_impl() -> Result<()> {
 /// console session (spawn, watchdog, respawn with a crash-loop cap).
 fn service_body(standalone: Option<&crate::standalone::StandaloneRuntime>) {
     agent::watch_loop(&STOP_REQUESTED, standalone);
+}
+
+/// Without a standalone config the agent captures the UDS virtual display
+/// (laboratory default), so the virtual monitor must be attached on
+/// session; with one, the config's `output_name` decides.
+fn needs_virtual_display(standalone: Option<&crate::standalone::StandaloneRuntime>) -> bool {
+    standalone.is_none_or(crate::standalone::StandaloneRuntime::needs_virtual_display)
 }
 
 /// `HandlerEx` callback: the SCM asks us to stop/shutdown.

@@ -44,11 +44,19 @@ const IDLE_OVERRIDE_FILE: &str = r"C:\ProgramData\UdsRp\display-idle-secs.txt";
 /// orphaned monitors from a crashed previous instance, and then attaches /
 /// detaches the virtual monitor following the remote-session signal. On
 /// stop it detaches the monitor and disables the adapter again.
-pub fn spawn(stop: &'static AtomicBool) {
-    std::thread::spawn(move || run(stop));
+///
+/// `attach_on_session` gates the whole attach/detach cycle: sessions that
+/// capture the **physical console** (`output_name` pointing at the console
+/// adapter) do not need the virtual monitor at all, and attaching it on
+/// every session only destabilizes single-head console drivers (QXL loses
+/// its desktop duplication for good after enough topology churn) while
+/// accumulating ghost GDI display entries. The adapter itself is still
+/// enabled so console agents keep seeing a stable device list.
+pub fn spawn(stop: &'static AtomicBool, attach_on_session: bool) {
+    std::thread::spawn(move || run(stop, attach_on_session));
 }
 
-fn run(stop: &AtomicBool) {
+fn run(stop: &AtomicBool, attach_on_session: bool) {
     let adapter_enabled = match adapter::set_enabled(true) {
         Ok(found) => {
             if !found {
@@ -76,7 +84,7 @@ fn run(stop: &AtomicBool) {
     }
 
     while !stop.load(Ordering::Relaxed) {
-        let signaled = adapter_enabled && remote_session_signaled();
+        let signaled = attach_on_session && adapter_enabled && remote_session_signaled();
         if signaled {
             state.last_signal = Instant::now();
             if !state.attached {

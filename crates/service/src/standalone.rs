@@ -35,6 +35,19 @@ pub struct StandaloneRuntime {
     pub creds: Option<Credentials>,
 }
 
+impl StandaloneRuntime {
+    /// Whether sessions will capture the UDS virtual display and therefore
+    /// need the virtual monitor attached. Console mirroring (`output_name`
+    /// set to the console adapter, e.g. `"QXL"`) must NOT attach it: the
+    /// topology churn destabilizes single-head console drivers for no
+    /// benefit (the virtual display is not the capture target).
+    pub fn needs_virtual_display(&self) -> bool {
+        self.output_name
+            .as_deref()
+            .is_none_or(|name| name.to_lowercase().contains("uds"))
+    }
+}
+
 /// Loads the standalone runtime from the shared config file. Returns `None`
 /// when there is no config file or it is not in standalone mode (laboratory
 /// defaults apply); logs and returns `None` on malformed files.
