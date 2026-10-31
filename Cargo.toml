@@ -7,6 +7,7 @@ members = [
     "crates/crypt",
     "crates/codec",
     "crates/server",
+    "crates/server-config",
     "crates/client",
     "crates/testclient",
     "crates/vpx-sys",
@@ -46,6 +47,7 @@ crypt = { path = "crates/crypt" }
 codec = { path = "crates/codec" }
 vpx-sys = { path = "crates/vpx-sys" }
 server = { path = "crates/server" }
+server-config = { path = "crates/server-config" }
 client = { path = "crates/client" }
 client-gui = { path = "crates/client-gui" }
 

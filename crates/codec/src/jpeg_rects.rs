@@ -342,7 +342,7 @@ mod tests {
         let vf = VideoFrame { width: 64, height: 64, stride: 256, data: &f };
         enc.encode(&vf).unwrap();
         let p = enc.encode(&vf).unwrap();
-        assert!(p.data.is_empty());
+        assert_eq!(p.data, [] as [u8; 0]);
     }
 
     #[test]

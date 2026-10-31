@@ -42,7 +42,11 @@ pub fn run_dispatch() -> Result<()> {
 pub fn run_console() {
     logging::init();
     info!("console mode: running service body in the foreground (Ctrl+C to stop)");
-    service_body();
+    let standalone = crate::standalone::load();
+    let creds = standalone.as_ref().and_then(|s| s.creds.clone());
+    crate::credprov::spawn(&STOP_REQUESTED, creds);
+    crate::display::spawn(&STOP_REQUESTED);
+    service_body(standalone.as_ref());
 }
 
 /// `ServiceMain` callback invoked by the SCM dispatcher.
@@ -64,9 +68,11 @@ fn service_main_impl() -> Result<()> {
 
     report_status(status_handle, SERVICE_RUNNING)?;
     info!("service started");
-    crate::credprov::spawn(&STOP_REQUESTED);
+    let standalone = crate::standalone::load();
+    let creds = standalone.as_ref().and_then(|s| s.creds.clone());
+    crate::credprov::spawn(&STOP_REQUESTED, creds);
     crate::display::spawn(&STOP_REQUESTED);
-    service_body();
+    service_body(standalone.as_ref());
 
     report_status(status_handle, SERVICE_STOPPED)?;
     info!("service stopped");
@@ -75,8 +81,8 @@ fn service_main_impl() -> Result<()> {
 
 /// Service body: watch loop that keeps one session agent alive in the
 /// console session (spawn, watchdog, respawn with a crash-loop cap).
-fn service_body() {
-    agent::watch_loop(&STOP_REQUESTED);
+fn service_body(standalone: Option<&crate::standalone::StandaloneRuntime>) {
+    agent::watch_loop(&STOP_REQUESTED, standalone);
 }
 
 /// `HandlerEx` callback: the SCM asks us to stop/shutdown.

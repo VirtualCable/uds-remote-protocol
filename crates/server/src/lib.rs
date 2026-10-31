@@ -15,7 +15,7 @@ pub mod audio_endpoint;
 pub mod audio_wasapi;
 pub mod capture;
 pub mod clipboard;
-pub mod config;
+pub use server_config as config;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod display_topology;
 #[cfg(all(windows, feature = "windows-capture"))]

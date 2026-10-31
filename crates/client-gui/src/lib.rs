@@ -20,8 +20,6 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use client::{ClientConfig, Session};
 use client::mic::MicMode;
-use protocol::TICKET_LENGTH;
-use sha2::Digest as _;
 use tracing::{error, warn};
 use wgpu_text::glyph_brush::{OwnedSection, OwnedText};
 use winit::application::ApplicationHandler;
@@ -50,18 +48,7 @@ pub struct SessionFlags {
     pub privacy_screen: bool,
 }
 
-/// Maps a human ticket to its wire form. MUST match
-/// `server::config::ticket_bytes` (SHA-384 of the UTF-8 prefix before the
-/// first '.'): the client and the server hash the same string into the
-/// same 48-byte ticket.
-#[must_use]
-pub fn ticket_bytes(human: &str) -> [u8; TICKET_LENGTH] {
-    let prefix = human.split('.').next().unwrap_or(human);
-    let digest = sha2::Sha384::digest(prefix.as_bytes());
-    let mut out = [0u8; TICKET_LENGTH];
-    out.copy_from_slice(&digest);
-    out
-}
+pub use server_config::ticket_bytes;
 
 /// Runs the GUI (blocking, main thread). With `form = Some(..)` the client
 /// connects immediately; with `None` the connect dialog shows first.

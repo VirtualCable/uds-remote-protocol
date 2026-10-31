@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 protocol.workspace = true
+server-config.workspace = true
 service-proto.workspace = true
 getrandom.workspace = true
 tracing.workspace = true

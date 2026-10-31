@@ -16,6 +16,8 @@ mod install;
 mod logging;
 #[cfg(windows)]
 mod service_main;
+#[cfg(windows)]
+mod standalone;
 
 /// CLI entry point: `--install`, `--uninstall`, `--console` (debug run in
 /// the current console) or, with no arguments, the SCM entry point.

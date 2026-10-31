@@ -86,7 +86,7 @@ impl Agent {
     /// the command line stays free of secrets, which any process in the
     /// session could otherwise read (M3). Credentials are also logged so the
     /// lab client can connect.
-    pub fn spawn_in_console_session(key: &[u8; 32], ticket: &[u8; 48]) -> Result<Option<Self>> {
+    pub fn spawn_in_console_session(config: &service_proto::AgentConfig) -> Result<Option<Self>> {
         let session_id = unsafe { WTSGetActiveConsoleSessionId() };
         if session_id == 0xFFFF_FFFF {
             return Ok(None);
@@ -99,8 +99,8 @@ impl Agent {
         let token = OwnedHandle(token_handle);
 
         let exe = agent_exe_path()?;
-        let key_hex = protocol::hex::encode(key);
-        let ticket_hex = protocol::hex::encode(ticket);
+        let key_hex = protocol::hex::encode(&config.key);
+        let ticket_hex = protocol::hex::encode(&config.ticket);
         let mut cmdline: Vec<u16> = format!("\"{}\" --agent-config-stdin", exe.display())
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -158,14 +158,7 @@ impl Agent {
                 None
             }
         };
-        let config = service_proto::AgentConfig {
-            key: *key,
-            ticket: *ticket,
-            bind: "0.0.0.0:14433".to_owned(),
-            output_name: "UDS".to_owned(),
-            preset: "vp9-balanced".to_owned(),
-        };
-        write_all_and_close(&pipe_write, &service_proto::encode_agent_config(&config))?;
+        write_all_and_close(&pipe_write, &service_proto::encode_agent_config(config))?;
         info!(session_id, pid = info.dwProcessId, exe = %exe.display(), "session agent spawned");
         info!(key = key_hex, ticket = ticket_hex, "lab credentials (also piped to the agent)");
         Ok(Some(Self {
@@ -324,18 +317,35 @@ fn open_agent_log() -> Result<OwnedHandle> {
 /// Service body: keep one agent running in the console session until the SCM
 /// asks us to stop. Errors are logged and retried with backoff; the loop only
 /// ends on stop (M5 revisits the exact recovery policy).
-pub fn watch_loop(stop: &AtomicBool) {
+pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::StandaloneRuntime>) {
     let mut agent: Option<Agent> = None;
     let mut respawns = 0u32;
     // Key and ticket are generated once per service run; the agent gets them
-    // by command line (M3: pipe). Regenerating per respawn would invalidate
-    // connected clients for no benefit.
+    // through the stdin pipe (M3). Regenerating per respawn would invalidate
+    // connected clients for no benefit. In standalone mode they come from
+    // the shared config file instead (fixed, documented ticket).
     let mut key = [0u8; 32];
     let mut ticket = [0u8; 48];
     if let Err(err) = getrandom::fill(&mut key).and_then(|()| getrandom::fill(&mut ticket)) {
         error!(error = %format!("{err:#}"), "cannot generate session credentials");
         return;
     }
+    let config = match standalone {
+        Some(standalone) => service_proto::AgentConfig {
+            key: standalone.key,
+            ticket: standalone.ticket,
+            bind: standalone.bind.clone(),
+            output_name: "UDS".to_owned(),
+            preset: standalone.preset.clone(),
+        },
+        None => service_proto::AgentConfig {
+            key,
+            ticket,
+            bind: "0.0.0.0:14433".to_owned(),
+            output_name: "UDS".to_owned(),
+            preset: "vp9-balanced".to_owned(),
+        },
+    };
 
     while !stop.load(Ordering::Relaxed) {
         match &agent {
@@ -347,7 +357,7 @@ pub fn watch_loop(stop: &AtomicBool) {
                 }
                 break;
             }
-            None => match Agent::spawn_in_console_session(&key, &ticket) {
+            None => match Agent::spawn_in_console_session(&config) {
                 Ok(Some(spawned)) => {
                     respawns += 1;
                     agent = Some(spawned);

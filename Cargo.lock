@@ -637,7 +637,7 @@ dependencies = [
  "codec",
  "flume",
  "protocol",
- "sha2",
+ "server-config",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -2944,6 +2944,7 @@ dependencies = [
  "image",
  "protocol",
  "serde",
+ "server-config",
  "service-proto",
  "sha2",
  "tempfile",
@@ -2961,12 +2962,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "server-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crypt",
+ "getrandom 0.3.4",
+ "protocol",
+ "serde",
+ "sha2",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
 name = "service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
  "protocol",
+ "server-config",
  "service-proto",
  "tracing",
  "tracing-subscriber",

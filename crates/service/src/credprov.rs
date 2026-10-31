@@ -45,21 +45,26 @@ const CREDS_PATH: &str = r"C:\ProgramData\UdsRp\credprov-creds.conf";
 /// How long to wait for a response frame before re-checking the stop flag.
 const POLL: Duration = Duration::from_millis(500);
 
-/// Starts the pipe server on a background thread.
-pub fn spawn(stop: &'static AtomicBool) {
+/// Starts the pipe server on a background thread. `creds_override` (the
+/// standalone configuration credentials) takes precedence over the lab
+/// credentials file when present.
+pub fn spawn(stop: &'static AtomicBool, creds_override: Option<Credentials>) {
     std::thread::Builder::new()
         .name("credprov-pipe".into())
-        .spawn(move || pipe_loop(stop))
+        .spawn(move || pipe_loop(stop, creds_override))
         .expect("cannot spawn the credential-provider pipe thread");
 }
 
-fn pipe_loop(stop: &AtomicBool) {
-    let creds = match load_credentials() {
-        Ok(creds) => creds,
-        Err(err) => {
-            error!(error = %format!("{err:#}"), "cannot read {CREDS_PATH}; serving without credentials");
-            None
-        }
+fn pipe_loop(stop: &AtomicBool, creds_override: Option<Credentials>) {
+    let creds = match creds_override {
+        Some(creds) => Some(creds),
+        None => match load_credentials() {
+            Ok(creds) => creds,
+            Err(err) => {
+                error!(error = %format!("{err:#}"), "cannot read {CREDS_PATH}; serving without credentials");
+                None
+            }
+        },
     };
     info!(has_credentials = creds.is_some(), "credential-provider pipe server listening");
     while !stop.load(Ordering::Relaxed) {
