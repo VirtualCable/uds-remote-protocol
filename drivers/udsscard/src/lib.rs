@@ -213,7 +213,7 @@ extern "C" fn evt_driver_device_add(
         DefaultQueue: 1,
         // Virtual device: no power management, so requests must be
         // dispatched regardless of any framework power state.
-        PowerManaged: wdk_sys::WdfFalse,
+        PowerManaged: wdk_sys::_WDF_TRI_STATE::WdfFalse,
         DispatchType: wdk_sys::_WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel,
         EvtIoDeviceControl: Some(evt_io_device_control),
         EvtIoDefault: Some(evt_io_default),
