@@ -425,6 +425,7 @@ extern "C" fn evt_io_device_control(
 }
 
 fn get_attribute(request: WDFREQUEST, attr: u32) {
+    log_line(&format!("udsscard: GET_ATTRIBUTE {attr:#010x}"));
     let state = STATE.lock().unwrap();
     match attr {
         SCARD_ATTR_VENDOR_NAME => write_bytes(request, b"VirtualCable\0"),
