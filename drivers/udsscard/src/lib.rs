@@ -205,7 +205,7 @@ extern "C" fn evt_driver_device_add(
             device,
             &mut queue_config,
             WDF_NO_OBJECT_ATTRIBUTES,
-            WDF_NO_HANDLE,
+            WDF_NO_HANDLE.cast::<wdk_sys::WDFQUEUE>(),
         )
     };
     if ntstatus != STATUS_SUCCESS {
@@ -271,7 +271,7 @@ fn request_output<'a>(request: WDFREQUEST, min_len: usize) -> Option<&'a mut [u8
 fn complete(request: WDFREQUEST, status: NTSTATUS, information: usize) {
     // SAFETY: `request` is owned by this callback and completed exactly once.
     unsafe {
-        call_unsafe_wdf_function_binding!(WdfRequestCompleteWithInformation, request, status, information,);
+        call_unsafe_wdf_function_binding!(WdfRequestCompleteWithInformation, request, status, information as u64,);
     }
 }
 
