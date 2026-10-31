@@ -1,0 +1,41 @@
+# UDS Remote Protocol — reference server configuration (standalone mode).
+#
+# Lookup order: `--config PATH`, then `uds-rp-server.toml` in the current
+# directory, next to the executable, and finally the platform config dir
+# (`/etc/uds-rp/` on Unix, `C:\ProgramData\VirtualCable\UDSRP\` on Windows).
+#
+# Standalone mode is the broker-less REFERENCE mode: a fixed ticket for
+# evaluation and development. It is NOT a production authentication
+# mechanism — real deployments validate tickets against the UDS broker.
+# Keep this file readable only by admins (it holds the shared key and,
+# optionally, auto-logon credentials): chmod 600 / ACL accordingly.
+
+connection_method = "standalone"
+
+# Shared key for the encrypted handshake (hex, 32 bytes). Generate with:
+#   openssl rand -hex 32
+shared_key = "733b5b19754ebb4af75efa1b885e078116b85abb8488c4381078bf5fcb90958c"
+
+bind = "0.0.0.0:19790"
+
+[standalone]
+# The fixed, human-typed ticket. Clients present the same string; a
+# ".scrambler" suffix is ignored (broker heritage).
+ticket = "lab-ticket"
+
+# Optional auto-logon credentials, handed to the credential provider.
+# user = "alice"
+# password = "secret"
+# domain = ""
+
+# Display geometry and codec preset for the session.
+width = 1680
+height = 1050
+fps = 30
+preset = "vp9-balanced"
+
+# Channel switches.
+audio = true
+clipboard = true
+storage = false
+smartcard = false

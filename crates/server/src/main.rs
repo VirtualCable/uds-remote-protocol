@@ -102,8 +102,18 @@ fn parse_args() -> Result<Args> {
         spool: None,
     };
     let mut key_seen = false;
-    let mut it = std::env::args().skip(1);
+    // A config file (reference/standalone mode) seeds the defaults first;
+    // any explicit CLI flag still overrides it.
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    if raw_args.iter().any(|a| a == "--config") {
+        key_seen = apply_config_file(&mut args, &raw_args)?;
+    }
+    let mut it = raw_args.into_iter();
     while let Some(arg) = it.next() {
+        if arg == "--config" {
+            it.next(); // already applied above
+            continue;
+        }
         if arg == "--agent-config-stdin" {
             // Orchestrated mode (M3): the service hands us the whole config —
             // secrets included — over an anonymous pipe on stdin, so argv
@@ -162,6 +172,42 @@ fn parse_args() -> Result<Args> {
         bail!("--key <hex64> or --agent-config-stdin is required");
     }
     Ok(args)
+}
+
+/// Applies a TOML config file (reference/standalone mode) to `args`.
+/// Returns whether the shared key was set by the file.
+fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
+    let pos = raw_args
+        .iter()
+        .position(|a| a == "--config")
+        .expect("caller checked");
+    let path = raw_args
+        .get(pos + 1)
+        .map(std::path::PathBuf::from)
+        .or_else(server::config::find_config_file)
+        .context("--config given but no config file found")?;
+    let config = server::config::load(&path)?;
+    info!(path = %path.display(), "loaded config file");
+    args.key = protocol::hex::decode(&config.shared_key).context("bad shared_key")?;
+    args.bind = config.bind;
+    if config.connection_method == server::config::ConnectionMethod::Standalone {
+        let standalone = config
+            .standalone
+            .as_ref()
+            .context("connection_method = \"standalone\" requires a [standalone] section")?;
+        anyhow::ensure!(
+            !standalone.ticket.is_empty(),
+            "standalone.ticket must not be empty"
+        );
+        args.ticket = Some(server::config::ticket_bytes(&standalone.ticket));
+        args.width = standalone.width;
+        args.height = standalone.height;
+        args.fps = standalone.fps;
+        args.preset.clone_from(&standalone.preset);
+        args.audio = standalone.channels.audio;
+        info!("standalone mode: fixed ticket active (reference implementation)");
+    }
+    Ok(true)
 }
 
 /// Reads the service→agent config frame from stdin (until the service closes
