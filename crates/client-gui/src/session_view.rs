@@ -2,7 +2,7 @@
 //! is multi-display ready), forwards keyboard/pointer input and paints the
 //! cursor locally (§10: the cursor never travels inside the video).
 
-use client::{ClientCommand, ClientEvent, CommandSender, Displays, Rect};
+use client::{ClientCommand, ClientEvent, CommandSender, Displays, Rect, StatsSnapshot};
 use protocol::InputMessage;
 use tracing::{debug, warn};
 use winit::event::{MouseButton, MouseScrollDelta};
@@ -10,7 +10,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorIcon, CustomCursor, Window};
 
-use crate::gpu::Gpu;
+use crate::gpu::{Gpu, Panel};
 use crate::keymap;
 
 /// Live session state owned by the GUI thread.
@@ -21,18 +21,35 @@ pub struct SessionView {
     texture: Option<Texture>,
     /// Display geometry (display 0).
     display_size: (u32, u32),
+    /// Codec of display 0, from its announcement.
+    codec: Option<codec::VideoCodecType>,
+    /// True while the UDP leg is active (from `ClientEvent::Connected`).
+    udp: bool,
     status: String,
     disconnected: bool,
     clipboard: Option<arboard::Clipboard>,
     pointer: (f64, f64),
     /// One scratch buffer for rect copies (hot path: no per-frame alloc).
     scratch: Vec<u8>,
+    /// Latest stats snapshot (with arrival time) and the previous one (for
+    /// per-second rates).
+    stats: Option<(StatsSnapshot, std::time::Instant)>,
+    prev_stats: Option<(StatsSnapshot, std::time::Instant)>,
+    /// Debug overlay visible (toggled with F3, not forwarded to the remote).
+    show_stats: bool,
 }
 
 struct Texture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
+
+/// Stats overlay geometry (top-right corner).
+const STATS_PANEL_W: f32 = 322.0;
+/// Stats overlay height: 5 lines × 16 px + padding.
+const STATS_PANEL_H: f32 = 92.0;
+/// Stats overlay margin from the window edges.
+const STATS_PANEL_MARGIN: f32 = 10.0;
 
 impl SessionView {
     /// Wires the pieces handed by `client::Session::new`.
@@ -48,11 +65,16 @@ impl SessionView {
             displays,
             texture: None,
             display_size: (0, 0),
+            codec: None,
+            udp: false,
             status: "connecting…".to_string(),
             disconnected: false,
             clipboard: arboard::Clipboard::new().ok(),
             pointer: (0.0, 0.0),
             scratch: Vec::new(),
+            stats: None,
+            prev_stats: None,
+            show_stats: false,
         }
     }
 
@@ -78,6 +100,7 @@ impl SessionView {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 ClientEvent::Connected { udp } => {
+                    self.udp = udp;
                     self.status = format!("connected ({})", if udp { "UDP" } else { "TCP" });
                 }
                 ClientEvent::DisplayInfo {
@@ -89,6 +112,7 @@ impl SessionView {
                     debug!(display_id, width, height, ?codec, "display announced");
                     if display_id == 0 {
                         self.display_size = (width, height);
+                        self.codec = Some(codec);
                         self.texture = Some(make_texture(gpu, width, height));
                         let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(
                             width.max(1),
@@ -119,6 +143,11 @@ impl SessionView {
                     {
                         warn!("setting the local clipboard: {e}");
                     }
+                }
+                ClientEvent::Stats(snapshot) => {
+                    self.prev_stats = self
+                        .stats
+                        .replace((snapshot, std::time::Instant::now()));
                 }
                 ClientEvent::Error(message) => {
                     self.status = message;
@@ -223,6 +252,95 @@ impl SessionView {
     #[must_use]
     pub fn texture_view(&self) -> Option<&wgpu::TextureView> {
         self.texture.as_ref().map(|t| &t.view)
+    }
+
+    /// Toggles the debug stats overlay (F3; the key is never forwarded).
+    pub fn toggle_stats(&mut self) {
+        self.show_stats = !self.show_stats;
+    }
+
+    /// Translucent background panel for the stats overlay, top-right.
+    #[must_use]
+    #[expect(clippy::cast_precision_loss, reason = "window sizes fit in f32")]
+    pub fn stats_panel(&self, window_width: u32) -> Option<Panel> {
+        if !self.show_stats || self.stats.is_none() {
+            return None;
+        }
+        Some(Panel {
+            x: (window_width as f32 - STATS_PANEL_W - STATS_PANEL_MARGIN).max(0.0),
+            y: STATS_PANEL_MARGIN,
+            w: STATS_PANEL_W,
+            h: STATS_PANEL_H,
+            color: [0.02, 0.03, 0.05, 0.65],
+        })
+    }
+
+    /// Text sections of the stats overlay (top-right, small). The loss line
+    /// turns red-ish past 5 ‰.
+    #[must_use]
+    #[expect(clippy::cast_precision_loss, reason = "window sizes fit in f32")]
+    pub fn stats_sections(&self, window_width: u32) -> Vec<wgpu_text::glyph_brush::OwnedSection> {
+        use wgpu_text::glyph_brush::{OwnedSection, OwnedText};
+        let Some(panel) = self.stats_panel(window_width) else {
+            return Vec::new();
+        };
+        let Some((snap, _)) = &self.stats else {
+            return Vec::new();
+        };
+        let dt = self
+            .prev_stats
+            .as_ref()
+            .map_or(1.0, |(_, t)| t.elapsed().as_secs_f32())
+            .max(0.001);
+        let rate = |cur: u64, prev: u64| cur.saturating_sub(prev) as f32 / dt;
+        let (fps, dec_rate, plc_rate) = self.prev_stats.as_ref().map_or((0.0, 0.0, 0.0), |(p, _)| {
+            (
+                rate(snap.presented, p.presented),
+                rate(snap.audio_decoded, p.audio_decoded),
+                rate(snap.audio_plc, p.audio_plc),
+            )
+        });
+        let (w, h) = self.display_size;
+        let codec = self.codec.map_or_else(|| "?".to_string(), |c| format!("{c:?}").to_lowercase());
+        let underrun_s = snap.audio_underrun_samples as f32 / 96_000.0; // 48k stereo
+        let lines = [
+            format!(
+                "{} {w}x{h} {codec}",
+                if snap.udp { "UDP" } else { "TCP" }
+            ),
+            format!(
+                "rtt {:.2}ms · jit {:.2}ms · loss {:.1}‰",
+                snap.rtt_ms, snap.jitter_ms, snap.loss_permille
+            ),
+            format!(
+                "fps {fps:.0} · hold {} · ovf {} · stale {} · kf {}",
+                snap.present_queue_len, snap.dropped_overflow, snap.dropped_stale, snap.keyframe_requests
+            ),
+            format!(
+                "avsync {} · skew {}/{}ms",
+                if snap.audio_clock_live { "audio" } else { "no-audio" },
+                snap.skew_avg_ms, snap.skew_max_abs_ms
+            ),
+            format!(
+                "audio {dec_rate:.0}/s · plc {plc_rate:.0}/s · rs {} · und {underrun_s:.1}s",
+                snap.audio_resyncs
+            ),
+        ];
+        let loss_color = if snap.loss_permille > 5.0 {
+            [1.0, 0.45, 0.4, 1.0]
+        } else {
+            [0.75, 0.9, 0.75, 1.0]
+        };
+        lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let color = if i == 1 { loss_color } else { [0.85, 0.88, 0.92, 1.0] };
+                OwnedSection::default()
+                    .with_screen_position((panel.x + 8.0, panel.y + 6.0 + i as f32 * 16.0))
+                    .add_text(OwnedText::new(line.clone()).with_scale(13.0).with_color(color))
+            })
+            .collect()
     }
 
     fn upload_rects(&mut self, gpu: &Gpu, display_id: u8, rects: &[Rect]) {

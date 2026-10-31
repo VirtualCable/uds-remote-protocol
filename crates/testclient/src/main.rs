@@ -733,6 +733,7 @@ async fn run() -> Result<()> {
                 };
                 match event {
                     ClientEvent::Connected { udp } => info!(udp, "session connected"),
+                    ClientEvent::Stats(snapshot) => tracing::debug!(?snapshot, "stats"),
                     ClientEvent::DisplayInfo { display_id, width, height, codec } => {
                         info!(display_id, width, height, ?codec, "display announced");
                     }

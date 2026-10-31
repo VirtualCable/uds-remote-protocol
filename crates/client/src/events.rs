@@ -126,6 +126,9 @@ pub enum ClientEvent {
         /// Human-readable detail.
         message: String,
     },
+    /// Live session statistics snapshot (§15.3 debug aid), emitted once
+    /// per second; diff consecutive snapshots for per-second rates.
+    Stats(crate::stats::StatsSnapshot),
     /// Non-fatal session condition worth surfacing (e.g. the video stream
     /// broke and a keyframe was requested). Fatal errors end
     /// [`crate::Session::run`] with `Err` instead.
@@ -203,6 +206,7 @@ impl std::fmt::Debug for ClientEvent {
                 .field("transfer_id", transfer_id)
                 .field("message", message)
                 .finish(),
+            Self::Stats(snap) => f.debug_tuple("Stats").field(snap).finish(),
             Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
             Self::Disconnected => f.debug_struct("Disconnected").finish(),
         }

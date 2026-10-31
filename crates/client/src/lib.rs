@@ -26,10 +26,12 @@ mod framebuffer;
 pub mod mic;
 mod session;
 pub mod smartcard;
+pub mod stats;
 mod storage;
 
 pub use command::{ClientCommand, CommandSender};
 pub use events::{ClientEvent, Rect, TransferDirection};
+pub use stats::StatsSnapshot;
 pub use framebuffer::{DisplayBuffer, Displays, SharedDisplay};
 pub use session::{ClientConfig, Session};
 

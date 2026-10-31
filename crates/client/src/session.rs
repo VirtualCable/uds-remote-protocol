@@ -152,6 +152,7 @@ impl Session {
             &self.config,
             clock_start,
         );
+        core.stats.set_udp(leg.is_some());
         match leg {
             Some(leg) => self.udp_loop(leg, stream, clock_start, &mut core).await,
             None => self.tcp_loop(stream, &mut core).await,
@@ -169,6 +170,7 @@ impl Session {
         // can be a few KiB; datagrams on this buffer stay MTU-sized anyway.
         let mut buf = vec![0u8; 65_536];
         let mut present_tick = tokio::time::interval(PRESENT_TICK);
+        let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 res = stream.recv_into(&mut buf) => {
@@ -204,6 +206,11 @@ impl Session {
                         }
                     }
                     Self::flush_out(&mut stream, core).await?;
+                }
+                _ = stats_tick.tick() => {
+                    if !emit(&core.events, ClientEvent::Stats(core.stats.snapshot())) {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -253,6 +260,7 @@ impl Session {
         let mut prev_lost = 0u64;
         let mut prev_received = 0u64;
         let mut present_tick = tokio::time::interval(PRESENT_TICK);
+        let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 res = leg.dgram.recv_into(&mut buf) => {
@@ -285,6 +293,7 @@ impl Session {
                         info!(dropped, awaiting = core.recovery.awaiting, "stream broken; requesting keyframe");
                         let req = ControlMessage::RequestKeyframe { display_id: 0 };
                         stream.send(channel::CONTROL, &req.encode()?).await?;
+                        core.stats.record_keyframe_request();
                         core.last_key_req = Some(Instant::now());
                     }
                     core.prev_dropped = dropped;
@@ -337,6 +346,14 @@ impl Session {
                         drecv,
                         "metrics report"
                     );
+                    #[allow(clippy::cast_possible_truncation)] // micros→ms fits f32
+                    core.stats.set_net(
+                        (rtt / 1000.0) as f32,
+                        (jitter_ewma / 1000.0) as f32,
+                        (loss_rate * 1000.0) as f32,
+                        received,
+                        lost,
+                    );
                     stream.send(channel::CONTROL, &report.encode()?).await?;
                 }
                 msg = core.mic.recv() => {
@@ -365,6 +382,11 @@ impl Session {
                         }
                     }
                     Self::flush_out(&mut stream, core).await?;
+                }
+                _ = stats_tick.tick() => {
+                    if !emit(&core.events, ClientEvent::Stats(core.stats.snapshot())) {
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -516,11 +538,12 @@ impl PresentQueue {
     }
 
     /// Holds a frame until the audio clock reaches `hold_until`.
-    fn hold(&mut self, display_id: u8, hold_until: u32, frame: codec::DecodedFrame, stats: &mut SyncStats) {
+    fn hold(&mut self, display_id: u8, hold_until: u32, frame: codec::DecodedFrame, stats: &mut SyncStats, live: &crate::stats::SessionStats) {
         stats.record_hold();
         if self.frames.len() >= MAX_HELD_FRAMES {
             self.frames.pop_front();
             stats.record_overflow_drop();
+            live.record_overflow_drop();
         }
         self.frames.push_back(HeldFrame {
             display_id,
@@ -545,6 +568,9 @@ struct Core {
     present_queue: PresentQueue,
     avsync_stats: SyncStats,
     avsync_log: Instant,
+    /// Live stats accumulator shared with the audio thread; snapshots go to
+    /// the consumer once per second (§15.3 debug aid).
+    stats: std::sync::Arc<crate::stats::SessionStats>,
     /// Rate-limit state for keyframe requests (riesgos §2.1).
     last_key_req: Option<Instant>,
     prev_dropped: u64,
@@ -578,17 +604,19 @@ impl Core {
         let smartcard = config
             .smartcard
             .then(|| crate::smartcard::SmartcardService::start(crate::smartcard::default_backend(), scard_tx.clone()));
+        let stats = std::sync::Arc::new(crate::stats::SessionStats::default());
         Self {
             events,
             displays,
             reasm: Reassembler::new(),
             decoders: HashMap::new(),
             recovery: DecodeRecovery::default(),
-            audio: AudioClient::new(config.audio, config.audio_dump.clone()),
+            audio: AudioClient::new(config.audio, config.audio_dump.clone(), std::sync::Arc::clone(&stats)),
             mic: MicClient::new(config.mic, clock_start),
             present_queue: PresentQueue::new(),
             avsync_stats: SyncStats::default(),
             avsync_log: Instant::now(),
+            stats,
             last_key_req: None,
             prev_dropped: 0,
             clip: protocol::ClipboardSession::new(),
@@ -624,6 +652,7 @@ impl Core {
     /// Writes one decoded frame into the shared framebuffer and notifies
     /// the consumer (§15.3). Returns `false` when the consumer is gone.
     fn present(&mut self, display_id: u8, frame: &codec::DecodedFrame) -> bool {
+        self.stats.record_present();
         let Some(display) = self.displays.get_or_insert(display_id) else {
             return true; // registry poisoned: keep the session, lose the frame
         };
@@ -654,12 +683,14 @@ impl Core {
                 self.present(display_id, &frame)
             }
             avsync::PresentDecision::HoldUntil(ts) => {
+                self.stats.record_hold();
                 self.present_queue
-                    .hold(display_id, ts, frame, &mut self.avsync_stats);
+                    .hold(display_id, ts, frame, &mut self.avsync_stats, &self.stats);
                 true
             }
             avsync::PresentDecision::Drop => {
                 self.avsync_stats.record_stale_drop();
+                self.stats.record_stale_drop();
                 true
             }
         }
@@ -670,6 +701,12 @@ impl Core {
     /// sync stats periodically. Returns `false` when the consumer is gone.
     fn avsync_tick(&mut self) -> bool {
         let audio_now = self.audio.audio_now_ms();
+        self.stats.set_avsync(
+            u32::try_from(self.present_queue.frames.len()).unwrap_or(u32::MAX),
+            audio_now.is_some(),
+            i32::try_from(self.avsync_stats.skew_avg_ms()).unwrap_or(i32::MAX),
+            i32::try_from(self.avsync_stats.skew_max_abs_ms()).unwrap_or(i32::MAX),
+        );
         while let Some(front) = self.present_queue.frames.front() {
             let due = match audio_now {
                 Some(now) => front.hold_until <= now,

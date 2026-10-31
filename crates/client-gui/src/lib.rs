@@ -103,8 +103,8 @@ impl App {
             return;
         };
         let width = gpu.config.width as f32;
-        let (texture, clear, sections) = match &mut self.mode {
-            Mode::Dialog(dialog) => (None, BG, dialog.sections(width)),
+        let (texture, clear, sections, panels) = match &mut self.mode {
+            Mode::Dialog(dialog) => (None, BG, dialog.sections(width), Vec::new()),
             Mode::Session(view, _) => {
                 let mut sections = Vec::new();
                 if view.texture_view().is_none() || !view.status().is_empty() && view.is_disconnected()
@@ -119,7 +119,9 @@ impl App {
                             ),
                     );
                 }
-                (view.texture_view(), wgpu::Color::BLACK, sections)
+                sections.extend(view.stats_sections(gpu.config.width));
+                let panels: Vec<gpu::Panel> = view.stats_panel(gpu.config.width).into_iter().collect();
+                (view.texture_view(), wgpu::Color::BLACK, sections, panels)
             }
             Mode::Farewell(message) => (
                 None,
@@ -148,9 +150,10 @@ impl App {
                                 .with_color([0.55, 0.58, 0.62, 1.0]),
                         ),
                 ],
+                Vec::new(),
             ),
         };
-        if let Err(e) = gpu.render(texture, clear, &sections) {
+        if let Err(e) = gpu.render(texture, clear, &sections, &panels) {
             warn!("render: {e:#}");
         }
         let _ = window;
@@ -214,8 +217,12 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // F3 toggles the stats overlay locally; it is never sent to
+                // the remote (neither the press nor the release).
+                let is_f3 = session_view::physical_code(&event) == Some(winit::keyboard::KeyCode::F3);
                 if event.state != ElementState::Pressed {
                     if let Mode::Session(view, _) = &self.mode
+                        && !is_f3
                         && let Some(code) = session_view::physical_code(&event)
                     {
                         view.handle_key(code, false);
@@ -229,7 +236,9 @@ impl ApplicationHandler for App {
                         connect::DialogAction::Nothing => {}
                     },
                     Mode::Session(view, _) => {
-                        if let Some(code) = session_view::physical_code(&event) {
+                        if is_f3 {
+                            view.toggle_stats();
+                        } else if let Some(code) = session_view::physical_code(&event) {
                             view.handle_key(code, true);
                         }
                     }
