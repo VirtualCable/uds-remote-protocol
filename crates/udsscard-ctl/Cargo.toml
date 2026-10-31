@@ -15,6 +15,8 @@ udsscard-proto = { path = "../udsscard-proto" }
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_Storage_FileSystem",

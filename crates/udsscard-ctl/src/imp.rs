@@ -9,6 +9,8 @@ use std::os::windows::io::FromRawHandle;
 
 use anyhow::{Context, bail};
 use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, GetLastError, INVALID_HANDLE_VALUE};
+use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX;
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -41,14 +43,39 @@ fn hex_of(data: &[u8]) -> String {
     data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
 }
 
+/// SDDL for the pipes: full access to SYSTEM, Administrators and Everyone.
+/// The UMDF host process (WUDFHost) runs as LocalService, so the default
+/// pipe DACL (owner + admins only) would reject the driver. For this lab
+/// tool `WD` (Everyone) keeps friction low; the real service will tighten
+/// this to LocalService only.
+const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;WD)";
+
 /// Create one byte-mode named pipe instance and wait for the driver to
 /// connect. Blocking; a client that connected before `ConnectNamedPipe`
 /// (ERROR_PIPE_CONNECTED) counts as success.
 fn create_and_wait(name: &str) -> anyhow::Result<std::fs::File> {
     let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string; the returned
-    // handle is checked and owned by the File we build from it.
-    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string.
+    let sddl: Vec<u16> = PIPE_SDDL.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut sd = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: `sddl` is a valid NUL-terminated SDDL string; the returned
+    // descriptor is used only during CreateNamedPipeW below, which copies
+    // what it needs, and `security` outlives that call.
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            1, // SDDL_REVISION_1
+            &mut sd,
+            None,
+        )
+        .context("ConvertStringSecurityDescriptorToSecurityDescriptorW")?;
+    }
+    let mut security = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd.0,
+        bInheritHandle: false.into(),
+    };
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string; `security`
+    // points to a valid SECURITY_ATTRIBUTES for the duration of the call.
     let handle = unsafe {
         CreateNamedPipeW(
             PCWSTR(wide.as_ptr()),
@@ -58,7 +85,7 @@ fn create_and_wait(name: &str) -> anyhow::Result<std::fs::File> {
             8192,
             8192,
             0,
-            None,
+            Some(&raw mut security),
         )
     };
     if handle == INVALID_HANDLE_VALUE {
