@@ -2469,6 +2469,19 @@ name = "udsdisp-proto"
 version = "0.1.0"
 
 [[package]]
+name = "udsscard-ctl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "udsscard-proto",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "udsscard-proto"
+version = "0.1.0"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"

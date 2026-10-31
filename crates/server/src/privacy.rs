@@ -553,14 +553,14 @@ mod tests {
 
     #[test]
     fn overlay_targets_is_empty_without_displays() {
-        assert!(overlay_targets(&[]).is_empty());
+        assert_eq!(overlay_targets(&[]), Vec::new());
         let only_virtual = vec![monitor(
             "\\\\.\\DISPLAY9",
             "UDS Virtual Display",
             (0, 0, 1920, 1080),
             true,
         )];
-        assert!(overlay_targets(&only_virtual).is_empty());
+        assert_eq!(overlay_targets(&only_virtual), Vec::new());
     }
 
     #[test]

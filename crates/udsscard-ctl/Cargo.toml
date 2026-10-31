@@ -1,0 +1,24 @@
+[package]
+name = "udsscard-ctl"
+description = "Control/verification tool for the UDS virtual smart card reader driver (Windows only)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+udsscard-proto = { path = "../udsscard-proto" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_Storage_FileSystem",
+] }
+
+[lints]
+workspace = true

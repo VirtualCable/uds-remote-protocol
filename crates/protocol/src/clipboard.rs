@@ -398,9 +398,8 @@ mod tests {
             ClipboardMessage::DataFailed { seq: 99 }
         );
         // Unknown format: not servable.
-        let seq = match s.local_text_changed(b"y") {
-            ClipboardMessage::Offer { seq, .. } => seq,
-            _ => panic!(),
+        let ClipboardMessage::Offer { seq, .. } = s.local_text_changed(b"y") else {
+            panic!()
         };
         assert_eq!(
             s.peer_request(seq, 0x8000),

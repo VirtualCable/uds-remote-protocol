@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn no_changes_yields_no_rects() {
         let a = vec![7u8; 128 * 128 * 4];
-        assert!(dirty_rects(Some(&a), &a, 128, 128, 128 * 4).is_empty());
+        assert_eq!(dirty_rects(Some(&a), &a, 128, 128, 128 * 4), vec![]);
     }
 
     #[test]

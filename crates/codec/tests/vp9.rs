@@ -37,7 +37,7 @@ fn vp9_roundtrip_preserves_geometry_and_rough_color() {
     let mut enc = Vp9Encoder::new(w, h, 1000).expect("encoder init");
     let packet = enc.encode(&frame).expect("encode");
     assert!(packet.keyframe, "first frame must be a keyframe");
-    assert!(!packet.data.is_empty());
+    assert_ne!(packet.data.len(), 0);
 
     let mut dec = Vp9Decoder::new().expect("decoder init");
     let decoded = dec.decode(&packet).expect("decode");

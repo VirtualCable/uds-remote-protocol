@@ -176,7 +176,7 @@ mod control_tests {
         let mut applied = (64, false);
         // Nothing pending: no encoder calls.
         apply_control(&mut enc, &control, &mut applied);
-        assert!(enc.calls.is_empty());
+        assert_eq!(enc.calls, []);
         // New bitrate: exactly one call.
         control.set_target_kbps(32);
         apply_control(&mut enc, &control, &mut applied);

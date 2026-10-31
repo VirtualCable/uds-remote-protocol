@@ -59,5 +59,5 @@ fn rtt_saturates_on_clock_anomalies() {
 #[test]
 fn probe_error_is_displayable() {
     let err = ProbeError::Truncated;
-    assert!(!format!("{err}").is_empty());
+    assert_ne!(format!("{err}"), "");
 }
