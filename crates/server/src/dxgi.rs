@@ -200,10 +200,17 @@ impl DxgiSource {
                 return;
             }
         };
+        // For monochrome shapes DXGI reports the FULL buffer height (AND and
+        // XOR masks stacked); the conversion expects the logical height.
+        let height = if kind == MaskShapeKind::Monochrome {
+            shape_info.Height / 2
+        } else {
+            shape_info.Height
+        };
         let shape = mask_shape_to_rgba(
             kind,
             u16::try_from(shape_info.Width).unwrap_or(u16::MAX),
-            u16::try_from(shape_info.Height).unwrap_or(u16::MAX),
+            u16::try_from(height).unwrap_or(u16::MAX),
             shape_info.Pitch as usize,
             u16::try_from(shape_info.HotSpot.x).unwrap_or(0),
             u16::try_from(shape_info.HotSpot.y).unwrap_or(0),
