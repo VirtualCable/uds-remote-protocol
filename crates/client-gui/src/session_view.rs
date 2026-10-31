@@ -300,8 +300,11 @@ fn make_texture(gpu: &Gpu, width: u32, height: u32) -> Texture {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         // Decoded frames are tight BGRA (codec crate) — the exact match for
-        // this format, so uploads need no conversion.
-        format: wgpu::TextureFormat::Bgra8Unorm,
+        // this format, so uploads need no conversion. It must be the sRGB
+        // variant: the surface is sRGB, and sampling a non-sRGB texture
+        // would feed sRGB-encoded values into the surface's linear→sRGB
+        // write-back, washing the whole picture out (double gamma).
+        format: wgpu::TextureFormat::Bgra8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
