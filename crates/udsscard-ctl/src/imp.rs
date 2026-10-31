@@ -64,13 +64,13 @@ fn create_and_wait(name: &str) -> anyhow::Result<std::fs::File> {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             PCWSTR(sddl.as_ptr()),
             1, // SDDL_REVISION_1
-            &mut sd,
+            &raw mut sd,
             None,
         )
         .context("ConvertStringSecurityDescriptorToSecurityDescriptorW")?;
     }
     let mut security = SECURITY_ATTRIBUTES {
-        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).expect("fits u32"),
         lpSecurityDescriptor: sd.0,
         bInheritHandle: false.into(),
     };
