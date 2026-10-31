@@ -108,6 +108,23 @@ unsafe impl Send for SendRequest {}
 static PENDING_ABSENT: Mutex<Option<SendRequest>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
+// Diagnostics: file log (WUDFHost debug output needs a viewer; a file in
+// C:\Windows\Temp is writable by the LocalService host process).
+// ---------------------------------------------------------------------------
+
+fn log_line(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(r"C:\Windows\Temp\udsscard.log")
+    {
+        let _ = writeln!(f, "{msg}");
+    }
+    println!("{msg}");
+}
+
+// ---------------------------------------------------------------------------
 // DriverEntry
 // ---------------------------------------------------------------------------
 
@@ -118,7 +135,7 @@ pub unsafe extern "system" fn driver_entry(
     driver: PDRIVER_OBJECT,
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
-    println!("udsscard: DriverEntry");
+    log_line("udsscard: DriverEntry");
 
     let mut driver_config = WDF_DRIVER_CONFIG {
         Size: size_of::<WDF_DRIVER_CONFIG>() as ULONG,
@@ -131,14 +148,16 @@ pub unsafe extern "system" fn driver_entry(
     // `driver_config` is a valid, initialized struct; the output handle is
     // allowed to be null (WDF_NO_HANDLE).
     unsafe {
-        call_unsafe_wdf_function_binding!(
+        let st = call_unsafe_wdf_function_binding!(
             WdfDriverCreate,
             driver,
             registry_path,
             WDF_NO_OBJECT_ATTRIBUTES,
             &mut driver_config,
             WDF_NO_HANDLE.cast::<WDFDRIVER>(),
-        )
+        );
+        log_line(&format!("udsscard: WdfDriverCreate -> {st:#010x}"));
+        st
     }
 }
 
@@ -150,7 +169,7 @@ extern "C" fn evt_driver_device_add(
     _driver: WDFDRIVER,
     mut device_init: *mut WDFDEVICE_INIT,
 ) -> NTSTATUS {
-    println!("udsscard: EvtDriverDeviceAdd");
+    log_line("udsscard: EvtDriverDeviceAdd");
 
     // Note: WdfDeviceInitSetDeviceType is not in the wdk-sys UMDF binding
     // table; the SmartCardReader device interface below is what SCardSvr
@@ -168,7 +187,7 @@ extern "C" fn evt_driver_device_add(
         )
     };
     if ntstatus != STATUS_SUCCESS {
-        println!("udsscard: WdfDeviceCreate failed {ntstatus:#010x}");
+        log_line(&format!("udsscard: WdfDeviceCreate failed {ntstatus:#010x}"));
         return ntstatus;
     }
 
@@ -185,7 +204,7 @@ extern "C" fn evt_driver_device_add(
         )
     };
     if ntstatus != STATUS_SUCCESS {
-        println!("udsscard: CreateDeviceInterface failed {ntstatus:#010x}");
+        log_line(&format!("udsscard: CreateDeviceInterface failed {ntstatus:#010x}"));
         return ntstatus;
     }
 
@@ -209,11 +228,11 @@ extern "C" fn evt_driver_device_add(
         )
     };
     if ntstatus != STATUS_SUCCESS {
-        println!("udsscard: WdfIoQueueCreate failed {ntstatus:#010x}");
+        log_line(&format!("udsscard: WdfIoQueueCreate failed {ntstatus:#010x}"));
         return ntstatus;
     }
 
-    println!("udsscard: device ready");
+    log_line(&format!("udsscard: device ready"));
     STATUS_SUCCESS
 }
 
@@ -301,7 +320,7 @@ extern "C" fn evt_io_device_control(
     _input_length: usize,
     io_control_code: ULONG,
 ) {
-    println!("udsscard: IOCTL {io_control_code:#010x}");
+    log_line(&format!("udsscard: IOCTL {io_control_code:#010x}"));
     match io_control_code {
         IOCTL_SMARTCARD_IS_PRESENT => {
             // Spike: the fake card is always present.
@@ -406,7 +425,7 @@ fn get_attribute(request: WDFREQUEST, attr: u32) {
 }
 
 extern "C" fn evt_request_cancel(request: WDFREQUEST) {
-    println!("udsscard: request cancelled");
+    log_line(&format!("udsscard: request cancelled"));
     let mut pending = PENDING_ABSENT.lock().unwrap();
     if let Some(stored) = pending.as_ref()
         && stored.0 == request
