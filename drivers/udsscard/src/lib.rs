@@ -565,6 +565,10 @@ fn transmit(request: WDFREQUEST) {
         return;
     }
     let apdu = input[8 + cb_pci..].to_vec();
+    log_line(&format!(
+        "udsscard: transmit apdu {}",
+        apdu.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ));
 
     if CARD.lock().unwrap().as_ref().is_none_or(|c| !c.powered) {
         complete(request, STATUS_DEVICE_NOT_CONNECTED, 0);
@@ -582,6 +586,10 @@ fn transmit(request: WDFREQUEST) {
         .and_then(|()| read_frame(pipe));
     match reply {
         Ok((IO_RESP_OK, payload)) => {
+            log_line(&format!(
+                "udsscard: transmit resp {}",
+                payload.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            ));
             let mut response = Vec::with_capacity(8 + payload.len());
             response.extend_from_slice(&send_protocol.to_le_bytes());
             response.extend_from_slice(&8u32.to_le_bytes()); // cbPciLength
