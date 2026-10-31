@@ -893,8 +893,11 @@ async fn serve<T: ReliableTransport>(
     // Attach-on-demand (M6): raising the named event asks the service to
     // attach the IddCx monitor; it detaches after an idle timeout once the
     // session (and this guard) ends. Then wait for the virtual display to
-    // actually appear before starting capture. Both are best-effort: with
-    // no orchestrating service (dev runs) capture just uses what exists.
+    // actually appear before starting capture — but ONLY when this session
+    // will capture the virtual display: console-mirroring sessions make the
+    // service skip the attach entirely, so waiting would just burn the
+    // whole timeout on every connect. Both are best-effort: with no
+    // orchestrating service (dev runs) capture just uses what exists.
     #[cfg(all(windows, feature = "windows-capture"))]
     let _remote_signal = match server::remote_signal::raise() {
         Ok(signal) => Some(signal),
@@ -904,7 +907,15 @@ async fn serve<T: ReliableTransport>(
         }
     };
     #[cfg(all(windows, feature = "windows-capture"))]
-    server::display_topology::wait_for_uds_display(Duration::from_secs(15));
+    let captures_uds_display = matches!(
+        &args.output,
+        server::capture::OutputSelector::NameContains(name)
+            if name.to_lowercase().contains("uds")
+    );
+    #[cfg(all(windows, feature = "windows-capture"))]
+    if captures_uds_display {
+        server::display_topology::wait_for_uds_display(Duration::from_secs(15));
+    }
 
     // Privacy screen (M7): the client asks for it with FLAG_PRIVACY_SCREEN;
     // the guard covers the physical displays until the session ends and is
