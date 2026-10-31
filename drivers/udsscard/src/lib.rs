@@ -68,14 +68,23 @@ const SCARD_SPECIFIC: u32 = 6;
 const SCARD_PROTOCOL_T0: u32 = 0x1;
 const SCARD_PROTOCOL_T1: u32 = 0x2;
 
-const SCARD_ATTR_VENDOR_NAME: u32 = 0x0003_0100;
-const SCARD_ATTR_VENDOR_IFD_TYPE: u32 = 0x0003_0101;
-const SCARD_ATTR_VENDOR_IFD_VERSION: u32 = 0x0003_0102;
+// SCARD_ATTR_VALUE(class, tag) = (class << 16) | tag — see WDK winsmcrd.h.
+// Classes: VENDOR_INFO=1, COMMUNICATIONS=2, PROTOCOL=3, MECHANICAL=6,
+// IFD_PROTOCOL=8, ICC_STATE=9, SYSTEM=0x7fff.
+const SCARD_ATTR_VENDOR_NAME: u32 = 0x0001_0100;
+const SCARD_ATTR_VENDOR_IFD_TYPE: u32 = 0x0001_0101;
+const SCARD_ATTR_VENDOR_IFD_VERSION: u32 = 0x0001_0102;
+const SCARD_ATTR_VENDOR_IFD_SERIAL_NO: u32 = 0x0001_0103;
 const SCARD_ATTR_CHANNEL_ID: u32 = 0x0002_0110;
+const SCARD_ATTR_PROTOCOL_TYPES: u32 = 0x0003_0120;
 const SCARD_ATTR_CHARACTERISTICS: u32 = 0x0006_0150;
 const SCARD_ATTR_CURRENT_PROTOCOL_TYPE: u32 = 0x0008_0201;
+const SCARD_ATTR_ICC_PRESENCE: u32 = 0x0009_0300;
+const SCARD_ATTR_ICC_INTERFACE_STATUS: u32 = 0x0009_0301;
+const SCARD_ATTR_CURRENT_IO_STATE: u32 = 0x0009_0302;
 const SCARD_ATTR_ATR_STRING: u32 = 0x0009_0303;
 const SCARD_ATTR_DEVICE_UNIT: u32 = 0x7FFF_0001;
+const SCARD_ATTR_MAXINPUT: u32 = 0x0007_A007;
 
 /// Fake card ATR ("eUDS-Card", TCK verified in freerdp-integration).
 const FAKE_ATR: [u8; 13] = [
@@ -431,14 +440,25 @@ fn get_attribute(request: WDFREQUEST, attr: u32) {
         SCARD_ATTR_VENDOR_NAME => write_bytes(request, b"VirtualCable\0"),
         SCARD_ATTR_VENDOR_IFD_TYPE => write_bytes(request, b"UDS Virtual Reader\0"),
         SCARD_ATTR_VENDOR_IFD_VERSION => write_bytes(request, &0x0001_0000u32.to_le_bytes()),
+        SCARD_ATTR_VENDOR_IFD_SERIAL_NO => write_bytes(request, b"00000001\0"),
         SCARD_ATTR_CHANNEL_ID | SCARD_ATTR_DEVICE_UNIT => {
             write_bytes(request, &0u32.to_le_bytes());
+        }
+        SCARD_ATTR_PROTOCOL_TYPES => {
+            write_bytes(request, &(SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1).to_le_bytes());
         }
         SCARD_ATTR_CHARACTERISTICS => write_bytes(request, &0u32.to_le_bytes()),
         SCARD_ATTR_CURRENT_PROTOCOL_TYPE => {
             write_bytes(request, &state.protocol.to_le_bytes());
         }
+        // ICC present and interface active (card powered after reset).
+        SCARD_ATTR_ICC_PRESENCE => write_bytes(request, &1u8.to_le_bytes()),
+        SCARD_ATTR_ICC_INTERFACE_STATUS => write_bytes(request, &1u8.to_le_bytes()),
+        SCARD_ATTR_CURRENT_IO_STATE => {
+            write_bytes(request, &state.state.to_le_bytes());
+        }
         SCARD_ATTR_ATR_STRING => write_bytes(request, &FAKE_ATR),
+        SCARD_ATTR_MAXINPUT => write_bytes(request, &255u32.to_le_bytes()),
         _ => complete(request, STATUS_NOT_SUPPORTED, 0),
     }
 }
