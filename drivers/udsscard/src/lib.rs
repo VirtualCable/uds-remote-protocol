@@ -422,7 +422,7 @@ extern "C" fn evt_request_cancel(request: WDFREQUEST) {
 }
 
 // Keep the compiler from pruning constants used only by the real driver later.
-#[expect(dead_code)]
+#[allow(dead_code)]
 const _: () = {
     assert!(IOCTL_SMARTCARD_SET_ATTRIBUTE != 0);
     assert!(IOCTL_SMARTCARD_TRANSMIT != 0);
