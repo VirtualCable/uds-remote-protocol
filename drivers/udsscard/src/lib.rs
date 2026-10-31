@@ -192,7 +192,7 @@ extern "C" fn evt_driver_device_add(
     let mut queue_config = WDF_IO_QUEUE_CONFIG {
         Size: size_of::<WDF_IO_QUEUE_CONFIG>() as ULONG,
         DefaultQueue: 1,
-        DispatchType: wdk_sys::WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel,
+        DispatchType: wdk_sys::_WDF_IO_QUEUE_DISPATCH_TYPE::WdfIoQueueDispatchParallel,
         EvtIoDeviceControl: Some(evt_io_device_control),
         ..WDF_IO_QUEUE_CONFIG::default()
     };
