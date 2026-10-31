@@ -23,7 +23,7 @@ use udsscard_proto::{
 };
 
 /// Same fake card ATR the driver's stand-alone spike used ("eUDS-Card").
-const DEFAULT_ATR: &str = "3b8901455554532d43617264 96";
+const DEFAULT_ATR: &str = "3b8901455544532d43617264 96";
 
 fn parse_hex(s: &str) -> anyhow::Result<Vec<u8>> {
     let clean: String = s.chars().filter(|c| !c.is_whitespace() && *c != ':').collect();
