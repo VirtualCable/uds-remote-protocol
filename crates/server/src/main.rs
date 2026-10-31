@@ -975,15 +975,18 @@ async fn serve<T: ReliableTransport>(
     // headroom; the stream's own backpressure throttles the real rate.
     let mut storage_tick = tokio::time::interval(Duration::from_millis(1));
 
-    // Smartcard (§17): requests will originate at the virtual smart card
-    // reader driver (UMDF; TODO doc/plan §17 — plug it in here when it
-    // exists). Until then a NullSmartcardRelay keeps the channel inert;
-    // the router still resolves replies by request_id, so swapping in the
-    // real origin later is a local change.
+    // Smartcard (§17): requests originate at the virtual smart card reader
+    // driver (UMDF) through the pipe origin; the router resolves replies by
+    // request_id. When the pipes cannot be hosted (non-Windows, or another
+    // session owns them) the channel stays inert, as with the pre-driver
+    // NullSmartcardRelay.
     let (scard_tx, mut scard_rx) = mpsc::unbounded_channel::<protocol::SmartcardMessage>();
     let scard_router = Arc::new(server::smartcard::SmartcardRouter::new(scard_tx));
-    let _smartcard_relay: Arc<dyn server::smartcard::SmartcardRelay> =
-        Arc::new(server::smartcard::NullSmartcardRelay);
+    #[cfg(all(windows, feature = "windows-capture"))]
+    let _scard_origin = server::smartcard_pipe::PipeOrigin::spawn(
+        server::smartcard::RouterRelay::new(Arc::clone(&scard_router)),
+        tokio::runtime::Handle::current(),
+    );
 
     // Link-quality state (§12): created on the first MetricsReport, with the
     // first reported RTT as the baseline.
