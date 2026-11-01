@@ -348,7 +348,7 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
             ticket,
             bind: "0.0.0.0:14433".to_owned(),
             output_name: "UDS".to_owned(),
-            preset: "vp9-balanced".to_owned(),
+            preset: "ladder".to_owned(),
         },
     };
 
