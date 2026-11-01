@@ -37,6 +37,9 @@ struct Args {
     audio: bool,
     /// Lab aid: `--audio-dump PATH` writes decoded audio as raw s16le PCM.
     audio_dump: Option<std::path::PathBuf>,
+    /// Lab aid: `--frame-dump PATH` rewrites PATH with a PPM (P6) snapshot
+    /// of the display-0 framebuffer every ~60 frames.
+    frame_dump: Option<std::path::PathBuf>,
     /// Mic capture (§9.2): off by default, `--mic` captures the default
     /// input device, `--mic-test-tone FREQ` sends a synthetic sine instead.
     mic: MicMode,
@@ -118,6 +121,7 @@ fn parse_args() -> Result<Args> {
         selftest_input: false,
         audio: true,
         audio_dump: None,
+        frame_dump: None,
         mic: MicMode::Off,
         privacy: false,
         clipboard: true,
@@ -176,6 +180,7 @@ fn parse_args() -> Result<Args> {
             }
             "--max-frames" => args.max_frames = Some(value.parse().context("bad --max-frames")?),
             "--audio-dump" => args.audio_dump = Some(value.into()),
+            "--frame-dump" => args.frame_dump = Some(value.into()),
             "--mic-test-tone" => {
                 args.mic = MicMode::Tone(value.parse().context("bad --mic-test-tone")?);
             }
@@ -473,6 +478,24 @@ fn blit_rect(fb: &[u8], w: usize, h: usize, rect: Rect, pixels: &mut [u32]) {
     }
 }
 
+/// Writes the display-0 framebuffer (tight BGRA) as a binary PPM (P6).
+fn dump_frame_ppm(displays: &Displays, path: &std::path::Path) -> Result<()> {
+    use std::io::Write as _;
+    let Some(display) = displays.get(0) else { bail!("no display 0") };
+    let guard = display.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (w, h) = (guard.width() as usize, guard.height() as usize);
+    let fb = guard.pixels();
+    let mut out = Vec::with_capacity(w * h * 3);
+    for px in fb.as_chunks::<4>().0 {
+        out.extend_from_slice(&[px[2], px[1], px[0]]); // BGRA → RGB
+    }
+    drop(guard);
+    let mut file = std::fs::File::create(path)?;
+    write!(file, "P6\n{w} {h}\n255\n")?;
+    file.write_all(&out)?;
+    Ok(())
+}
+
 /// Input event capture over the minifb window (§10): polls at ~125 Hz and
 /// emits protocol messages for the diffs (moves, buttons, keys).
 struct InputPoll {
@@ -746,7 +769,13 @@ async fn run() -> Result<()> {
                                 let fps = frames as f64 / elapsed.max(0.001);
                                 info!(frames, fps, "display");
                             }
-                            gui.render(&displays, &rects, &cursor)?;
+                            if let Some(path) = &args.frame_dump
+                            && frames % 60 == 1
+                            && let Err(e) = dump_frame_ppm(&displays, path)
+                        {
+                            warn!("frame dump failed: {e}");
+                        }
+                        gui.render(&displays, &rects, &cursor)?;
                         }
                         if args.max_frames.is_some_and(|max| frames >= max) && !close_sent {
                             info!(frames, "done");
