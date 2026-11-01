@@ -159,7 +159,7 @@ impl WaveRtStream {
         // the engine writes and reads whole frames; moving a span whose
         // boundaries are not frame-aligned byte-shifts every sample for
         // every downstream reader (heard as full-scale noise).
-        let align = u64::from(self.format.frame_bytes());
+        let align = self.format.frame_bytes() as u64;
         let end = byte_pos - (byte_pos % align);
         if end <= self.last_pos {
             return;
