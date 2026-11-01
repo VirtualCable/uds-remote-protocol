@@ -81,9 +81,17 @@ pub fn run() -> anyhow::Result<()> {
             let (seconds, freq) = parse_opts(&args[1..])?;
             verify_loopback(seconds, freq)
         }
+        "render-tone" => {
+            let (seconds, freq) = parse_opts(&args[1..])?;
+            // Render only — no loopback capture, so the driver ring keeps a
+            // single consumer (e.g. the server's IOCTL reader under test).
+            let _com = ComGuard::init()?;
+            let device = find_endpoint(false, UDS_NAME_NEEDLE)?;
+            render_tone(&device, seconds, freq, &AtomicBool::new(false))
+        }
         _ => {
             eprintln!(
-                "usage: udsaudio-ctl <list | push-tone | verify-mic | verify-loopback> [seconds] [freq]"
+                "usage: udsaudio-ctl <list | push-tone | verify-mic | verify-loopback | render-tone> [seconds] [freq]"
             );
             std::process::exit(64);
         }
