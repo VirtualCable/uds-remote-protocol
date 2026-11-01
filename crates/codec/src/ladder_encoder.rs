@@ -104,7 +104,13 @@ impl LadderEncoder {
         self.force_full = true;
         let codec = match level {
             Level::Low => VideoCodecType::JpegRects,
-            Level::High => VideoCodecType::Vp9,
+            Level::High => {
+                // The peer rebuilds its decoder on the codec switch, so the
+                // first VP9 frame of every visit must be a keyframe — the
+                // encoder's initial force_key only covers the first one.
+                self.vp9.request_keyframe();
+                VideoCodecType::Vp9
+            }
         };
         self.pending_change = Some(codec);
     }
@@ -154,6 +160,9 @@ impl VideoEncoder for LadderEncoder {
 
     fn request_keyframe(&mut self) {
         self.force_full = true;
+        // force_full only feeds the JPEG dirty rect; in the video regime a
+        // recovery needs a real VP9 keyframe (§12.2).
+        self.vp9.request_keyframe();
     }
 
     fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
@@ -338,6 +347,41 @@ mod tests {
         let mut dec = Vp9Decoder::new().unwrap();
         let d = dec.decode(&p).unwrap();
         assert_eq!((d.width, d.height), (w, h));
+    }
+
+    #[test]
+    fn vp9_regime_always_recovers_with_keyframes() {
+        // Regression: a lost frame in the video regime could never heal
+        // because keyframe requests (and re-entries into High) only forced
+        // a full JPEG dirty rect, never a VP9 keyframe — the encoder's
+        // initial force_key only covered the very first VP9 frame ever.
+        let (w, h) = (128u32, 64u32);
+        let mut enc = LadderEncoder::new(w, h, policy(), 1000, 80).unwrap();
+        let f = solid(w, h, [10, 20, 30, 255]);
+        enc.encode(&vf(w, h, &f)).unwrap();
+
+        // First visit to High: the encoder's initial frame is a keyframe.
+        enc.force_level(Level::High);
+        let p = enc.encode(&vf(w, h, &f)).unwrap();
+        assert!(p.keyframe, "first VP9 frame must be a keyframe");
+        let p = enc.encode(&vf(w, h, &f)).unwrap();
+        assert!(!p.keyframe, "second frame is a delta");
+
+        // A keyframe request in the video regime must reach the VP9 encoder.
+        enc.request_keyframe();
+        let p = enc.encode(&vf(w, h, &f)).unwrap();
+        assert!(p.keyframe, "keyframe request in VP9 regime must emit a keyframe");
+
+        // Re-entering High later must also start with a keyframe: the peer
+        // rebuilds its decoder on the codec switch and a delta would be
+        // undecodable ("Unspecified internal error", stuck until fallback).
+        enc.force_level(Level::Low);
+        enc.encode(&vf(w, h, &f)).unwrap();
+        enc.force_level(Level::High);
+        let p = enc.encode(&vf(w, h, &f)).unwrap();
+        assert!(p.keyframe, "re-entering VP9 must emit a keyframe");
+        let mut dec = Vp9Decoder::new().unwrap();
+        dec.decode(&p).expect("a fresh decoder accepts the re-entry keyframe");
     }
 
     #[test]
