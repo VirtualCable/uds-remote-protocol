@@ -200,6 +200,32 @@ fn is_uds_display(dd: &DISPLAY_DEVICEW) -> bool {
     false
 }
 
+/// Whether the display device has a monitor connected behind it. Stale GDI
+/// entries of past monitor incarnations ("ghosts") never do, so this cheaply
+/// filters them out: without it every session burned ~10 s retrying the
+/// attach of each ghost (6 attempts x 500 ms that could never succeed).
+fn has_live_monitor(device_name: &str) -> bool {
+    let wide: Vec<u16> = device_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut mon = DISPLAY_DEVICEW {
+        cb: u32::try_from(size_of::<DISPLAY_DEVICEW>()).expect("struct fits in u32"),
+        ..Default::default()
+    };
+    // SAFETY: `wide` is null-terminated; `mon` is a correctly sized
+    // out-struct. Returns false when no monitor is connected.
+    unsafe { EnumDisplayDevicesW(PCWSTR(wide.as_ptr()), 0, &raw mut mon, 0) }.as_bool()
+}
+
+/// Ghost filter with a short settle window: a *real* display may need a
+/// moment after the IddCx monitor arrives for PnP to link them, so probe
+/// twice before concluding the entry is a ghost.
+fn has_live_monitor_settled(device_name: &str) -> bool {
+    if has_live_monitor(device_name) {
+        return true;
+    }
+    std::thread::sleep(Duration::from_millis(250));
+    has_live_monitor(device_name)
+}
+
 fn ensure_inner(width: u32, height: u32, vsync: u32) -> u32 {
     let mut attached = 0u32;
     for i in 0..32u32 {
@@ -219,8 +245,12 @@ fn ensure_inner(width: u32, height: u32, vsync: u32) -> u32 {
         }
         let name = utf16_z(&dd.DeviceName);
         // Stale GDI entries of past monitor incarnations ("ghosts") share
-        // the marker but have no live monitor behind them; a failed attach
-        // on one must not stop the others — log and keep going.
+        // the marker but have no live monitor behind them; skip them fast
+        // instead of spending attach retries on them.
+        if !has_live_monitor_settled(&name) {
+            info!(device = name, "skipping ghost UDS display (no live monitor)");
+            continue;
+        }
         match attach_with_retries(&name, width, height, vsync) {
             Ok(()) => attached += 1,
             Err(err) => warn!(error = %format!("{err:#}"), "cannot attach {name}"),

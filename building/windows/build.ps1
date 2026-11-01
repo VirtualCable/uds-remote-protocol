@@ -1,28 +1,36 @@
-# Builds uds-remote-protocol Windows artifacts inside the udsrp-builder image.
-# To be executed on building/windows/ directory.
+# Builds the Windows binaries of the workspace inside the uds-rp-builder
+# container. Run from building/windows/:
 #
-#   .\build.ps1                     # server (release, windows-capture+vp9+ladder)
-#   $env:UDS_CARGO_ARGS='build --release -p client'; .\build.ps1
-#   $env:UDS_BUILD_DRIVERS='1'; .\build.ps1   # also builds drivers/ (WDK)
+#   .\build.ps1                    # default: the standalone client
+#   .\build.ps1 -Package server    # any workspace package
+#   .\build.ps1 -Package udsdisp   # e.g. the display driver (needs WDK env;
+#                                  # drivers are built in the dev VM instead)
 #
-# The repository root is mounted at C:\crate inside the container; build
-# outputs land in the usual target/ (and drivers/target/) directories.
+# The image mounts the repo at c:\crate and writes build outputs to
+# <repo>/target-windows/ (bind-mounted over the image's c:\out), so the host
+# Linux target/ is never touched and the .exe files are directly available
+# under target-windows/release/.
 
-# Ensure the builder image is up to date
-docker build -t udsrp-builder .
+param(
+    [string]$Package = "uds-rp-client",
+    [string]$Image = "uds-rp-builder"
+)
 
-# Full path of the ../.. directory (i.e., the root of the project)
-$projectDir = Convert-Path ../..
+$ErrorActionPreference = "Continue"  # cargo/docker write progress to stderr
 
-# What to build: overridable through UDS_CARGO_ARGS
-$cargoArgs = @("build", "--release", "-p", "server", "--features", "windows-capture,vp9,ladder")
-if ($env:UDS_CARGO_ARGS) { $cargoArgs = $env:UDS_CARGO_ARGS.Split(' ') }
-
-docker run --rm -v ${projectDir}:c:\crate -w /crate udsrp-builder cargo @cargoArgs
-
-if ($env:UDS_BUILD_DRIVERS -eq '1') {
-    # drivers/ is a separate workspace (panic=abort, no_std, WDK), excluded
-    # from the main one; cargo-wdk drives the WDK build, INF stamping and
-    # test-certificate packaging.
-    docker run --rm -v ${projectDir}:c:\crate -w /crate\drivers udsrp-builder cargo wdk build
+# Ensure the builder image exists (build it the first time).
+docker image inspect $Image | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    docker build -t $Image .
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
+
+$projectDir = Convert-Path ../..
+New-Item -ItemType Directory -Force "$projectDir/target-windows" | Out-Null
+
+docker run --rm `
+    -v "${projectDir}:c:\crate" `
+    -v "${projectDir}/target-windows:c:\out" `
+    -w /crate $Image `
+    cargo build --release -p $Package
+exit $LASTEXITCODE
