@@ -52,7 +52,9 @@ impl PacerRate {
         self.0.store(bps, Ordering::Relaxed);
     }
 
-    fn bps(&self) -> u64 {
+    /// Current shared drain rate in bits per second.
+    #[must_use]
+    pub fn bps(&self) -> u64 {
         self.0.load(Ordering::Relaxed)
     }
 }

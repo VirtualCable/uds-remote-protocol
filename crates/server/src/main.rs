@@ -242,24 +242,57 @@ struct Legs<T: ReliableTransport> {
 }
 
 impl<T: ReliableTransport> Legs<T> {
-    /// Queues one display fragment. Returns `Ok(false)` when the paced
-    /// sender's queue is full and the fragment was dropped: the caller must
-    /// treat the frame as broken and force a keyframe on the next one.
-    async fn send_fragment(&mut self, frag: &[u8]) -> transport::Result<bool> {
+    /// Minimum free datagram slots the paced queue must keep before the
+    /// session loop encodes another frame (§12.6 backpressure): below this,
+    /// the capture is skipped instead of piling latency into the queue.
+    const FRAG_QUEUE_HEADROOM: usize = 384;
+
+    /// True when the paced queue is congested enough that encoding a new
+    /// frame would just pile up delay (§12.6). Always false on the stream
+    /// fallback (TCP flow control applies its own backpressure).
+    fn frag_queue_limited(&self) -> bool {
+        match &self.frag_tx {
+            Some(tx) => tx.capacity() < Self::FRAG_QUEUE_HEADROOM,
+            None => false,
+        }
+    }
+
+    /// Free datagram slots in the paced queue (`None` on the stream
+    /// fallback, where there is no bounded queue to watch).
+    fn frag_queue_free(&self) -> Option<usize> {
+        self.frag_tx.as_ref().map(mpsc::Sender::capacity)
+    }
+
+    /// Queues one frame's fragments **all-or-nothing**: a partially-sent
+    /// frame is undecodable waste that still burns drain rate, so when the
+    /// paced queue cannot hold the whole frame nothing is queued at all
+    /// (returns `Ok(false)`; the caller must force a keyframe). Only the
+    /// session task pushes, so the capacity check cannot race the sends.
+    async fn send_frame(&mut self, frags: Vec<Vec<u8>>) -> transport::Result<bool> {
         let Some(tx) = &self.frag_tx else {
-            self.stream.send(channel::DISPLAY, frag).await?;
+            for frag in &frags {
+                self.stream.send(channel::DISPLAY, frag).await?;
+            }
             return Ok(true);
         };
-        match tx.try_send(frag.to_vec()) {
-            Ok(()) => Ok(true),
-            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                Err(transport::TransportError::Io(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "display sender task ended",
-                )))
+        if tx.capacity() < frags.len() {
+            return Ok(false);
+        }
+        for frag in frags {
+            match tx.try_send(frag) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    unreachable!("capacity checked and this task is the only producer")
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(transport::TransportError::Io(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "display sender task ended",
+                    )));
+                }
             }
         }
+        Ok(true)
     }
 
     async fn send_control(&mut self, msg: &[u8]) -> transport::Result<()> {
@@ -723,9 +756,78 @@ async fn answer_probes(
     }
 }
 
+/// Display-pipeline telemetry accumulator (§12.6 diagnostics): one log
+/// line every [`STATS_LOG_INTERVAL`] with sizes, encode times, backpressure
+/// and drop counters, the ladder state and the pacer rate.
+#[derive(Debug)]
+struct FrameStats {
+    frames: u64,
+    /// Rect-codec frames with no changes (encode ran, nothing sent).
+    empty: u64,
+    encoded_bytes: u64,
+    max_frame_bytes: usize,
+    encode_micros: u64,
+    max_encode_micros: u64,
+    /// Frames skipped by backpressure before encoding.
+    skipped_bp: u64,
+    /// Whole frames dropped because the paced queue could not hold them.
+    dropped_whole: u64,
+    /// Smallest free datagram slots seen in the paced queue.
+    min_queue_free: usize,
+    last_log: Instant,
+}
+
+/// Telemetry cadence for the display pipeline.
+const STATS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+impl FrameStats {
+    fn new(queue_free: usize) -> Self {
+        Self {
+            frames: 0,
+            empty: 0,
+            encoded_bytes: 0,
+            max_frame_bytes: 0,
+            encode_micros: 0,
+            max_encode_micros: 0,
+            skipped_bp: 0,
+            dropped_whole: 0,
+            min_queue_free: queue_free,
+            last_log: Instant::now(),
+        }
+    }
+
+    /// Emits the period line and resets the accumulators.
+    fn log_and_reset(&mut self, encoder: &ServerEncoder, pacer_rate: &PacerRate) {
+        let sent = self.frames - self.empty - self.skipped_bp - self.dropped_whole;
+        let n_encoded = self.frames - self.skipped_bp;
+        #[allow(clippy::cast_possible_truncation)] // micros per frame fit u64
+        let avg_encode_ms = self.encode_micros.checked_div(n_encoded).unwrap_or(0) / 1000;
+        let avg_kb = self.encoded_bytes.checked_div(sent).unwrap_or(0) / 1000;
+        let (level, ema) = encoder.ladder_snapshot();
+        info!(
+            frames = self.frames,
+            sent,
+            empty = self.empty,
+            skipped_bp = self.skipped_bp,
+            dropped_whole = self.dropped_whole,
+            avg_kb,
+            max_kb = self.max_frame_bytes / 1000,
+            avg_encode_ms,
+            max_encode_ms = self.max_encode_micros / 1000,
+            min_queue_free = self.min_queue_free,
+            pacer_mbps = pacer_rate.bps() / 1_000_000,
+            ladder_level = ?level,
+            ladder_ema_pct = ema.map(|e| (e * 10.0).round() / 10.0),
+            "display pipeline"
+        );
+        *self = Self::new(DISPLAY_QUEUE_DGRAMS);
+    }
+}
+
 /// Encodes one captured frame and sends its fragments; also re-announces
 /// the display when the codec ladder switched regime (§8.5). Returns the
 /// next frame id.
+#[allow(clippy::too_many_arguments)] // session state travels as separate locals
 async fn handle_frame<T: ReliableTransport>(
     frame: &OwnedFrame,
     legs: &mut Legs<T>,
@@ -733,34 +835,57 @@ async fn handle_frame<T: ReliableTransport>(
     frame_id: u32,
     width: u32,
     height: u32,
+    pacer_rate: &PacerRate,
+    stats: &mut FrameStats,
 ) -> Result<u32> {
+    if let Some(free) = legs.frag_queue_free() {
+        stats.min_queue_free = stats.min_queue_free.min(free);
+    }
+    // Backpressure (§12.6): the paced queue is congested — skip this frame
+    // entirely (no encode CPU burned, no latency piled up) and force the
+    // next sent frame to be a keyframe, since the peer may be missing the
+    // deltas we are skipping. The frame id is reused: nothing of it left.
+    if legs.frag_queue_limited() {
+        encoder.request_keyframe();
+        stats.skipped_bp += 1;
+        return Ok(frame_id);
+    }
+    stats.frames += 1;
+    let encode_start = Instant::now();
     let packet = encoder.encode(&codec::VideoFrame {
         width: frame.width,
         height: frame.height,
         stride: frame.stride,
         data: &frame.data,
     })?;
+    let encode_micros = u64::try_from(encode_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+    stats.encode_micros += encode_micros;
+    stats.max_encode_micros = stats.max_encode_micros.max(encode_micros);
     if encoder.take_codec_change().is_some() {
         // Codec ladder switched regime: re-announce before the fragments so
         // the peer rebuilds its decoder (§8.5).
         announce_display(legs, encoder, width, height).await?;
     }
     if packet.data.is_empty() {
+        stats.empty += 1;
         return Ok(frame_id); // rect codecs: nothing changed on this frame
     }
-    // Every fragment carries the frame's capture timestamp (§9.1).
-    let mut dropped = 0u32;
-    for frag in Fragmenter::split(0, frame_id, frame.capture_ts_ms, &packet.data) {
-        if !legs.send_fragment(&frag).await? {
-            dropped += 1;
-        }
-    }
-    if dropped > 0 {
-        // The paced queue is behind: this frame went out incomplete, so the
-        // next reference must be a keyframe (the client's loss recovery
-        // would ask for one anyway — forcing it skips that round trip).
-        warn!(frame_id, dropped, "paced queue full; frame dropped, keyframe forced");
+    stats.encoded_bytes += packet.data.len() as u64;
+    stats.max_frame_bytes = stats.max_frame_bytes.max(packet.data.len());
+    // Every fragment carries the frame's capture timestamp (§9.1). Frames
+    // go out all-or-nothing: a partial frame is undecodable waste.
+    let frags = Fragmenter::split(0, frame_id, frame.capture_ts_ms, &packet.data);
+    if !legs.send_frame(frags).await? {
+        // The paced queue cannot hold this frame right now (a huge keyframe
+        // over a busy link): skip it whole and force a keyframe on the next
+        // one (the client's loss recovery would ask for it anyway).
+        stats.dropped_whole += 1;
+        warn!(frame_id, "paced queue congested; whole frame dropped, keyframe forced");
         encoder.request_keyframe();
+        return Ok(frame_id);
+    }
+    if stats.last_log.elapsed() >= STATS_LOG_INTERVAL {
+        stats.log_and_reset(encoder, pacer_rate);
     }
     Ok(frame_id.wrapping_add(1))
 }
@@ -1089,13 +1214,23 @@ async fn serve<T: ReliableTransport>(
     // Reusable buffer for audio datagram payloads (header + Opus frame).
     let mut audio_buf = Vec::with_capacity(1024);
     let mut frame_id = 0u32;
+    let mut frame_stats = FrameStats::new(DISPLAY_QUEUE_DGRAMS);
     loop {
         tokio::select! {
             msg = frame_rx.recv() => {
                 match msg {
                     Some(CaptureMsg::Frame(frame)) => {
-                        frame_id =
-                            handle_frame(&frame, &mut legs, &mut encoder, frame_id, width, height).await?;
+                        frame_id = handle_frame(
+                            &frame,
+                            &mut legs,
+                            &mut encoder,
+                            frame_id,
+                            width,
+                            height,
+                            &ctl.pacer_rate,
+                            &mut frame_stats,
+                        )
+                        .await?;
                         if args.max_frames.is_some_and(|max| frame_id >= max) {
                             info!(frame_id, "max frames reached, closing session");
                             return Ok(());
@@ -1470,6 +1605,23 @@ impl ServerEncoder {
         }
         #[cfg(not(feature = "ladder"))]
         let _ = (self, on);
+    }
+
+    /// Current ladder regime and smoothed change-ratio for telemetry;
+    /// `(None, None)` for plain encoders or builds without the ladder.
+    fn ladder_snapshot(&self) -> (Option<codec::Level>, Option<f64>) {
+        #[cfg(feature = "ladder")]
+        {
+            match self {
+                Self::Ladder(e) => (Some(e.ladder().level()), e.ladder().ema()),
+                Self::Simple(_) => (None, None),
+            }
+        }
+        #[cfg(not(feature = "ladder"))]
+        {
+            let _ = self;
+            (None, None)
+        }
     }
 }
 
