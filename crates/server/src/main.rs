@@ -86,6 +86,8 @@ struct Args {
     mic_sink: String,
     /// Storage spool directory (M8); defaults to the per-user spool.
     spool: Option<std::path::PathBuf>,
+    /// Per-session telemetry CSV (§12.8); `None` keeps telemetry log-only.
+    stats_csv: Option<std::path::PathBuf>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -108,6 +110,7 @@ fn parse_args() -> Result<Args> {
         audio_source: "auto".to_string(),
         mic_sink: "null".to_string(),
         spool: None,
+        stats_csv: None,
     };
     let mut key_seen = false;
     // A config file (reference/standalone mode) seeds the defaults first;
@@ -140,6 +143,9 @@ fn parse_args() -> Result<Args> {
             args.preset = config.preset;
             args.ladder = config.ladder;
             args.fps_adapt = config.fps_adapt;
+            if !config.stats_csv.is_empty() {
+                args.stats_csv = Some(config.stats_csv.into());
+            }
             args.source = "dxgi".to_string();
             key_seen = true;
             continue;
@@ -177,6 +183,7 @@ fn parse_args() -> Result<Args> {
             "--audio-source" => args.audio_source = value,
             "--mic-sink" => args.mic_sink = value,
             "--spool" => args.spool = Some(value.into()),
+            "--stats-csv" => args.stats_csv = Some(value.into()),
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -222,6 +229,7 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
             .as_ref()
             .map(server::config::AdaptiveFpsTuning::to_wire)
             .unwrap_or_default();
+        args.stats_csv = standalone.stats_csv.as_ref().map(std::path::PathBuf::from);
         args.audio = standalone.channels.audio;
         info!("standalone mode: fixed ticket active (reference implementation)");
     }
@@ -765,6 +773,7 @@ fn handle_metrics(
     loss_permille: u16,
 ) {
     let loss = f64::from(loss_permille) / 1000.0;
+    ctl.last_metrics = Some((rtt_micros, jitter_micros, loss_permille));
     // FEC is loss-driven, not level-driven: evaluate it on every report.
     if let Some(ac) = &ctl.audio_control {
         let fec = protocol::fec_update(ctl.fec_on, loss);
@@ -870,7 +879,8 @@ async fn answer_probes(
 
 /// Display-pipeline telemetry accumulator (§12.6 diagnostics): one log
 /// line every [`STATS_LOG_INTERVAL`] with sizes, encode times, backpressure
-/// and drop counters, the ladder state and the pacer rate.
+/// and drop counters, the ladder state and the pacer rate. When a CSV path
+/// is configured, the same data lands there as one row per interval (§12.8).
 #[derive(Debug)]
 struct FrameStats {
     frames: u64,
@@ -887,13 +897,37 @@ struct FrameStats {
     /// Smallest free datagram slots seen in the paced queue.
     min_queue_free: usize,
     last_log: Instant,
+    /// Telemetry CSV sink (header already written); `None` = log only.
+    csv: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 /// Telemetry cadence for the display pipeline.
 const STATS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
+/// CSV header of the per-interval telemetry rows (§12.8). Keep it in sync
+/// with [`FrameStats::csv_row`].
+const STATS_CSV_HEADER: &str = "time,frames,sent,empty,skipped_bp,dropped_whole,avg_encode_ms,max_encode_ms,avg_kb,max_kb,min_queue_free,pacer_mbps,ladder_level,ladder_ema_pct,quality_fps,effective_fps,adaptive_load,rtt_ms,jitter_ms,loss_permille";
+
 impl FrameStats {
-    fn new(queue_free: usize) -> Self {
+    fn new(queue_free: usize, csv_path: Option<&std::path::Path>) -> Self {
+        let csv = csv_path.and_then(|path| {
+            match std::fs::File::create(path) {
+                Ok(file) => {
+                    use std::io::Write as _;
+                    let mut writer = std::io::BufWriter::new(file);
+                    if let Err(e) = writeln!(writer, "{STATS_CSV_HEADER}") {
+                        warn!(error = %e, "stats CSV header write failed; CSV disabled");
+                        return None;
+                    }
+                    info!(path = %path.display(), "stats CSV active");
+                    Some(writer)
+                }
+                Err(e) => {
+                    warn!(path = %path.display(), error = %e, "cannot create the stats CSV; CSV disabled");
+                    None
+                }
+            }
+        });
         Self {
             frames: 0,
             empty: 0,
@@ -905,11 +939,58 @@ impl FrameStats {
             dropped_whole: 0,
             min_queue_free: queue_free,
             last_log: Instant::now(),
+            csv,
         }
     }
 
-    /// Emits the period line and resets the accumulators.
-    fn log_and_reset(&mut self, encoder: &ServerEncoder, pacer_rate: &PacerRate) {
+    /// One CSV row for the finished interval (§12.8). Optional fields render
+    /// empty (ladder on plain encoders, adaptive load without the adapter,
+    /// link metrics before the first client report).
+    #[allow(clippy::cast_precision_loss)] // telemetry rounding is fine
+    fn csv_row(&self, encoder: &ServerEncoder, ctl: &ControlState) -> String {
+        let sent = self.frames - self.empty - self.skipped_bp - self.dropped_whole;
+        let n_encoded = self.frames - self.skipped_bp;
+        let avg_encode_ms = self.encode_micros.checked_div(n_encoded).unwrap_or(0) / 1000;
+        let avg_kb = self.encoded_bytes.checked_div(sent).unwrap_or(0) / 1000;
+        let (level, ema) = encoder.ladder_snapshot();
+        let level = level.map_or(String::new(), |l| format!("{l:?}").to_lowercase());
+        let ema = ema.map_or(String::new(), |e| format!("{e:.1}"));
+        let load = ctl
+            .fps_adapter
+            .as_ref()
+            .and_then(server::fps::FpsAdapter::load)
+            .map_or(String::new(), |l| format!("{l:.2}"));
+        let (rtt_ms, jitter_ms, loss) = ctl.last_metrics.map_or(
+            (String::new(), String::new(), String::new()),
+            |(rtt, jitter, loss)| {
+                (
+                    format!("{:.2}", rtt as f64 / 1000.0),
+                    format!("{:.2}", jitter as f64 / 1000.0),
+                    loss.to_string(),
+                )
+            },
+        );
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        format!(
+            "{time},{},{sent},{},{},{},{avg_encode_ms},{},{avg_kb},{},{},{},{level},{ema},{},{},{load},{rtt_ms},{jitter_ms},{loss}",
+            self.frames,
+            self.empty,
+            self.skipped_bp,
+            self.dropped_whole,
+            self.max_encode_micros / 1000,
+            self.max_frame_bytes / 1000,
+            self.min_queue_free,
+            ctl.pacer_rate.bps() / 1_000_000,
+            ctl.quality_fps,
+            ctl.effective_fps(),
+        )
+    }
+
+    /// Emits the period line (and CSV row when active) and resets the
+    /// accumulators.
+    fn log_and_reset(&mut self, encoder: &ServerEncoder, ctl: &ControlState) {
         let sent = self.frames - self.empty - self.skipped_bp - self.dropped_whole;
         let n_encoded = self.frames - self.skipped_bp;
         #[allow(clippy::cast_possible_truncation)] // micros per frame fit u64
@@ -927,12 +1008,25 @@ impl FrameStats {
             avg_encode_ms,
             max_encode_ms = self.max_encode_micros / 1000,
             min_queue_free = self.min_queue_free,
-            pacer_mbps = pacer_rate.bps() / 1_000_000,
+            pacer_mbps = ctl.pacer_rate.bps() / 1_000_000,
             ladder_level = ?level,
             ladder_ema_pct = ema.map(|e| (e * 10.0).round() / 10.0),
             "display pipeline"
         );
-        *self = Self::new(DISPLAY_QUEUE_DGRAMS);
+        if self.csv.is_some() {
+            use std::io::Write as _;
+            let row = self.csv_row(encoder, ctl);
+            if let Some(csv) = &mut self.csv
+                && let Err(e) = writeln!(csv, "{row}")
+            {
+                warn!(error = %e, "stats CSV write failed; CSV disabled");
+                self.csv = None;
+            }
+        }
+        *self = Self {
+            csv: self.csv.take(),
+            ..Self::new(DISPLAY_QUEUE_DGRAMS, None)
+        };
     }
 }
 
@@ -1015,7 +1109,7 @@ async fn handle_frame<T: ReliableTransport>(
         *last_keyframe = Instant::now();
     }
     if stats.last_log.elapsed() >= STATS_LOG_INTERVAL {
-        stats.log_and_reset(encoder, &ctl.pacer_rate);
+        stats.log_and_reset(encoder, ctl);
     }
     Ok(frame_id.wrapping_add(1))
 }
@@ -1344,6 +1438,7 @@ async fn serve<T: ReliableTransport>(
             info!(overrides = %args.fps_adapt, "adaptive fps enabled");
             Some(server::fps::FpsAdapter::new(policy, args.fps.max(1)))
         },
+        last_metrics: None,
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -1353,7 +1448,7 @@ async fn serve<T: ReliableTransport>(
     // Reusable buffer for audio datagram payloads (header + Opus frame).
     let mut audio_buf = Vec::with_capacity(1024);
     let mut frame_id = 0u32;
-    let mut frame_stats = FrameStats::new(DISPLAY_QUEUE_DGRAMS);
+    let mut frame_stats = FrameStats::new(DISPLAY_QUEUE_DGRAMS, args.stats_csv.as_deref());
     // Seeded in the past so the very first frame goes out as a keyframe even
     // if the encoder's first frame was not one for some reason.
     let mut last_keyframe = Instant::now().checked_sub(KEYFRAME_SAFETY_INTERVAL).unwrap_or_else(Instant::now);
@@ -1623,6 +1718,8 @@ struct ControlState {
     quality_fps: u32,
     /// Adaptive-fps controller (§12.7); `None` when not configured.
     fps_adapter: Option<server::fps::FpsAdapter>,
+    /// Last link-quality report (for the telemetry CSV, §12.8).
+    last_metrics: Option<(u64, u64, u16)>,
 }
 
 impl ControlState {

@@ -107,6 +107,8 @@ pub struct StandaloneConfig {
     /// table's mere presence enables the adapter (§12.7), unset keys keep
     /// the balanced defaults.
     pub adaptive_fps: Option<AdaptiveFpsTuning>,
+    /// Per-session telemetry CSV path; `None` keeps telemetry log-only.
+    pub stats_csv: Option<String>,
 }
 
 /// Adaptive-fps tuning overrides (§12.7). Every key is optional; only the
@@ -252,6 +254,7 @@ impl Default for StandaloneConfig {
             },
             ladder: LadderTuning::default(),
             adaptive_fps: None,
+            stats_csv: None,
         }
     }
 }

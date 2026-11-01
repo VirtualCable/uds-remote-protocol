@@ -37,6 +37,8 @@ pub struct StandaloneRuntime {
     pub ladder: String,
     /// Adaptive-fps overrides in wire form (empty = disabled, §12.7).
     pub fps_adapt: String,
+    /// Per-session telemetry CSV path (empty = disabled).
+    pub stats_csv: String,
 }
 
 impl StandaloneRuntime {
@@ -111,5 +113,6 @@ pub fn load() -> Option<StandaloneRuntime> {
             .as_ref()
             .map(server_config::AdaptiveFpsTuning::to_wire)
             .unwrap_or_default(),
+        stats_csv: standalone.stats_csv.clone().unwrap_or_default(),
     })
 }

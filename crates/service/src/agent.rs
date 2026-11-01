@@ -344,6 +344,7 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
             preset: standalone.preset.clone(),
             ladder: standalone.ladder.clone(),
             fps_adapt: standalone.fps_adapt.clone(),
+            stats_csv: standalone.stats_csv.clone(),
         },
         None => service_proto::AgentConfig {
             key,
@@ -353,6 +354,7 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
             preset: "ladder".to_owned(),
             ladder: String::new(),
             fps_adapt: String::new(),
+            stats_csv: String::new(),
         },
     };
 

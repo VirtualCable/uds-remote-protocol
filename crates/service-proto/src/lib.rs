@@ -16,13 +16,14 @@
 //!          u16   codec preset name, then UTF-8 bytes
 //!          u16   ladder tuning overrides ("k=v,..."; empty = defaults)
 //!          u16   adaptive-fps overrides ("k=v,..."; empty = disabled)
+//!          u16   stats CSV path (empty = telemetry to the log only)
 //! ```
 //!
 //! Pure format code only; both the service (Windows) and the agent use it.
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 3;
+pub const AGENT_CONFIG_VERSION: u8 = 4;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -34,7 +35,7 @@ pub const MAX_STRING_LEN: usize = 256;
 
 /// Minimum frame size: version + key + ticket + the u16 string lengths
 /// (all strings empty).
-const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 5 * 2;
+const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 6 * 2;
 
 /// Offset where the length-prefixed string fields start.
 const STRINGS_OFF: usize = 1 + KEY_LEN + TICKET_LEN;
@@ -58,6 +59,9 @@ pub struct AgentConfig {
     /// Adaptive-fps overrides in compact `key=value,...` form; empty
     /// disables the adapter (the capture rate stays at the configured fps).
     pub fps_adapt: String,
+    /// Path of the per-session telemetry CSV; empty disables it (telemetry
+    /// then only goes to the log every STATS_LOG_INTERVAL).
+    pub stats_csv: String,
 }
 
 /// Decode failures.
@@ -96,7 +100,8 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
             + config.output_name.len()
             + config.preset.len()
             + config.ladder.len()
-            + config.fps_adapt.len(),
+            + config.fps_adapt.len()
+            + config.stats_csv.len(),
     );
     out.push(AGENT_CONFIG_VERSION);
     out.extend_from_slice(&config.key);
@@ -107,6 +112,7 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
         &config.preset,
         &config.ladder,
         &config.fps_adapt,
+        &config.stats_csv,
     ] {
         let len = u16::try_from(s.len()).expect("string fields are bounded well below u16::MAX");
         out.extend_from_slice(&len.to_le_bytes());
@@ -132,7 +138,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     ticket.copy_from_slice(&buf[1 + KEY_LEN..1 + KEY_LEN + TICKET_LEN]);
 
     let mut rest = &buf[STRINGS_OFF..];
-    let mut strings = ["", "", "", "", ""];
+    let mut strings = ["", "", "", "", "", ""];
     for slot in &mut strings {
         let len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
         rest = &rest[2..];
@@ -145,7 +151,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     if !rest.is_empty() {
         return Err(DecodeError::BadLength);
     }
-    let [bind, output_name, preset, ladder, fps_adapt] = strings;
+    let [bind, output_name, preset, ladder, fps_adapt, stats_csv] = strings;
     Ok(AgentConfig {
         key,
         ticket,
@@ -154,6 +160,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         preset: preset.to_owned(),
         ladder: ladder.to_owned(),
         fps_adapt: fps_adapt.to_owned(),
+        stats_csv: stats_csv.to_owned(),
     })
 }
 
@@ -170,6 +177,7 @@ mod tests {
             preset: "vp9-balanced".to_owned(),
             ladder: "up=15,hold_up_ms=1500".to_owned(),
             fps_adapt: "min_fps=8".to_owned(),
+            stats_csv: String::new(),
         }
     }
 
