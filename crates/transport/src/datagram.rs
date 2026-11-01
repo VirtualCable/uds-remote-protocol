@@ -22,6 +22,8 @@ pub struct EncryptedDatagram<T: DatagramTransport> {
     rx_buf: Vec<u8>,
     // Reusable encryption scratch buffer (zero-alloc hot path, §12.6).
     tx_buf: Vec<u8>,
+    /// Swallowed invalid datagrams: `(bad_token, aead, replay, too_old)`.
+    invalid_dgrams: (u64, u64, u64, u64),
 }
 
 impl<T: DatagramTransport> EncryptedDatagram<T> {
@@ -45,6 +47,7 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
                     + consts::MAX_DATAGRAM_PAYLOAD
                     + consts::TAG_LENGTH
             ],
+            invalid_dgrams: (0, 0, 0, 0),
         }
     }
 
@@ -62,11 +65,14 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
 
     /// Receives the next valid datagram: channel id and plaintext length,
     /// copied into `buf`. Invalid datagrams (foreign token, tampering,
-    /// replay, too old) are dropped silently and the wait continues.
+    /// replay, too old) are dropped (counted, see [`Self::dropped_invalid`])
+    /// and the wait continues.
     pub async fn recv_into(&mut self, buf: &mut [u8]) -> Result<(ChannelId, usize)> {
         loop {
             let n = self.inner.recv_into(&mut self.rx_buf).await?;
-            if let Some(result) = Self::try_decrypt(&mut self.rx, &self.rx_buf[..n], buf)? {
+            let dgram = &self.rx_buf[..n];
+            let Self { rx, invalid_dgrams, .. } = self;
+            if let Some(result) = try_decrypt(rx, dgram, buf, invalid_dgrams)? {
                 return Ok(result);
             }
         }
@@ -80,29 +86,23 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
         dgram: &[u8],
         buf: &mut [u8],
     ) -> Result<Option<(ChannelId, usize)>> {
-        Self::try_decrypt(&mut self.rx, dgram, buf)
+        self.try_decrypt(dgram, buf)
+    }
+
+    /// Invalid datagrams swallowed so far: `(bad_token, aead, replay,
+    /// too_old)`. Diagnostics for the loss-accounting blind spot: these
+    /// never show in `lost_estimate` (they never had a valid sequence).
+    #[must_use]
+    pub fn dropped_invalid(&self) -> (u64, u64, u64, u64) {
+        self.invalid_dgrams
     }
 
     fn try_decrypt(
-        rx: &mut DatagramDecrypt,
+        &mut self,
         dgram: &[u8],
         buf: &mut [u8],
     ) -> Result<Option<(ChannelId, usize)>> {
-        match rx.decrypt_into(dgram, buf) {
-            Ok((channel, n)) => Ok(Some((channel, n))),
-            Err(CryptError::BufferTooSmall { needed, .. }) => Err(TransportError::TooLarge {
-                size: needed,
-                max: buf.len(),
-            }),
-            Err(
-                CryptError::BadToken
-                | CryptError::Aead
-                | CryptError::PacketTooShort(_)
-                | CryptError::Replay { .. }
-                | CryptError::TooOld { .. },
-            ) => Ok(None),
-            Err(e) => Err(e.into()),
-        }
+        try_decrypt(&mut self.rx, dgram, buf, &mut self.invalid_dgrams)
     }
 
     /// Packet loss estimate derived from sequence gaps (§12.2).
@@ -126,8 +126,41 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
         let inner = Arc::new(self.inner);
         (
             DatagramSink { inner: Arc::clone(&inner), tx: self.tx, tx_buf: self.tx_buf },
-            DatagramSource { inner, rx: self.rx, rx_buf: self.rx_buf },
+            DatagramSource { inner, rx: self.rx, rx_buf: self.rx_buf, invalid_dgrams: (0, 0, 0, 0) },
         )
+    }
+}
+
+/// Shared swallow-and-count decrypt path for [`EncryptedDatagram`] and
+/// [`DatagramSource`]: invalid datagrams increment `counters`
+/// `(bad_token, aead, replay, too_old)` and return `Ok(None)`.
+fn try_decrypt(
+    rx: &mut DatagramDecrypt,
+    dgram: &[u8],
+    buf: &mut [u8],
+    counters: &mut (u64, u64, u64, u64),
+) -> Result<Option<(ChannelId, usize)>> {
+    match rx.decrypt_into(dgram, buf) {
+        Ok((channel, n)) => Ok(Some((channel, n))),
+        Err(CryptError::BufferTooSmall { needed, .. }) => Err(TransportError::TooLarge {
+            size: needed,
+            max: buf.len(),
+        }),
+        Err(e @ (CryptError::BadToken
+        | CryptError::Aead
+        | CryptError::PacketTooShort(_)
+        | CryptError::Replay { .. }
+        | CryptError::TooOld { .. })) => {
+            match e {
+                CryptError::BadToken => counters.0 += 1,
+                CryptError::Aead | CryptError::PacketTooShort(_) => counters.1 += 1,
+                CryptError::Replay { .. } => counters.2 += 1,
+                CryptError::TooOld { .. } => counters.3 += 1,
+                _ => unreachable!("filtered above"),
+            }
+            Ok(None)
+        }
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -160,20 +193,32 @@ pub struct DatagramSource<T: DatagramTransport> {
     inner: Arc<T>,
     rx: DatagramDecrypt,
     rx_buf: Vec<u8>,
+    invalid_dgrams: (u64, u64, u64, u64),
 }
 
 impl<T: DatagramTransport> DatagramSource<T> {
     /// Receives the next valid datagram: channel id and plaintext length,
-    /// copied into `buf`. Invalid datagrams are dropped silently.
+    /// copied into `buf`. Invalid datagrams are dropped (counted, see
+    /// [`Self::dropped_invalid`]).
     pub async fn recv_into(&mut self, buf: &mut [u8]) -> Result<(ChannelId, usize)> {
         loop {
             let n = self.inner.recv_into(&mut self.rx_buf).await?;
-            if let Some(result) =
-                EncryptedDatagram::<T>::try_decrypt(&mut self.rx, &self.rx_buf[..n], buf)?
-            {
+            if let Some(result) = try_decrypt(
+                &mut self.rx,
+                &self.rx_buf[..n],
+                buf,
+                &mut self.invalid_dgrams,
+            )? {
                 return Ok(result);
             }
         }
+    }
+
+    /// Invalid datagrams swallowed so far: `(bad_token, aead, replay,
+    /// too_old)` (§12.2 diagnostics blind spot).
+    #[must_use]
+    pub fn dropped_invalid(&self) -> (u64, u64, u64, u64) {
+        self.invalid_dgrams
     }
 
     /// Packet loss estimate derived from sequence gaps (§12.2).

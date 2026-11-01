@@ -60,7 +60,7 @@ use transport::{
     DirectListener, EncryptedDatagram, EncryptedStream, ReliableTransport, UdpTransport,
     udp_offer,
 };
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 struct Args {
     bind: SocketAddr,
@@ -759,7 +759,7 @@ async fn handle_frame<T: ReliableTransport>(
         // The paced queue is behind: this frame went out incomplete, so the
         // next reference must be a keyframe (the client's loss recovery
         // would ask for one anyway — forcing it skips that round trip).
-        debug!(frame_id, dropped, "paced queue full; frame dropped, keyframe forced");
+        warn!(frame_id, dropped, "paced queue full; frame dropped, keyframe forced");
         encoder.request_keyframe();
     }
     Ok(frame_id.wrapping_add(1))

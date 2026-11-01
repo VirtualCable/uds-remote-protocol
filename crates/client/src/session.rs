@@ -327,6 +327,10 @@ impl Session {
                     let drecv = received - prev_received;
                     prev_lost = lost;
                     prev_received = received;
+                    // Swallowed-invalid counters (blind spot of the seq-gap
+                    // loss estimate): a rising one explains "no loss on the
+                    // wire but frames never complete".
+                    let (bad_token, aead_fail, replay, too_old) = leg.dgram.dropped_invalid();
                     let denom = dlost + drecv;
                     #[allow(clippy::cast_precision_loss)] // counters fit in f64
                     let loss_rate = if denom == 0 { 0.0 } else { dlost as f64 / denom as f64 };
@@ -344,6 +348,11 @@ impl Session {
                         loss_permille = loss_rate * 1000.0,
                         dlost,
                         drecv,
+                        bad_token,
+                        aead_fail,
+                        replay,
+                        too_old,
+                        reasm_dropped = core.reasm.dropped_frames(),
                         "metrics report"
                     );
                     #[allow(clippy::cast_possible_truncation)] // micros→ms fits f32
