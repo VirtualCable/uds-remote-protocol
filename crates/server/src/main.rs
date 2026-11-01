@@ -234,6 +234,15 @@ fn read_config_frame() -> Result<Vec<u8>> {
 /// Session legs after UDP detection (§4.2): the reliable control stream is
 /// always alive; display traffic goes over the lossy UDP leg when present,
 /// or over the stream as fallback.
+/// How long a keyframe send may wait for paced-queue room before giving up
+/// (the session loop stalls during the wait; audio has its own leg).
+const KEYFRAME_QUEUE_WAIT: Duration = Duration::from_millis(25);
+
+/// Safety net (§12.2): loss detection + forced keyframes should keep the
+/// predictive chain healthy, but a periodic keyframe bounds the worst-case
+/// recovery time even if the whole request path fails.
+const KEYFRAME_SAFETY_INTERVAL: Duration = Duration::from_secs(30);
+
 struct Legs<T: ReliableTransport> {
     /// UDP send half, shared with the paced display-sender task (§12.6).
     udp: Option<Arc<Mutex<transport::DatagramSink<UdpTransport>>>>,
@@ -270,7 +279,12 @@ impl<T: ReliableTransport> Legs<T> {
     /// paced queue cannot hold the whole frame nothing is queued at all
     /// (returns `Ok(false)`; the caller must force a keyframe). Only the
     /// session task pushes, so the capacity check cannot race the sends.
-    async fn send_frame(&mut self, frags: Vec<Vec<u8>>) -> transport::Result<bool> {
+    ///
+    /// Keyframes are recovery-critical: dropping one restarts the whole
+    /// request → encode → big-frame cycle under the same congestion that
+    /// caused the loss, so instead of dropping we wait briefly for the
+    /// pacer to drain (bounded by [`KEYFRAME_QUEUE_WAIT`]) before giving up.
+    async fn send_frame(&mut self, frags: Vec<Vec<u8>>, keyframe: bool) -> transport::Result<bool> {
         let Some(tx) = &self.frag_tx else {
             for frag in &frags {
                 self.stream.send(channel::DISPLAY, frag).await?;
@@ -278,7 +292,16 @@ impl<T: ReliableTransport> Legs<T> {
             return Ok(true);
         };
         if tx.capacity() < frags.len() {
-            return Ok(false);
+            if !keyframe {
+                return Ok(false);
+            }
+            let deadline = Instant::now() + KEYFRAME_QUEUE_WAIT;
+            while tx.capacity() < frags.len() {
+                if Instant::now() >= deadline {
+                    return Ok(false);
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         }
         for frag in frags {
             match tx.try_send(frag) {
@@ -921,6 +944,7 @@ async fn handle_frame<T: ReliableTransport>(
     height: u32,
     pacer_rate: &PacerRate,
     stats: &mut FrameStats,
+    last_keyframe: &mut Instant,
 ) -> Result<u32> {
     if let Some(free) = legs.frag_queue_free() {
         stats.min_queue_free = stats.min_queue_free.min(free);
@@ -934,6 +958,11 @@ async fn handle_frame<T: ReliableTransport>(
         encoder.request_keyframe();
         stats.skipped_bp += 1;
         return Ok(frame_id);
+    }
+    // Periodic safety-net keyframe: bounds the worst-case recovery time even
+    // if the whole loss-detection/request path fails (§12.2).
+    if last_keyframe.elapsed() >= KEYFRAME_SAFETY_INTERVAL {
+        encoder.request_keyframe();
     }
     let encode_start = Instant::now();
     let packet = encoder.encode(&codec::VideoFrame {
@@ -956,10 +985,17 @@ async fn handle_frame<T: ReliableTransport>(
     }
     stats.encoded_bytes += packet.data.len() as u64;
     stats.max_frame_bytes = stats.max_frame_bytes.max(packet.data.len());
-    // Every fragment carries the frame's capture timestamp (§9.1). Frames
-    // go out all-or-nothing: a partial frame is undecodable waste.
-    let frags = Fragmenter::split(0, frame_id, frame.capture_ts_ms, &packet.data);
-    if !legs.send_frame(frags).await? {
+    // Every fragment carries the frame's capture timestamp (§9.1), and the
+    // payload opens with the wire id of the codec that produced it (§8.5):
+    // the DisplayInfo announce travels on another leg and can lose the race
+    // against the first fragments (or be lost outright), so the per-frame
+    // tag is what the client trusts to pick the decoder. Frames go out
+    // all-or-nothing: a partial frame is undecodable waste.
+    let mut tagged = Vec::with_capacity(packet.data.len() + 2);
+    tagged.extend_from_slice(&encoder.codec_type().wire_id().to_be_bytes());
+    tagged.extend_from_slice(&packet.data);
+    let frags = Fragmenter::split(0, frame_id, frame.capture_ts_ms, &tagged);
+    if !legs.send_frame(frags, packet.keyframe).await? {
         // The paced queue cannot hold this frame right now (a huge keyframe
         // over a busy link): skip it whole and force a keyframe on the next
         // one (the client's loss recovery would ask for it anyway).
@@ -967,6 +1003,9 @@ async fn handle_frame<T: ReliableTransport>(
         warn!(frame_id, "paced queue congested; whole frame dropped, keyframe forced");
         encoder.request_keyframe();
         return Ok(frame_id);
+    }
+    if packet.keyframe {
+        *last_keyframe = Instant::now();
     }
     if stats.last_log.elapsed() >= STATS_LOG_INTERVAL {
         stats.log_and_reset(encoder, pacer_rate);
@@ -1299,6 +1338,9 @@ async fn serve<T: ReliableTransport>(
     let mut audio_buf = Vec::with_capacity(1024);
     let mut frame_id = 0u32;
     let mut frame_stats = FrameStats::new(DISPLAY_QUEUE_DGRAMS);
+    // Seeded in the past so the very first frame goes out as a keyframe even
+    // if the encoder's first frame was not one for some reason.
+    let mut last_keyframe = Instant::now().checked_sub(KEYFRAME_SAFETY_INTERVAL).unwrap_or_else(Instant::now);
     loop {
         tokio::select! {
             msg = frame_rx.recv() => {
@@ -1313,6 +1355,7 @@ async fn serve<T: ReliableTransport>(
                             height,
                             &ctl.pacer_rate,
                             &mut frame_stats,
+                            &mut last_keyframe,
                         )
                         .await?;
                         if args.max_frames.is_some_and(|max| frame_id >= max) {

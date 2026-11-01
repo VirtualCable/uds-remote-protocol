@@ -93,15 +93,12 @@ struct IPolicyConfigVtbl {
     set_default_endpoint: unsafe extern "system" fn(*mut c_void, PCWSTR, ERole) -> HRESULT, // 13
 }
 
-/// Raw, reference-counted `IPolicyConfig` pointer.
+/// Raw, reference-counted `IPolicyConfig` pointer. Never stored across COM
+/// apartment lifetimes: it is created, used and released inside a single
+/// `CoInitializeEx`/`CoUninitialize` scope.
 struct PolicyConfig {
     this: *mut c_void,
 }
-
-// The PolicyConfig object is an in-proc MMDevAPI object callable from any
-// COM apartment (the reference C# probe calls it from an MTA thread), so
-// the guard can move across session-task threads.
-unsafe impl Send for PolicyConfig {}
 
 impl PolicyConfig {
     /// Activates the PolicyConfig object and queries its `IPolicyConfig`.
@@ -146,8 +143,15 @@ impl Drop for PolicyConfig {
 }
 
 /// RAII guard: restores the pre-session default endpoints on drop.
+///
+/// Only the `(role, device id)` pairs are stored — NOT the COM object. The
+/// PolicyConfig object lives in the MTA of whichever thread created it, and
+/// that apartment is torn down (`CoUninitialize`) when the switch call
+/// returns; calling the object later from a session-teardown thread derefs a
+/// vtable that may point into an already-unloaded MMDevAPI (AV at the vtable
+/// call). The drop therefore builds a fresh PolicyConfig inside its own COM
+/// scope instead.
 pub struct DefaultEndpointGuard {
-    policy: PolicyConfig,
     /// (role, device id) pairs captured before the switch.
     previous: Vec<(ERole, String)>,
 }
@@ -158,12 +162,19 @@ impl Drop for DefaultEndpointGuard {
         // session task); make sure COM is up here. `S_FALSE` (already MTA)
         // is fine; the balancing uninit below is harmless either way.
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        for (role, id) in &self.previous {
-            if let Err(err) = self.policy.set_default_endpoint(id, *role) {
-                warn!(error = %format!("{err:#}"), role = role.0, "cannot restore the default render endpoint");
+        match PolicyConfig::create() {
+            Ok(policy) => {
+                for (role, id) in &self.previous {
+                    if let Err(err) = policy.set_default_endpoint(id, *role) {
+                        warn!(error = %format!("{err:#}"), role = role.0, "cannot restore the default render endpoint");
+                    }
+                }
+                info!("default render endpoints restored");
+            }
+            Err(err) => {
+                warn!(error = %format!("{err:#}"), "cannot restore the default render endpoints");
             }
         }
-        info!("default render endpoints restored");
         unsafe { CoUninitialize() };
     }
 }
@@ -218,7 +229,9 @@ fn switch_default_to_uds_impl() -> Result<Option<DefaultEndpointGuard>> {
             .with_context(|| format!("SetDefaultEndpoint failed for role {}", role.0))?;
     }
     info!(endpoint = %uds_name, "default render endpoint switched to UDS virtual speakers");
-    Ok(Some(DefaultEndpointGuard { policy, previous }))
+    // The PolicyConfig object dies with this COM scope on purpose; the guard
+    // re-creates it at restore time (see DefaultEndpointGuard).
+    Ok(Some(DefaultEndpointGuard { previous }))
 }
 
 /// Finds the first active render endpoint whose friendly name contains

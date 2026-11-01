@@ -17,6 +17,7 @@
 //!   IPv6-safe MTU budget (see [`fragment_payload_max`]).
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crate::error::ProtocolError;
 
@@ -26,6 +27,10 @@ pub const HEADER_SIZE: usize = 12;
 /// Hard cap on datagram plaintext (must match `crypt::MAX_DATAGRAM_PAYLOAD`
 /// — kept as a literal so `protocol` does not depend on `crypt`).
 const MAX_DATAGRAM_PLAINTEXT: usize = 1180;
+
+/// Maximum fragments accepted per frame (~9.5 MiB of payload): a frame
+/// bigger than that is a mis-parse or an attack, not a real video frame.
+const MAX_FRAME_FRAGMENTS: u16 = 8192;
 
 /// Maximum payload (chunk) bytes per fragment.
 #[must_use]
@@ -85,12 +90,17 @@ struct Partial {
     capture_ts_ms: u32,
     buf: Vec<u8>,
     present: Vec<bool>,
+    /// Last fragment arrival; drives the clock-based eviction
+    /// ([`Reassembler::evict_stale`]) that complements the window one.
+    touched: Instant,
 }
 
 /// Reassembles fragments into complete frames, dropping incomplete ones.
 ///
 /// Tracks a sliding window of recent frame ids; stale partial frames are
-/// evicted when newer frames arrive (no clock needed, §6.2). Evicted
+/// evicted when newer frames arrive (§6.2) or when they go untouched for too
+/// long ([`Reassembler::evict_stale`], for losses right before a
+/// static-screen period where no newer frame ever arrives). Evicted
 /// incomplete frames are counted ([`Reassembler::dropped_frames`]) so the
 /// receiver can ask for a keyframe when loss makes the stream
 /// undecodable (§12.2).
@@ -130,6 +140,24 @@ impl Reassembler {
         self.dropped
     }
 
+    /// Evicts partials untouched for `max_age`, counting them as dropped.
+    ///
+    /// The window eviction only fires when a *newer* frame arrives, so a
+    /// loss right before a static-screen period (rect codecs send nothing
+    /// while nothing changes) would go unnoticed until the next change —
+    /// leaving a stale region on screen meanwhile. The receiver calls this
+    /// on a timer so loss detection never depends on future traffic.
+    pub fn evict_stale(&mut self, max_age: Duration) -> u64 {
+        let mut dropped_now = 0u64;
+        self.partials.retain(|_, p| {
+            let keep = p.touched.elapsed() < max_age;
+            dropped_now += u64::from(!keep);
+            keep
+        });
+        self.dropped += dropped_now;
+        dropped_now
+    }
+
     /// True if `frame_id` (display 0) has all its fragments.
     #[must_use]
     pub fn is_frame_complete(&self, frame_id: u32) -> bool {
@@ -157,7 +185,11 @@ impl Reassembler {
         let capture_ts_ms =
             u32::from_be_bytes(frag[8..12].try_into().expect("4-byte slice"));
         let chunk = &frag[HEADER_SIZE..];
-        if count == 0 || idx >= count || chunk.len() > fragment_payload_max() {
+        if count == 0
+            || count > MAX_FRAME_FRAGMENTS
+            || idx >= count
+            || chunk.len() > fragment_payload_max()
+        {
             return Err(ProtocolError::Truncated);
         }
 
@@ -186,6 +218,7 @@ impl Reassembler {
             capture_ts_ms,
             buf: vec![0u8; fragment_payload_max() * count as usize],
             present: vec![false; count as usize],
+            touched: Instant::now(),
         });
         if entry.count != count || entry.capture_ts_ms != capture_ts_ms {
             // Inconsistent restatement of the same frame: drop it.
@@ -195,6 +228,7 @@ impl Reassembler {
         if entry.present[idx as usize] {
             return Ok(None); // duplicate fragment
         }
+        entry.touched = Instant::now();
 
         let offset = idx as usize * fragment_payload_max();
         entry.buf[offset..offset + chunk.len()].copy_from_slice(chunk);

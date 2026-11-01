@@ -35,6 +35,11 @@ use crate::mic::{MicClient, MicMode};
 /// per this interval (riesgos §2.1).
 const KEYFRAME_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(500);
 
+/// How long a partial frame may sit untouched before it is counted as lost.
+/// Fragments of one frame leave the server back-to-back, so 250 ms covers
+/// even heavy reordering; the sweep runs on the presentation tick.
+const REASM_STALE_AGE: Duration = Duration::from_millis(250);
+
 /// Presentation-queue pump cadence (§9.1): held frames are presented when
 /// the audio clock reaches their timestamp.
 const PRESENT_TICK: Duration = Duration::from_millis(8);
@@ -281,22 +286,7 @@ impl Session {
                         return Ok(());
                     }
                     Self::flush_out(&mut stream, core).await?;
-                    // Ask for a keyframe when the stream is broken (decode
-                    // errors) or a frame was evicted incomplete; the rate
-                    // limit re-asks every 500 ms while the stream stays
-                    // broken.
-                    let dropped = core.reasm.dropped_frames();
-                    let awaiting = core.recovery_awaiting.load(Ordering::Relaxed);
-                    if (dropped > core.prev_dropped || awaiting)
-                        && core.last_key_req.is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_MIN_INTERVAL)
-                    {
-                        info!(dropped, awaiting, "stream broken; requesting keyframe");
-                        let req = ControlMessage::RequestKeyframe { display_id: 0 };
-                        stream.send(channel::CONTROL, &req.encode()?).await?;
-                        core.stats.record_keyframe_request();
-                        core.last_key_req = Some(Instant::now());
-                    }
-                    core.prev_dropped = dropped;
+                    Self::maybe_request_keyframe(&mut stream, core).await?;
                 }
                 res = stream.recv_into(&mut sbuf) => {
                     // Reliable S→C traffic while the UDP leg is up: cursor
@@ -382,6 +372,11 @@ impl Session {
                     }
                 }
                 _ = present_tick.tick() => {
+                    // A loss right before a static period produces no newer
+                    // frames to trigger the window eviction; sweep by age so
+                    // loss detection never depends on future traffic (§12.2).
+                    core.reasm.evict_stale(REASM_STALE_AGE);
+                    Self::maybe_request_keyframe(&mut stream, core).await?;
                     for ev in core.storage.pump() {
                         if !emit(&core.events, ev) {
                             return Ok(());
@@ -396,6 +391,32 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Asks the server for a keyframe when the stream is broken (decode
+    /// errors) or a frame was evicted incomplete; the rate limit re-asks
+    /// every 500 ms while the stream stays broken. Called after each
+    /// datagram and on the present tick (the stale sweep can evict without
+    /// new traffic).
+    async fn maybe_request_keyframe(
+        stream: &mut EncryptedStream<Box<dyn ReliableTransport>>,
+        core: &mut Core,
+    ) -> Result<()> {
+        let dropped = core.reasm.dropped_frames();
+        let awaiting = core.recovery_awaiting.load(Ordering::Relaxed);
+        if (dropped > core.prev_dropped || awaiting)
+            && core
+                .last_key_req
+                .is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_MIN_INTERVAL)
+        {
+            info!(dropped, awaiting, "stream broken; requesting keyframe");
+            let req = ControlMessage::RequestKeyframe { display_id: 0 };
+            stream.send(channel::CONTROL, &req.encode()?).await?;
+            core.stats.record_keyframe_request();
+            core.last_key_req = Some(Instant::now());
+        }
+        core.prev_dropped = dropped;
+        Ok(())
     }
 
     /// Flushes queued clipboard, storage and smartcard answers on the
@@ -666,30 +687,46 @@ impl DecodeWorker {
         }
     }
 
-    fn decode_frame(&mut self, complete: protocol::fragment::ReassembledFrame) {
-        let decoder = match self.decoders.entry(complete.display_id) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => {
-                if complete.display_id == 0 {
-                    warn!("no DisplayInfo received; assuming raw codec");
-                    match codec::build_decoder(VideoCodecType::Raw) {
-                        Ok(d) => e.insert(d),
-                        Err(e) => {
-                            warn!("cannot build the raw decoder: {e}");
-                            return;
-                        }
-                    }
-                } else {
-                    warn!(
-                        display_id = complete.display_id,
-                        "frame for unknown display; dropped"
-                    );
+    fn decode_frame(&mut self, mut complete: protocol::fragment::ReassembledFrame) {
+        // Every frame opens with the wire id (u16 BE) of the codec that
+        // produced it (§8.5): the DisplayInfo announce travels on another leg
+        // and can lose the race against the first fragments (or the datagram
+        // can be lost outright), so the per-frame tag — not the last
+        // announce — is authoritative for the decoder choice. Feeding a frame
+        // to the wrong decoder is not just a decode error: a VP9 bitstream
+        // read as a rects header yields garbage geometry and a multi-GB
+        // allocation.
+        if complete.data.len() < 2 {
+            return;
+        }
+        let codec_id = u16::from_be_bytes([complete.data[0], complete.data[1]]);
+        let payload = complete.data.split_off(2);
+        let Some(codec_type) = VideoCodecType::from_wire_id(codec_id) else {
+            warn!(codec_id, "frame with unknown codec tag; dropped");
+            return;
+        };
+        let needs_build = self
+            .decoders
+            .get(&complete.display_id)
+            .is_none_or(|d| d.codec_type() != codec_type);
+        if needs_build {
+            match codec::build_decoder(codec_type) {
+                Ok(dec) => {
+                    info!(display_id = complete.display_id, codec_id, "decoder (re)built from frame tag");
+                    self.decoders.insert(complete.display_id, dec);
+                }
+                Err(e) => {
+                    warn!(codec_id, "cannot build decoder: {e}");
                     return;
                 }
             }
-        };
+        }
+        let decoder = self
+            .decoders
+            .get_mut(&complete.display_id)
+            .expect("inserted above");
         match decoder.decode(&EncodedPacket {
-            data: complete.data,
+            data: payload,
             keyframe: true,
         }) {
             Ok(frame) => {

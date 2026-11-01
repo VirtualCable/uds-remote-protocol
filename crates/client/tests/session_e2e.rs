@@ -34,7 +34,9 @@ fn pattern() -> Vec<u8> {
     pixels
 }
 
-/// Raw-encoded fragments of the test pattern.
+/// Raw-encoded fragments of the test pattern, with the per-frame codec tag
+/// (u16 BE wire id) the real server prepends since the announce can lose
+/// the race against the first fragments (§8.5).
 fn pattern_fragments(frame_id: u32, capture_ts_ms: u32) -> Result<Vec<Vec<u8>>> {
     let pixels = pattern();
     let packet = RawEncoder::new().encode(&VideoFrame {
@@ -43,7 +45,9 @@ fn pattern_fragments(frame_id: u32, capture_ts_ms: u32) -> Result<Vec<Vec<u8>>> 
         stride: (WIDTH * 4) as usize,
         data: &pixels,
     })?;
-    Ok(Fragmenter::split(0, frame_id, capture_ts_ms, &packet.data))
+    let mut tagged = codec::VideoCodecType::Raw.wire_id().to_be_bytes().to_vec();
+    tagged.extend_from_slice(&packet.data);
+    Ok(Fragmenter::split(0, frame_id, capture_ts_ms, &tagged))
 }
 
 /// Replies to one decoded control datagram when it is a probe (§12.1).
