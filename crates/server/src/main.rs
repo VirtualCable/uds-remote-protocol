@@ -897,6 +897,10 @@ struct FrameStats {
     /// Smallest free datagram slots seen in the paced queue.
     min_queue_free: usize,
     last_log: Instant,
+    /// Process CPU anchor (ms, total since start) at the last interval edge.
+    cpu_anchor_ms: Option<f64>,
+    /// CPU consumed by this process during the last finished interval (ms).
+    cpu_ms_window: Option<u64>,
     /// Telemetry CSV sink (header already written); `None` = log only.
     csv: Option<std::io::BufWriter<std::fs::File>>,
 }
@@ -906,7 +910,51 @@ const STATS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// CSV header of the per-interval telemetry rows (§12.8). Keep it in sync
 /// with [`FrameStats::csv_row`].
-const STATS_CSV_HEADER: &str = "time,frames,sent,empty,skipped_bp,dropped_whole,avg_encode_ms,max_encode_ms,avg_kb,max_kb,min_queue_free,pacer_mbps,ladder_level,ladder_ema_pct,quality_fps,effective_fps,adaptive_load,rtt_ms,jitter_ms,loss_permille";
+const STATS_CSV_HEADER: &str = "time,frames,sent,empty,skipped_bp,dropped_whole,avg_encode_ms,max_encode_ms,avg_kb,max_kb,min_queue_free,pacer_mbps,ladder_level,ladder_ema_pct,quality_fps,effective_fps,adaptive_load,rtt_ms,jitter_ms,loss_permille,proc_cpu_ms";
+
+/// Process CPU time (user+kernel) in milliseconds, Windows `GetProcessTimes`
+/// or Linux `/proc/self/stat`. `None` on platforms without an implementation.
+#[cfg(all(windows, feature = "windows-capture"))]
+fn process_cpu_ms() -> Option<f64> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: all out-params point to valid FILETIME locals.
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    }
+    .ok()?;
+    let ticks = |ft: FILETIME| (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime);
+    // FILETIME ticks are 100 ns.
+    Some((ticks(kernel) + ticks(user)) as f64 / 10_000.0)
+}
+
+/// See the Windows variant.
+#[cfg(target_os = "linux")]
+fn process_cpu_ms() -> Option<f64> {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let after_paren = stat.rsplit(')').next()?;
+    let fields: Vec<&str> = after_paren.split_whitespace().collect();
+    let ticks = fields.get(11)?.parse::<f64>().ok()?
+        + fields.get(12)?.parse::<f64>().ok()?;
+    Some(ticks * 10.0) // USER_HZ=100 → 10 ms per tick
+}
+
+/// See the Windows variant.
+#[cfg(not(any(all(windows, feature = "windows-capture"), target_os = "linux")))]
+fn process_cpu_ms() -> Option<f64> {
+    None
+}
+
 
 impl FrameStats {
     fn new(queue_free: usize, csv_path: Option<&std::path::Path>) -> Self {
@@ -939,6 +987,8 @@ impl FrameStats {
             dropped_whole: 0,
             min_queue_free: queue_free,
             last_log: Instant::now(),
+            cpu_anchor_ms: process_cpu_ms(),
+            cpu_ms_window: None,
             csv,
         }
     }
@@ -973,8 +1023,11 @@ impl FrameStats {
         let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
+        let cpu_ms = self
+            .cpu_ms_window
+            .map_or_else(String::new, |c| c.to_string());
         format!(
-            "{time},{},{sent},{},{},{},{avg_encode_ms},{},{avg_kb},{},{},{},{level},{ema},{},{},{load},{rtt_ms},{jitter_ms},{loss}",
+            "{time},{},{sent},{},{},{},{avg_encode_ms},{},{avg_kb},{},{},{},{level},{ema},{},{},{load},{rtt_ms},{jitter_ms},{loss},{cpu_ms}",
             self.frames,
             self.empty,
             self.skipped_bp,
@@ -1013,6 +1066,17 @@ impl FrameStats {
             ladder_ema_pct = ema.map(|e| (e * 10.0).round() / 10.0),
             "display pipeline"
         );
+        if let Some(anchor) = self.cpu_anchor_ms {
+            let now = process_cpu_ms();
+            // Window deltas are small; rounding to whole ms is fine.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            {
+                self.cpu_ms_window = now.map(|n| (n - anchor).max(0.0).round() as u64);
+            }
+            if now.is_some() {
+                self.cpu_anchor_ms = now;
+            }
+        }
         if self.csv.is_some() {
             use std::io::Write as _;
             let row = self.csv_row(encoder, ctl);
