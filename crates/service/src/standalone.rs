@@ -35,6 +35,8 @@ pub struct StandaloneRuntime {
     pub creds: Option<Credentials>,
     /// Codec-ladder sensitivity overrides in wire form (empty = defaults).
     pub ladder: String,
+    /// Adaptive-fps overrides in wire form (empty = disabled, §12.7).
+    pub fps_adapt: String,
 }
 
 impl StandaloneRuntime {
@@ -104,5 +106,10 @@ pub fn load() -> Option<StandaloneRuntime> {
         output_name: standalone.output_name.clone(),
         creds,
         ladder: standalone.ladder.to_wire(),
+        fps_adapt: standalone
+            .adaptive_fps
+            .as_ref()
+            .map(server_config::AdaptiveFpsTuning::to_wire)
+            .unwrap_or_default(),
     })
 }

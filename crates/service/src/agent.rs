@@ -343,6 +343,7 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
             output_name: standalone.output_name.clone().unwrap_or_else(|| "UDS".to_owned()),
             preset: standalone.preset.clone(),
             ladder: standalone.ladder.clone(),
+            fps_adapt: standalone.fps_adapt.clone(),
         },
         None => service_proto::AgentConfig {
             key,
@@ -351,6 +352,7 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
             output_name: "UDS".to_owned(),
             preset: "ladder".to_owned(),
             ladder: String::new(),
+            fps_adapt: String::new(),
         },
     };
 

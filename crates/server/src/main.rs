@@ -139,6 +139,7 @@ fn parse_args() -> Result<Args> {
             args.output = server::capture::OutputSelector::NameContains(config.output_name);
             args.preset = config.preset;
             args.ladder = config.ladder;
+            args.fps_adapt = config.fps_adapt;
             args.source = "dxgi".to_string();
             key_seen = true;
             continue;
