@@ -40,7 +40,7 @@ use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 use windows::core::PCWSTR;
 
 /// Lab credential file: username / domain / password, one per line.
-const CREDS_PATH: &str = r"C:\ProgramData\UdsRp\credprov-creds.conf";
+pub(crate) const CREDS_PATH: &str = r"C:\ProgramData\UdsRp\credprov-creds.conf";
 
 /// How long to wait for a response frame before re-checking the stop flag.
 const POLL: Duration = Duration::from_millis(500);

@@ -15,6 +15,8 @@ mod install;
 #[cfg(windows)]
 mod logging;
 #[cfg(windows)]
+mod sas;
+#[cfg(windows)]
 mod service_main;
 #[cfg(windows)]
 mod standalone;

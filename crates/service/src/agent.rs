@@ -51,6 +51,11 @@ const MUTEX_GRACE: Duration = Duration::from_secs(15);
 /// Maximum respawns per service run before giving up (crash-loop guard).
 const MAX_RESPAWNS: u32 = 5;
 
+/// Minimum interval between synthetic SAS attempts while waiting for the
+/// auto-logon to produce an interactive session (the logon itself takes
+/// several seconds; re-sending faster would just strobe the secure screen).
+const SAS_COOLDOWN: Duration = Duration::from_secs(15);
+
 /// RAII wrapper for a Win32 handle.
 struct OwnedHandle(HANDLE);
 
@@ -347,6 +352,27 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
         },
     };
 
+    // Unattended auto-logon (see sas.rs): while no interactive session
+    // exists AND we hold credentials the credential provider can log on
+    // with, nudge LogonUI with a synthetic SAS — without CAD satisfied it
+    // never enumerates providers, so the auto-logon would wait for a human
+    // pressing Ctrl+Alt+Del forever (a machine that boots unattended, e.g.
+    // after a watchdog reset, must come back on its own).
+    let has_logon_creds = standalone.is_some_and(|s| s.creds.is_some())
+        || std::path::Path::new(crate::credprov::CREDS_PATH).exists();
+    let mut last_sas: Option<Instant> = None;
+    let nudge_towards_logon = |last_sas: &mut Option<Instant>| {
+        if has_logon_creds
+            && last_sas.is_none_or(|t| t.elapsed() >= SAS_COOLDOWN)
+        {
+            match crate::sas::send_sas() {
+                Ok(()) => info!("no interactive session; synthetic SAS sent to trigger the auto-logon"),
+                Err(err) => warn!(error = %format!("{err:#}"), "cannot send the synthetic SAS"),
+            }
+            *last_sas = Some(Instant::now());
+        }
+    };
+
     while !stop.load(Ordering::Relaxed) {
         match &agent {
             None if respawns >= MAX_RESPAWNS => {
@@ -362,9 +388,13 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
                     respawns += 1;
                     agent = Some(spawned);
                 }
-                Ok(None) => std::thread::sleep(Duration::from_secs(2)), // no console session yet
+                Ok(None) => {
+                    nudge_towards_logon(&mut last_sas);
+                    std::thread::sleep(Duration::from_secs(2)); // no console session yet
+                }
                 Err(err) => {
                     error!(error = %format!("{err:#}"), "cannot spawn the session agent");
+                    nudge_towards_logon(&mut last_sas);
                     std::thread::sleep(Duration::from_secs(5));
                 }
             },
