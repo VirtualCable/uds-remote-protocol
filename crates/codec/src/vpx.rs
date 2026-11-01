@@ -79,18 +79,22 @@ struct VpxEncoder {
 
 impl VpxEncoder {
     fn new(codec: VideoCodecType, width: u32, height: u32, kbps: u32) -> Result<Self> {
-        Self::with_options(codec, width, height, kbps, None)
+        Self::with_options(codec, width, height, kbps, None, None)
     }
 
     /// `cpu_used`: libvpx speed/quality knob (VP9: 0 best/slowest .. 8
     /// fastest; VP8: +16 best .. -16 fastest). `None` uses the realtime
     /// defaults tuned for interactive desktop (VP9: 6, VP8: -10).
+    /// `threads`: row-MT worker count; `None` keeps 4. On small VMs (2-4
+    /// vCPU) 2 threads leave headroom for the capture loop and the rest of
+    /// the pipeline.
     fn with_options(
         codec: VideoCodecType,
         width: u32,
         height: u32,
         kbps: u32,
         cpu_used: Option<i32>,
+        threads: Option<u32>,
     ) -> Result<Self> {
         let iface = match codec {
             VideoCodecType::Vp9 => Iface::Vp9Enc,
@@ -120,7 +124,7 @@ impl VpxEncoder {
             cfg.g_lag_in_frames = 0; // realtime: no frame buffering
             cfg.g_error_resilient = sys::VPX_ERROR_RESILIENT_DEFAULT;
             cfg.kf_mode = sys::vpx_kf_mode_VPX_KF_DISABLED; // keyframes on demand only
-            cfg.g_threads = 4;
+            cfg.g_threads = threads.unwrap_or(4).clamp(1, 16);
 
             let mut ctx: sys::vpx_codec_ctx_t = std::mem::zeroed();
             let e = sys::vpx_codec_enc_init_ver(
@@ -403,12 +407,25 @@ impl Vp9Encoder {
     /// Creates a VP9 encoder with an explicit `cpu_used` (0 best/slowest ..
     /// 8 fastest; realtime default is 6).
     pub fn with_cpu_used(width: u32, height: u32, kbps: u32, cpu_used: i32) -> Result<Self> {
+        Self::with_tuning(width, height, kbps, Some(cpu_used), None)
+    }
+
+    /// Creates a VP9 encoder with explicit `cpu_used` and row-MT `threads`
+    /// (`None` keeps the realtime defaults).
+    pub fn with_tuning(
+        width: u32,
+        height: u32,
+        kbps: u32,
+        cpu_used: Option<i32>,
+        threads: Option<u32>,
+    ) -> Result<Self> {
         Ok(Self(VpxEncoder::with_options(
             VideoCodecType::Vp9,
             width,
             height,
             kbps,
-            Some(cpu_used),
+            cpu_used,
+            threads,
         )?))
     }
 }
@@ -472,6 +489,7 @@ impl Vp8Encoder {
             height,
             kbps,
             Some(cpu_used),
+            None,
         )?))
     }
 }

@@ -183,6 +183,12 @@ pub struct LadderTuning {
     pub dwell_max_ms: Option<u64>,
     /// EMA smoothing factor (0, 1]: weight of the newest sample.
     pub ema_alpha: Option<f64>,
+    /// VP9 `cpu_used` for the High regime (0 best/slowest .. 8 fastest;
+    /// default 8 — the ladder is the low-latency path).
+    pub vp9_cpu_used: Option<i32>,
+    /// Row-MT worker threads for the VP9 encoder (default 4; use 2 on small
+    /// VMs to leave headroom for capture and the rest of the pipeline).
+    pub threads: Option<u32>,
 }
 
 impl LadderTuning {
@@ -214,6 +220,12 @@ impl LadderTuning {
         }
         if let Some(v) = self.ema_alpha {
             parts.push(format!("ema_alpha={v}"));
+        }
+        if let Some(v) = self.vp9_cpu_used {
+            parts.push(format!("vp9_cpu={v}"));
+        }
+        if let Some(v) = self.threads {
+            parts.push(format!("threads={v}"));
         }
         parts.join(",")
     }

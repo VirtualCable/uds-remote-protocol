@@ -1890,13 +1890,28 @@ impl ServerEncoder {
     }
 }
 
-/// Resolves the ladder policy: balanced defaults plus `key=value` overrides
+/// Ladder tuning parsed from the `--ladder` spec: the sensitivity policy
+/// plus the VP9 encoder knobs (not part of `LadderPolicy`, which is pure
+/// switch logic).
+#[cfg(feature = "ladder")]
+struct LadderKnobs {
+    policy: codec::LadderPolicy,
+    vp9_cpu: Option<i32>,
+    threads: Option<u32>,
+}
+
+/// Resolves the ladder tuning: balanced defaults plus `key=value` overrides
 /// from `--ladder` / the service config frame (§8.5 sensitivity tuning).
 /// Unknown keys and malformed values are rejected — a typo must not silently
 /// tune nothing.
 #[cfg(feature = "ladder")]
-fn ladder_policy(spec: &str) -> Result<codec::LadderPolicy> {
-    let mut policy = codec::LadderPolicy::balanced();
+fn ladder_knobs(spec: &str) -> Result<LadderKnobs> {
+    let mut knobs = LadderKnobs {
+        policy: codec::LadderPolicy::balanced(),
+        vp9_cpu: None,
+        threads: None,
+    };
+    let policy = &mut knobs.policy;
     for pair in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let (key, value) = pair
             .split_once('=')
@@ -1921,6 +1936,8 @@ fn ladder_policy(spec: &str) -> Result<codec::LadderPolicy> {
                     Duration::from_millis(value.parse().context("bad dwell_max_ms")?);
             }
             "ema_alpha" => policy.ema_alpha = value.parse().context("bad ema_alpha")?,
+            "vp9_cpu" => knobs.vp9_cpu = Some(value.parse().context("bad vp9_cpu")?),
+            "threads" => knobs.threads = Some(value.parse().context("bad threads")?),
             other => bail!("unknown ladder override: {other}"),
         }
     }
@@ -1932,7 +1949,7 @@ fn ladder_policy(spec: &str) -> Result<codec::LadderPolicy> {
         (0.0..=1.0).contains(&policy.ema_alpha) && policy.ema_alpha > 0.0,
         "ladder ema_alpha must be in (0, 1]"
     );
-    Ok(policy)
+    Ok(knobs)
 }
 
 /// Builds the display encoder from `--preset`: a named preset, or the codec
@@ -1942,8 +1959,19 @@ fn build_encoder(args: &Args, width: u32, height: u32) -> Result<ServerEncoder> 
     #[cfg(feature = "ladder")]
     if args.preset == "ladder" {
         let kbps = args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS);
-        let policy = ladder_policy(&args.ladder)?;
-        let encoder = codec::LadderEncoder::new(width, height, policy, kbps, 80)?;
+        let knobs = ladder_knobs(&args.ladder)?;
+        let encoder = match (knobs.vp9_cpu, knobs.threads) {
+            (None, None) => codec::LadderEncoder::new(width, height, knobs.policy, kbps, 80)?,
+            (cpu, threads) => codec::LadderEncoder::with_tuning(
+                width,
+                height,
+                knobs.policy,
+                kbps,
+                80,
+                cpu.unwrap_or(8),
+                threads.unwrap_or(4),
+            )?,
+        };
         info!(width, height, kbps, overrides = %args.ladder, "codec ladder ready (rects-jpeg <-> vp9)");
         return Ok(ServerEncoder::Ladder(Box::new(encoder)));
     }
@@ -2108,5 +2136,32 @@ async fn run() -> Result<()> {
         if let Err(e) = serve(raw, &ticket, &args.key, &args).await {
             warn!(%peer, "session ended: {e:#}");
         }
+    }
+}
+
+#[cfg(all(test, feature = "ladder"))]
+mod ladder_knobs_tests {
+    use super::*;
+
+    #[test]
+    fn empty_spec_keeps_defaults() {
+        let knobs = ladder_knobs("").unwrap();
+        assert_eq!(knobs.vp9_cpu, None);
+        assert_eq!(knobs.threads, None);
+        let balanced = codec::LadderPolicy::balanced();
+        assert_eq!(knobs.policy.up_threshold_pct, balanced.up_threshold_pct);
+    }
+
+    #[test]
+    fn encoder_knobs_parse() {
+        let knobs = ladder_knobs("vp9_cpu=6,threads=2").unwrap();
+        assert_eq!(knobs.vp9_cpu, Some(6));
+        assert_eq!(knobs.threads, Some(2));
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected() {
+        assert!(ladder_knobs("vp9cpu=6").is_err());
+        assert!(ladder_knobs("threads=abc").is_err());
     }
 }

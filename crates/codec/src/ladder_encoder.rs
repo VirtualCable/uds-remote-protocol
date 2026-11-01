@@ -44,13 +44,29 @@ pub struct LadderEncoder {
 
 impl LadderEncoder {
     /// Creates the composite encoder: JPEG at `jpeg_quality`, VP9 targeting
-    /// `vp9_kbps`, decisions driven by `policy`.
+    /// `vp9_kbps`, decisions driven by `policy`. The VP9 leg runs at
+    /// `cpu_used` 8 with 4 row-MT threads (the ladder is the low-latency
+    /// path; see the §18.15 CPU sweep).
     pub fn new(
         width: u32,
         height: u32,
         policy: LadderPolicy,
         vp9_kbps: u32,
         jpeg_quality: i32,
+    ) -> Result<Self> {
+        Self::with_tuning(width, height, policy, vp9_kbps, jpeg_quality, 8, 4)
+    }
+
+    /// Full tuning knob set: explicit VP9 `cpu_used` and row-MT thread count
+    /// (clamp to what the host can spare; 2 threads on small VMs).
+    pub fn with_tuning(
+        width: u32,
+        height: u32,
+        policy: LadderPolicy,
+        vp9_kbps: u32,
+        jpeg_quality: i32,
+        vp9_cpu_used: i32,
+        threads: u32,
     ) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(CodecError::BadDimensions {
@@ -65,7 +81,7 @@ impl LadderEncoder {
             height,
             ladder: Ladder::new(policy, Instant::now()),
             jpeg: JpegRectsEncoder::new(width, height, jpeg_quality)?,
-            vp9: Vp9Encoder::new(width, height, vp9_kbps)?,
+            vp9: Vp9Encoder::with_tuning(width, height, vp9_kbps, Some(vp9_cpu_used), Some(threads))?,
             prev: None,
             pending_change: None,
             force_full: false,
