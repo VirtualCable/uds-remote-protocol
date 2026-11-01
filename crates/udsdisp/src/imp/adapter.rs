@@ -1,10 +1,14 @@
 //! Adapter initialization: `EvtDeviceD0Entry` builds the adapter capabilities
 //! and starts the asynchronous IddCx adapter init; the init-finished callback
-//! plugs the default monitor in.
+//! starts the service-liveness watchdog. **No monitor is created here**: the
+//! adapter always comes up with zero monitors and the orchestrator service
+//! hot-plugs one per active session through the control channel — a monitor
+//! that outlives its service becomes a ghost display that swallows the
+//! console input (see the study, sections 18.21-18.22).
 
 use wdk_sys::{NTSTATUS, WDFDEVICE, WDF_POWER_DEVICE_STATE};
 
-use super::{iddcx, iddcx::bindings, log_line, monitor, shared};
+use super::{iddcx, iddcx::bindings, log_line, shared, watchdog};
 use crate::logic;
 
 /// `size_of::<T>()` as `u32` for IddCx `Size` fields; every structure involved
@@ -77,26 +81,24 @@ pub unsafe extern "C" fn evt_device_d0_entry(
     status
 }
 
-/// `EvtIddCxAdapterInitFinished`: the adapter is ready; plug in the default
-/// monitor (single-monitor product default; the code is handle-keyed so more
-/// monitors can be added later).
+/// `EvtIddCxAdapterInitFinished`: the adapter is ready. No monitor is plugged
+/// here — the service creates one per session via the control channel. This
+/// callback only starts the watchdog that detaches every monitor if the
+/// service dies.
 ///
 /// # Safety
 /// Registered with IddCx in `IDD_CX_CLIENT_CONFIG`; called with valid args.
 pub unsafe extern "C" fn on_init_finished(
-    adapter: bindings::IDDCX_ADAPTER,
+    _adapter: bindings::IDDCX_ADAPTER,
     in_args: *const bindings::IDARG_IN_ADAPTER_INIT_FINISHED,
 ) -> NTSTATUS {
     // SAFETY: guaranteed by IddCx for the duration of the callback.
     let init_status = unsafe { (*in_args).AdapterInitStatus };
-    log_line(&format!("EvtIddCxAdapterInitFinished status={init_status:#010x}"));
+    log_line(&format!(
+        "EvtIddCxAdapterInitFinished status={init_status:#010x} (no default monitor; watchdog starting)"
+    ));
     if init_status >= 0 {
-        let status = monitor::create_and_arrive(
-            adapter,
-            0,
-            logic::modes_with_preferred(logic::DEFAULT_MONITOR_MODES[0]),
-        );
-        log_line(&format!("default monitor create_and_arrive -> {status:#010x}"));
+        watchdog::spawn();
     }
     0
 }

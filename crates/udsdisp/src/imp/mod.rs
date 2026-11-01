@@ -7,6 +7,7 @@ mod iddcx;
 mod monitor;
 mod shared;
 mod swapchain;
+mod watchdog;
 
 use std::{fs::OpenOptions, io::Write as _, sync::Once};
 

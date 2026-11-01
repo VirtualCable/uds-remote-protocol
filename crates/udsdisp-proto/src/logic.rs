@@ -339,6 +339,59 @@ pub fn parse_mode(text: &str) -> Option<Mode> {
     Some(Mode::new(w.parse().ok()?, h.parse().ok()?, vsync))
 }
 
+// ---------------------------------------------------------------------------
+// Service-liveness watchdog: the orchestrator service holds the named mutex
+// [`WATCHDOG_MUTEX_NAME`] for its whole lifetime, and a driver thread waits on
+// it. The wait result fully determines what the driver must do
+// ([`watchdog_action`]): a monitor may only outlive a **live, mutex-owning**
+// service — this is what keeps a crashed service from leaving a ghost display
+// that swallows the console input (see the study, section 18.21).
+// ---------------------------------------------------------------------------
+
+/// Name of the service-liveness mutex. `Local\` scope: both the service
+/// (SYSTEM) and the UMDF driver (WUDFHost) live in session 0, and `Global\`
+/// would add privilege/DACL friction for no gain.
+pub const WATCHDOG_MUTEX_NAME: &str = r"Local\UDSRP-DisplayOwner";
+
+/// What the driver watchdog must do after a wait on the owner mutex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchdogAction {
+    /// The wait timed out: someone else owns the mutex, i.e. the service is
+    /// alive. Keep every monitor as is.
+    ServiceAlive,
+    /// The wait acquired the mutex in its normal state: nobody owned it
+    /// (clean service stop, or monitors created by hand with `udsdisp-ctl`
+    /// in the lab). Release immediately and touch nothing — a free mutex is
+    /// not proof of a crash.
+    FreeNoop,
+    /// The wait acquired the mutex as abandoned: the previous owner died
+    /// without releasing it. Detach every monitor, then release.
+    DetachAll,
+}
+
+/// Maps the raw wait outcome on [`WATCHDOG_MUTEX_NAME`] to the driver action.
+/// `WaitOutcome` mirrors the Win32 `WaitForSingleObject` results so this stays
+/// host-independent and unit-testable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// `WAIT_TIMEOUT`: the mutex stayed owned for the whole wait.
+    Timeout,
+    /// `WAIT_OBJECT_0`: acquired, previous owner released it cleanly.
+    Acquired,
+    /// `WAIT_ABANDONED`: acquired, previous owner died holding it.
+    Abandoned,
+}
+
+/// The watchdog decision: only an abandoned mutex proves the service died.
+#[must_use]
+pub const fn watchdog_action(outcome: WaitOutcome) -> WatchdogAction {
+    match outcome {
+        WaitOutcome::Timeout => WatchdogAction::ServiceAlive,
+        WaitOutcome::Acquired => WatchdogAction::FreeNoop,
+        WaitOutcome::Abandoned => WatchdogAction::DetachAll,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +545,26 @@ mod tests {
         assert!(Mode::new(1280, 720, 60).is_supported());
         assert!(Mode::new(2560, 1440, 60).is_supported());
         assert!(!Mode::new(640, 480, 60).is_supported());
+    }
+
+    #[test]
+    fn watchdog_detaches_only_on_abandoned() {
+        assert_eq!(
+            watchdog_action(WaitOutcome::Timeout),
+            WatchdogAction::ServiceAlive
+        );
+        assert_eq!(
+            watchdog_action(WaitOutcome::Acquired),
+            WatchdogAction::FreeNoop
+        );
+        assert_eq!(
+            watchdog_action(WaitOutcome::Abandoned),
+            WatchdogAction::DetachAll
+        );
+    }
+
+    #[test]
+    fn watchdog_mutex_is_local_scoped() {
+        assert!(WATCHDOG_MUTEX_NAME.starts_with(r"Local\"));
     }
 }

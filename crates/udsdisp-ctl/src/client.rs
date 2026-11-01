@@ -11,7 +11,7 @@
 
 use anyhow::{Context as _, bail};
 use udsdisp_proto::logic;
-pub use udsdisp_proto::logic::{CursorStatus, Mode, MonitorStatus};
+pub use udsdisp_proto::logic::{CursorStatus, Mode, MonitorStatus, WATCHDOG_MUTEX_NAME};
 use windows::Win32::Devices::DeviceAndDriverInstallation::{
     DIGCF_DEVICEINTERFACE, DIGCF_PRESENT, HDEVINFO, SP_DEVICE_INTERFACE_DATA,
     SP_DEVICE_INTERFACE_DETAIL_DATA_W, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInterfaces,

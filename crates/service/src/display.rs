@@ -17,19 +17,65 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tracing::{error, info, warn};
-use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::{
-    OpenEventW, SYNCHRONIZATION_ACCESS_RIGHTS, WaitForSingleObject,
+    CreateMutexW, OpenEventW, ReleaseMutex, SYNCHRONIZATION_ACCESS_RIGHTS, WaitForSingleObject,
 };
 
 /// SYNCHRONIZE access right: enough to wait on the event, we never set/reset it.
 const SYNCHRONIZE: SYNCHRONIZATION_ACCESS_RIGHTS = SYNCHRONIZATION_ACCESS_RIGHTS(0x0010_0000);
-use windows::core::HSTRING;
+use windows::core::{HSTRING, PCWSTR};
 
 use crate::adapter;
 
 /// Named event the session agent sets while a remote client is connected.
 const REMOTE_SESSION_EVENT: &str = r"Global\UDSRP-RemoteSession";
+
+/// RAII guard owning the display-owner mutex (the `WATCHDOG_MUTEX_NAME` from
+/// `udsdisp-proto`, re-exported by `udsdisp-ctl`) for the whole service
+/// lifetime: the driver's watchdog thread detaches every monitor if this
+/// handle dies while owned (`WAIT_ABANDONED`), so a `taskkill /F` on the
+/// service can no longer strand a ghost display (study §18.21/§18.22).
+struct OwnerMutex(HANDLE);
+
+impl OwnerMutex {
+    /// Creates (or opens) the mutex and takes ownership. A previous owner
+    /// that died holding it shows up as `WAIT_ABANDONED` here, which still
+    /// leaves us as the new owner. If another live process owns it we keep
+    /// running anyway — display management degrades to no-watchdog, exactly
+    /// like before this guard existed.
+    fn acquire() -> Option<Self> {
+        let wide: Vec<u16> = udsdisp_client::client::WATCHDOG_MUTEX_NAME
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` is a valid null-terminated name; default security.
+        let handle = unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) }.ok()?;
+        // SAFETY: `handle` is live and ours.
+        let wait = unsafe { WaitForSingleObject(handle, 0) };
+        if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+            info!("display-owner mutex acquired (watchdog armed)");
+            Some(Self(handle))
+        } else {
+            warn!("display-owner mutex held by another process; watchdog will see us as dead");
+            // SAFETY: `handle` is ours and unowned, safe to close.
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            None
+        }
+    }
+}
+
+impl Drop for OwnerMutex {
+    fn drop(&mut self) {
+        // SAFETY: we own the mutex and the handle is ours.
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
 
 /// How often the manager re-evaluates the signal.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -57,6 +103,10 @@ pub fn spawn(stop: &'static AtomicBool, attach_on_session: bool) {
 }
 
 fn run(stop: &AtomicBool, attach_on_session: bool) {
+    // Hold the owner mutex for the whole service lifetime so the driver
+    // watchdog can tell a dead service (abandoned mutex) from a live one.
+    let _owner = OwnerMutex::acquire();
+
     let adapter_enabled = match adapter::set_enabled(true) {
         Ok(found) => {
             if !found {
