@@ -270,6 +270,29 @@ mod win {
                 .unwrap_or(0);
             let ny = i32::try_from((i64::from(dy - oy) * 65_535 / i64::from(h)).clamp(0, 65_535))
                 .unwrap_or(0);
+            // Diagnostics (§10 bring-up): one line per second at most, so a
+            // moved-but-misplaced pointer is debuggable from agent.log
+            // without flooding it.
+            {
+                use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+                static LAST_LOG: AtomicU64 = AtomicU64::new(0);
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let prev = LAST_LOG.load(AtomicOrdering::Relaxed);
+                if now_ms.saturating_sub(prev) >= 1000
+                    && LAST_LOG
+                        .compare_exchange(prev, now_ms, AtomicOrdering::Relaxed, AtomicOrdering::Relaxed)
+                        .is_ok()
+                {
+                    tracing::info!(
+                        x, y, left, top, ox, oy, w, h, nx, ny,
+                        device = ?self.output_device,
+                        "pointer move mapping"
+                    );
+                }
+            }
             Self::send(&[Self::mouse(
                 MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                 0,
