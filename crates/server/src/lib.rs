@@ -22,6 +22,7 @@ pub use server_config as config;
 pub mod display_topology;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod dxgi;
+pub mod fps;
 pub mod input;
 pub mod mic;
 pub mod pacer;

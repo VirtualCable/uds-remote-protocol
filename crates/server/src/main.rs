@@ -73,6 +73,8 @@ struct Args {
     preset: String,
     /// Codec-ladder sensitivity overrides ("k=v,..."; empty = defaults).
     ladder: String,
+    /// Adaptive-fps overrides ("k=v,..."; empty = disabled, §12.7).
+    fps_adapt: String,
     bitrate: Option<u32>,
     width: u32,
     height: u32,
@@ -95,6 +97,7 @@ fn parse_args() -> Result<Args> {
         output: server::capture::OutputSelector::Index(0),
         preset: "raw".to_string(),
         ladder: String::new(),
+        fps_adapt: String::new(),
         bitrate: None,
         width: 640,
         height: 480,
@@ -163,6 +166,7 @@ fn parse_args() -> Result<Args> {
             }
             "--preset" => args.preset = value,
             "--ladder" => args.ladder = value,
+            "--fps-adapt" => args.fps_adapt = value,
             "--bitrate" => args.bitrate = Some(value.parse().context("bad --bitrate")?),
             "--width" => args.width = value.parse().context("bad --width")?,
             "--height" => args.height = value.parse().context("bad --height")?,
@@ -212,6 +216,11 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
         args.fps = standalone.fps;
         args.preset.clone_from(&standalone.preset);
         args.ladder = standalone.ladder.to_wire();
+        args.fps_adapt = standalone
+            .adaptive_fps
+            .as_ref()
+            .map(server::config::AdaptiveFpsTuning::to_wire)
+            .unwrap_or_default();
         args.audio = standalone.channels.audio;
         info!("standalone mode: fixed ticket active (reference implementation)");
     }
@@ -747,32 +756,24 @@ const DISPLAY_QUEUE_DGRAMS: usize = 2048;
 /// the loss signal on every report (hysteresis, §12.5); when the level
 /// changes, the new targets are applied: video encoder bitrate, capture fps,
 /// codec-ladder regime force and the audio thread's bitrate knob (§12.5).
-#[allow(clippy::too_many_arguments)]
 fn handle_metrics(
-    quality: &mut Option<protocol::QualityController>,
-    forced_video: &mut bool,
-    audio_control: Option<&server::audio::AudioControl>,
-    fec_on: &mut bool,
+    ctl: &mut ControlState,
     encoder: &mut ServerEncoder,
-    fps_shared: &AtomicU32,
-    video_ceiling_kbps: u32,
-    audio_ceiling_kbps: u32,
-    pacer_rate: &PacerRate,
     rtt_micros: u64,
     jitter_micros: u64,
     loss_permille: u16,
 ) {
     let loss = f64::from(loss_permille) / 1000.0;
     // FEC is loss-driven, not level-driven: evaluate it on every report.
-    if let Some(ac) = audio_control {
-        let fec = protocol::fec_update(*fec_on, loss);
-        if fec != *fec_on {
-            *fec_on = fec;
+    if let Some(ac) = &ctl.audio_control {
+        let fec = protocol::fec_update(ctl.fec_on, loss);
+        if fec != ctl.fec_on {
+            ctl.fec_on = fec;
             ac.set_fec(fec);
             info!(fec, loss_permille, "audio FEC toggled");
         }
     }
-    let controller = quality.get_or_insert_with(|| {
+    let controller = ctl.quality.get_or_insert_with(|| {
         info!(baseline_rtt_micros = rtt_micros, "quality baseline set");
         protocol::QualityController::new(protocol::QualityPolicy::standard(rtt_micros))
     });
@@ -786,8 +787,8 @@ fn handle_metrics(
     };
     let t = protocol::targets(
         event.level,
-        video_ceiling_kbps,
-        audio_ceiling_kbps,
+        ctl.video_ceiling_kbps,
+        ctl.audio_ceiling_kbps,
         controller.policy(),
     );
     info!(
@@ -803,20 +804,23 @@ fn handle_metrics(
     }
     // UDP burst pacing follows the video target (§12.6): level changes move
     // the token-bucket rate together with the encoder.
-    pacer_rate.set_from_video_kbps(t.video_kbps);
-    if let Some(ac) = audio_control {
+    ctl.pacer_rate.set_from_video_kbps(t.video_kbps);
+    if let Some(ac) = &ctl.audio_control {
         // The audio thread applies the new target at the next frame (§12.5).
         ac.set_target_kbps(t.audio_kbps);
     }
-    fps_shared.store(t.fps, Ordering::Relaxed);
-    match (event.force_video_codec, *forced_video) {
+    // The quality target is a ceiling; the adaptive-fps controller (§12.7)
+    // may still hold the capture below it when the encoder is the limit.
+    ctl.quality_fps = t.fps;
+    ctl.apply_fps();
+    match (event.force_video_codec, ctl.forced_video) {
         (true, false) => {
             encoder.force_video_regime(true);
-            *forced_video = true;
+            ctl.forced_video = true;
         }
         (false, true) => {
             encoder.force_video_regime(false);
-            *forced_video = false;
+            ctl.forced_video = false;
         }
         _ => {}
     }
@@ -942,7 +946,7 @@ async fn handle_frame<T: ReliableTransport>(
     frame_id: u32,
     width: u32,
     height: u32,
-    pacer_rate: &PacerRate,
+    ctl: &mut ControlState,
     stats: &mut FrameStats,
     last_keyframe: &mut Instant,
 ) -> Result<u32> {
@@ -974,6 +978,8 @@ async fn handle_frame<T: ReliableTransport>(
     let encode_micros = u64::try_from(encode_start.elapsed().as_micros()).unwrap_or(u64::MAX);
     stats.encode_micros += encode_micros;
     stats.max_encode_micros = stats.max_encode_micros.max(encode_micros);
+    // Adaptive fps (§12.7): the encoder's own cost steers the capture rate.
+    ctl.observe_encode(Duration::from_micros(encode_micros));
     if encoder.take_codec_change().is_some() {
         // Codec ladder switched regime: re-announce before the fragments so
         // the peer rebuilds its decoder (§8.5).
@@ -1008,7 +1014,7 @@ async fn handle_frame<T: ReliableTransport>(
         *last_keyframe = Instant::now();
     }
     if stats.last_log.elapsed() >= STATS_LOG_INTERVAL {
-        stats.log_and_reset(encoder, pacer_rate);
+        stats.log_and_reset(encoder, &ctl.pacer_rate);
     }
     Ok(frame_id.wrapping_add(1))
 }
@@ -1328,6 +1334,15 @@ async fn serve<T: ReliableTransport>(
         audio_control,
         fec_on: false,
         pacer_rate,
+        fps_shared: Arc::clone(&fps_shared),
+        quality_fps: args.fps.max(1),
+        fps_adapter: if args.fps_adapt.is_empty() {
+            None
+        } else {
+            let policy = server::fps::FpsPolicy::from_wire(&args.fps_adapt)?;
+            info!(overrides = %args.fps_adapt, "adaptive fps enabled");
+            Some(server::fps::FpsAdapter::new(policy, args.fps.max(1)))
+        },
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -1353,7 +1368,7 @@ async fn serve<T: ReliableTransport>(
                             frame_id,
                             width,
                             height,
-                            &ctl.pacer_rate,
+                            &mut ctl,
                             &mut frame_stats,
                             &mut last_keyframe,
                         )
@@ -1414,7 +1429,7 @@ async fn serve<T: ReliableTransport>(
                 } else if ch == channel::SMARTCARD {
                     scard_router.handle_packet(&ctrl_buf[..n]);
                 } else {
-                    handle_stream_packet(&mut ctl, &mut encoder, &fps_shared, ch, &ctrl_buf[..n]);
+                    handle_stream_packet(&mut ctl, &mut encoder, ch, &ctrl_buf[..n]);
                 }
             }
             _ = storage_tick.tick(), if spool.as_ref().is_some_and(server::storage::Spool::has_pending) => {
@@ -1601,6 +1616,45 @@ struct ControlState {
     fec_on: bool,
     /// UDP burst pacer rate knob (§12.6); retuned on every level change.
     pacer_rate: PacerRate,
+    /// Capture-fps knob shared with the capture thread.
+    fps_shared: Arc<AtomicU32>,
+    /// Latest quality-controller fps target (a ceiling for the adapter).
+    quality_fps: u32,
+    /// Adaptive-fps controller (§12.7); `None` when not configured.
+    fps_adapter: Option<server::fps::FpsAdapter>,
+}
+
+impl ControlState {
+    /// The fps the capture thread should run at: the quality controller's
+    /// target, lowered by the adaptive-fps controller when the encoder
+    /// itself is the bottleneck (§12.7).
+    fn effective_fps(&self) -> u32 {
+        let adaptive = self.fps_adapter.as_ref().map_or(u32::MAX, server::fps::FpsAdapter::fps);
+        self.quality_fps.min(adaptive).max(1)
+    }
+
+    /// Pushes the effective fps to the capture thread.
+    fn apply_fps(&self) {
+        self.fps_shared.store(self.effective_fps(), Ordering::Relaxed);
+    }
+
+    /// Feeds one frame's encode time into the adaptive-fps controller;
+    /// applies and logs the new rate when it changes (§12.7).
+    fn observe_encode(&mut self, encode: Duration) {
+        let Some(adapter) = self.fps_adapter.as_mut() else {
+            return;
+        };
+        if let Some(fps) = adapter.observe(encode, Instant::now()) {
+            let load = adapter.load().unwrap_or(0.0);
+            info!(
+                fps,
+                quality_fps = self.quality_fps,
+                load = (load * 100.0).round() / 100.0,
+                "adaptive fps changed"
+            );
+            self.apply_fps();
+        }
+    }
 }
 
 /// Handles one packet from the reliable stream: input events (§10) and
@@ -1608,7 +1662,6 @@ struct ControlState {
 fn handle_stream_packet(
     ctl: &mut ControlState,
     encoder: &mut ServerEncoder,
-    fps_shared: &AtomicU32,
     ch: u16,
     buf: &[u8],
 ) {
@@ -1626,20 +1679,7 @@ fn handle_stream_packet(
     }
     match ControlMessage::decode(buf) {
         Ok(ControlMessage::MetricsReport { rtt_micros, jitter_micros, loss_permille }) => {
-            handle_metrics(
-                &mut ctl.quality,
-                &mut ctl.forced_video,
-                ctl.audio_control.as_ref(),
-                &mut ctl.fec_on,
-                encoder,
-                fps_shared,
-                ctl.video_ceiling_kbps,
-                ctl.audio_ceiling_kbps,
-                &ctl.pacer_rate,
-                rtt_micros,
-                jitter_micros,
-                loss_permille,
-            );
+            handle_metrics(ctl, encoder, rtt_micros, jitter_micros, loss_permille);
         }
         Ok(ControlMessage::RequestKeyframe { display_id }) => {
             if ctl.last_keyframe_req.is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {

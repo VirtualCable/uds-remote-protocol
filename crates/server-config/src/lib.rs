@@ -103,6 +103,61 @@ pub struct StandaloneConfig {
     /// Codec-ladder sensitivity overrides (`[standalone.ladder]` table);
     /// unset keys keep the agent's built-in balanced defaults.
     pub ladder: LadderTuning,
+    /// Adaptive-fps overrides (`[standalone.adaptive_fps]` table); the
+    /// table's mere presence enables the adapter (§12.7), unset keys keep
+    /// the balanced defaults.
+    pub adaptive_fps: Option<AdaptiveFpsTuning>,
+}
+
+/// Adaptive-fps tuning overrides (§12.7). Every key is optional; only the
+/// set ones travel to the agent.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct AdaptiveFpsTuning {
+    /// Lowest rate the adapter may select.
+    pub min_fps: Option<u32>,
+    /// EMA encode load (fraction of the frame budget) that steps down.
+    pub high_load: Option<f64>,
+    /// EMA encode load below which the rate steps back up.
+    pub low_load: Option<f64>,
+    /// Sustained-overload time before stepping down (ms).
+    pub hold_down_ms: Option<u64>,
+    /// Sustained-underload time before stepping up (ms).
+    pub hold_up_ms: Option<u64>,
+    /// EMA smoothing factor (0, 1].
+    pub ema_alpha: Option<f64>,
+}
+
+impl AdaptiveFpsTuning {
+    /// Compact wire form (`key=value` pairs, comma-separated). The literal
+    /// `on` marks "present, all defaults" so the agent can tell an enabled
+    /// table apart from no table at all.
+    #[must_use]
+    pub fn to_wire(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(v) = self.min_fps {
+            parts.push(format!("min_fps={v}"));
+        }
+        if let Some(v) = self.high_load {
+            parts.push(format!("high={v}"));
+        }
+        if let Some(v) = self.low_load {
+            parts.push(format!("low={v}"));
+        }
+        if let Some(v) = self.hold_down_ms {
+            parts.push(format!("hold_down_ms={v}"));
+        }
+        if let Some(v) = self.hold_up_ms {
+            parts.push(format!("hold_up_ms={v}"));
+        }
+        if let Some(v) = self.ema_alpha {
+            parts.push(format!("ema_alpha={v}"));
+        }
+        if parts.is_empty() {
+            return "on".to_string();
+        }
+        parts.join(",")
+    }
 }
 
 /// Codec-ladder sensitivity overrides (design doc §8.5). Every key is
@@ -196,6 +251,7 @@ impl Default for StandaloneConfig {
                 smartcard: false,
             },
             ladder: LadderTuning::default(),
+            adaptive_fps: None,
         }
     }
 }
