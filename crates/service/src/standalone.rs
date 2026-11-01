@@ -33,6 +33,8 @@ pub struct StandaloneRuntime {
     pub output_name: Option<String>,
     /// Auto-logon credentials for the credential provider, if configured.
     pub creds: Option<Credentials>,
+    /// Codec-ladder sensitivity overrides in wire form (empty = defaults).
+    pub ladder: String,
 }
 
 impl StandaloneRuntime {
@@ -101,5 +103,6 @@ pub fn load() -> Option<StandaloneRuntime> {
         preset: standalone.preset.clone(),
         output_name: standalone.output_name.clone(),
         creds,
+        ladder: standalone.ladder.to_wire(),
     })
 }

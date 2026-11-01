@@ -100,6 +100,66 @@ pub struct StandaloneConfig {
     /// Channel switches (flat keys in the TOML `[standalone]` section).
     #[serde(flatten)]
     pub channels: ChannelSwitches,
+    /// Codec-ladder sensitivity overrides (`[standalone.ladder]` table);
+    /// unset keys keep the agent's built-in balanced defaults.
+    pub ladder: LadderTuning,
+}
+
+/// Codec-ladder sensitivity overrides (design doc §8.5). Every key is
+/// optional; only the set ones travel to the agent.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct LadderTuning {
+    /// EMA of changed-area percentage above which the VP9 regime engages.
+    pub up_threshold_pct: Option<f64>,
+    /// EMA percentage below which the JPEG regime is restored.
+    pub down_threshold_pct: Option<f64>,
+    /// Milliseconds the EMA must stay above the up threshold to switch.
+    pub hold_up_ms: Option<u64>,
+    /// Milliseconds the EMA must stay below the down threshold to switch.
+    pub hold_down_ms: Option<u64>,
+    /// Minimum time in a regime before any metric-driven switch (ms).
+    pub min_dwell_ms: Option<u64>,
+    /// Dwell multiplier applied when oscillation is detected (> 1.0).
+    pub backoff: Option<f64>,
+    /// Cap for the dynamic dwell (ms).
+    pub dwell_max_ms: Option<u64>,
+    /// EMA smoothing factor (0, 1]: weight of the newest sample.
+    pub ema_alpha: Option<f64>,
+}
+
+impl LadderTuning {
+    /// Compact wire form (`key=value` pairs, comma-separated; empty when no
+    /// override is set). Parsed back by the session agent.
+    #[must_use]
+    pub fn to_wire(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(v) = self.up_threshold_pct {
+            parts.push(format!("up={v}"));
+        }
+        if let Some(v) = self.down_threshold_pct {
+            parts.push(format!("down={v}"));
+        }
+        if let Some(v) = self.hold_up_ms {
+            parts.push(format!("hold_up_ms={v}"));
+        }
+        if let Some(v) = self.hold_down_ms {
+            parts.push(format!("hold_down_ms={v}"));
+        }
+        if let Some(v) = self.min_dwell_ms {
+            parts.push(format!("min_dwell_ms={v}"));
+        }
+        if let Some(v) = self.backoff {
+            parts.push(format!("backoff={v}"));
+        }
+        if let Some(v) = self.dwell_max_ms {
+            parts.push(format!("dwell_max_ms={v}"));
+        }
+        if let Some(v) = self.ema_alpha {
+            parts.push(format!("ema_alpha={v}"));
+        }
+        parts.join(",")
+    }
 }
 
 /// Which optional channels the standalone session offers.
@@ -127,7 +187,7 @@ impl Default for StandaloneConfig {
             width: 1920,
             height: 1080,
             fps: 30,
-            preset: "vp9-balanced".to_string(),
+            preset: "ladder".to_string(),
             output_name: None,
             channels: ChannelSwitches {
                 audio: true,
@@ -135,6 +195,7 @@ impl Default for StandaloneConfig {
                 storage: false,
                 smartcard: false,
             },
+            ladder: LadderTuning::default(),
         }
     }
 }

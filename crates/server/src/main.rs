@@ -69,6 +69,8 @@ struct Args {
     source: String,
     output: server::capture::OutputSelector,
     preset: String,
+    /// Codec-ladder sensitivity overrides ("k=v,..."; empty = defaults).
+    ladder: String,
     bitrate: Option<u32>,
     width: u32,
     height: u32,
@@ -90,6 +92,7 @@ fn parse_args() -> Result<Args> {
         source: "synthetic".to_string(),
         output: server::capture::OutputSelector::Index(0),
         preset: "raw".to_string(),
+        ladder: String::new(),
         bitrate: None,
         width: 640,
         height: 480,
@@ -130,6 +133,7 @@ fn parse_args() -> Result<Args> {
             );
             args.output = server::capture::OutputSelector::NameContains(config.output_name);
             args.preset = config.preset;
+            args.ladder = config.ladder;
             args.source = "dxgi".to_string();
             key_seen = true;
             continue;
@@ -156,6 +160,7 @@ fn parse_args() -> Result<Args> {
                 args.output = server::capture::OutputSelector::NameContains(value);
             }
             "--preset" => args.preset = value,
+            "--ladder" => args.ladder = value,
             "--bitrate" => args.bitrate = Some(value.parse().context("bad --bitrate")?),
             "--width" => args.width = value.parse().context("bad --width")?,
             "--height" => args.height = value.parse().context("bad --height")?,
@@ -204,6 +209,7 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
         args.height = standalone.height;
         args.fps = standalone.fps;
         args.preset.clone_from(&standalone.preset);
+        args.ladder = standalone.ladder.to_wire();
         args.audio = standalone.channels.audio;
         info!("standalone mode: fixed ticket active (reference implementation)");
     }
@@ -1467,6 +1473,51 @@ impl ServerEncoder {
     }
 }
 
+/// Resolves the ladder policy: balanced defaults plus `key=value` overrides
+/// from `--ladder` / the service config frame (§8.5 sensitivity tuning).
+/// Unknown keys and malformed values are rejected — a typo must not silently
+/// tune nothing.
+#[cfg(feature = "ladder")]
+fn ladder_policy(spec: &str) -> Result<codec::LadderPolicy> {
+    let mut policy = codec::LadderPolicy::balanced();
+    for pair in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (key, value) = pair
+            .split_once('=')
+            .with_context(|| format!("bad ladder override (expected key=value): {pair}"))?;
+        match key.trim() {
+            "up" => policy.up_threshold_pct = value.parse().context("bad up threshold")?,
+            "down" => policy.down_threshold_pct = value.parse().context("bad down threshold")?,
+            "hold_up_ms" => {
+                policy.hold_up = Duration::from_millis(value.parse().context("bad hold_up_ms")?);
+            }
+            "hold_down_ms" => {
+                policy.hold_down =
+                    Duration::from_millis(value.parse().context("bad hold_down_ms")?);
+            }
+            "min_dwell_ms" => {
+                policy.min_dwell =
+                    Duration::from_millis(value.parse().context("bad min_dwell_ms")?);
+            }
+            "backoff" => policy.backoff = value.parse().context("bad backoff")?,
+            "dwell_max_ms" => {
+                policy.dwell_max =
+                    Duration::from_millis(value.parse().context("bad dwell_max_ms")?);
+            }
+            "ema_alpha" => policy.ema_alpha = value.parse().context("bad ema_alpha")?,
+            other => bail!("unknown ladder override: {other}"),
+        }
+    }
+    anyhow::ensure!(
+        policy.down_threshold_pct < policy.up_threshold_pct,
+        "ladder down threshold must be below the up threshold"
+    );
+    anyhow::ensure!(
+        (0.0..=1.0).contains(&policy.ema_alpha) && policy.ema_alpha > 0.0,
+        "ladder ema_alpha must be in (0, 1]"
+    );
+    Ok(policy)
+}
+
 /// Builds the display encoder from `--preset`: a named preset, or the codec
 /// ladder (`--preset ladder`, feature `ladder`) which starts in rects-JPEG
 /// and switches to VP9 on sustained video-like change (§8.5).
@@ -1474,14 +1525,9 @@ fn build_encoder(args: &Args, width: u32, height: u32) -> Result<ServerEncoder> 
     #[cfg(feature = "ladder")]
     if args.preset == "ladder" {
         let kbps = args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS);
-        let encoder = codec::LadderEncoder::new(
-            width,
-            height,
-            codec::LadderPolicy::balanced(),
-            kbps,
-            80,
-        )?;
-        info!(width, height, kbps, "codec ladder ready (rects-jpeg <-> vp9)");
+        let policy = ladder_policy(&args.ladder)?;
+        let encoder = codec::LadderEncoder::new(width, height, policy, kbps, 80)?;
+        info!(width, height, kbps, overrides = %args.ladder, "codec ladder ready (rects-jpeg <-> vp9)");
         return Ok(ServerEncoder::Ladder(Box::new(encoder)));
     }
     let preset = CodecPreset::by_name(&args.preset)

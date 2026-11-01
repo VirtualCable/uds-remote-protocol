@@ -14,13 +14,14 @@
 //! [81..83] u16   bind address length, then UTF-8 bytes (e.g. "0.0.0.0:14433")
 //!          u16   output selector (display name substring), then UTF-8 bytes
 //!          u16   codec preset name, then UTF-8 bytes
+//!          u16   ladder tuning overrides ("k=v,..."; empty = defaults)
 //! ```
 //!
 //! Pure format code only; both the service (Windows) and the agent use it.
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 1;
+pub const AGENT_CONFIG_VERSION: u8 = 2;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -32,7 +33,7 @@ pub const MAX_STRING_LEN: usize = 256;
 
 /// Minimum frame size: version + key + ticket + three u16 string lengths
 /// (all strings empty).
-const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 3 * 2;
+const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 4 * 2;
 
 /// Offset where the length-prefixed string fields start.
 const STRINGS_OFF: usize = 1 + KEY_LEN + TICKET_LEN;
@@ -50,6 +51,9 @@ pub struct AgentConfig {
     pub output_name: String,
     /// Video codec preset name (see `codec::PRESETS`).
     pub preset: String,
+    /// Codec-ladder sensitivity overrides in compact `key=value,...` form;
+    /// empty keeps the agent's balanced defaults.
+    pub ladder: String,
 }
 
 /// Decode failures.
@@ -83,12 +87,16 @@ impl std::error::Error for DecodeError {}
 #[must_use]
 pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
     let mut out = Vec::with_capacity(
-        HEADER_LEN + config.bind.len() + config.output_name.len() + config.preset.len(),
+        HEADER_LEN
+            + config.bind.len()
+            + config.output_name.len()
+            + config.preset.len()
+            + config.ladder.len(),
     );
     out.push(AGENT_CONFIG_VERSION);
     out.extend_from_slice(&config.key);
     out.extend_from_slice(&config.ticket);
-    for s in [&config.bind, &config.output_name, &config.preset] {
+    for s in [&config.bind, &config.output_name, &config.preset, &config.ladder] {
         let len = u16::try_from(s.len()).expect("string fields are bounded well below u16::MAX");
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(s.as_bytes());
@@ -113,7 +121,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     ticket.copy_from_slice(&buf[1 + KEY_LEN..1 + KEY_LEN + TICKET_LEN]);
 
     let mut rest = &buf[STRINGS_OFF..];
-    let mut strings = ["", "", ""];
+    let mut strings = ["", "", "", ""];
     for slot in &mut strings {
         let len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
         rest = &rest[2..];
@@ -126,13 +134,14 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     if !rest.is_empty() {
         return Err(DecodeError::BadLength);
     }
-    let [bind, output_name, preset] = strings;
+    let [bind, output_name, preset, ladder] = strings;
     Ok(AgentConfig {
         key,
         ticket,
         bind: bind.to_owned(),
         output_name: output_name.to_owned(),
         preset: preset.to_owned(),
+        ladder: ladder.to_owned(),
     })
 }
 
@@ -147,6 +156,7 @@ mod tests {
             bind: "0.0.0.0:14433".to_owned(),
             output_name: "UDS".to_owned(),
             preset: "vp9-balanced".to_owned(),
+            ladder: "up=15,hold_up_ms=1500".to_owned(),
         }
     }
 
