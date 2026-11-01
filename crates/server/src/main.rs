@@ -339,12 +339,36 @@ async fn display_sender(
     sink: Arc<Mutex<transport::DatagramSink<UdpTransport>>>,
     mut pacer: Pacer,
 ) {
+    // Sends in batches (§12.6): one pacing sleep per batch, not per
+    // datagram — per-datagram sleeps fall below the OS timer granularity
+    // and cap the drain at ~1000 dgrams/s whatever the configured rate.
+    // The token bucket keeps the *average* rate; a batch is exactly the
+    // burst the bucket size already allows.
+    let mut batch: Vec<Vec<u8>> = Vec::with_capacity(96);
     while let Some(frag) = rx.recv().await {
-        pacer.pace(frag.len()).await;
-        if let Err(e) = sink.lock().await.send(channel::DISPLAY, &frag).await {
-            warn!("display sender: send failed, ending task: {e}");
-            return;
+        let mut bytes = frag.len();
+        batch.push(frag);
+        let target = pacer.batch_target_bytes();
+        while batch.len() < batch.capacity() && bytes < target {
+            match rx.try_recv() {
+                Ok(frag) => {
+                    bytes += frag.len();
+                    batch.push(frag);
+                }
+                // Empty: nothing more queued right now. Disconnected: send
+                // what we drained; the outer recv ends the task next turn.
+                Err(_) => break,
+            }
         }
+        pacer.pace(bytes).await;
+        let mut sink = sink.lock().await;
+        for frag in batch.drain(..) {
+            if let Err(e) = sink.send(channel::DISPLAY, &frag).await {
+                warn!("display sender: send failed, ending task: {e}");
+                return;
+            }
+        }
+        drop(sink);
     }
 }
 
@@ -845,12 +869,12 @@ async fn handle_frame<T: ReliableTransport>(
     // entirely (no encode CPU burned, no latency piled up) and force the
     // next sent frame to be a keyframe, since the peer may be missing the
     // deltas we are skipping. The frame id is reused: nothing of it left.
+    stats.frames += 1; // every capture event, so `sent` never underflows
     if legs.frag_queue_limited() {
         encoder.request_keyframe();
         stats.skipped_bp += 1;
         return Ok(frame_id);
     }
-    stats.frames += 1;
     let encode_start = Instant::now();
     let packet = encoder.encode(&codec::VideoFrame {
         width: frame.width,

@@ -30,6 +30,17 @@ pub const RATE_HEADROOM: u64 = 8;
 /// Burst allowance: how many bytes may leave instantly when the bucket is
 /// full. ~64 KiB absorbs small delta frames without any added latency.
 const BUCKET_BYTES: f64 = 65_536.0;
+/// Sleep-length a send batch aims for (§12.6): per-datagram pacing sleeps
+/// ~100 µs at LAN rates, far below the OS timer granularity (~1 ms on
+/// Windows), which would cap the drain at ~1000 dgrams/s regardless of the
+/// configured rate. Batching several datagrams per sleep keeps the average
+/// rate while staying above the timer's resolution.
+const BATCH_SLEEP_TARGET: std::time::Duration = std::time::Duration::from_millis(4);
+/// Bounds for the batch target: small enough to bound burst length, large
+/// enough to survive low rates and timer slop.
+const BATCH_MIN_BYTES: usize = 16 * 1024;
+/// Upper bound for the batch target (~96 datagrams).
+const BATCH_MAX_BYTES: usize = 128 * 1024;
 
 /// Shared rate knob (bits per second) written by the quality controller.
 #[derive(Clone)]
@@ -72,6 +83,17 @@ impl Pacer {
     #[must_use]
     pub fn new(rate: PacerRate) -> Self {
         Self { rate, tokens: BUCKET_BYTES, last: Instant::now() }
+    }
+
+    /// Bytes a send batch should aim for so its pacing sleep lasts about
+    /// [`BATCH_SLEEP_TARGET`] at the current rate (see the constant's docs).
+    #[must_use]
+    pub fn batch_target_bytes(&self) -> usize {
+        #[allow(clippy::cast_precision_loss)] // durations here are tiny
+        let bytes = self.rate.bps() as f64 / 8.0 * BATCH_SLEEP_TARGET.as_secs_f64();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped below
+        let bytes = bytes as usize;
+        bytes.clamp(BATCH_MIN_BYTES, BATCH_MAX_BYTES)
     }
 
     /// Waits until `bytes` may leave under the current rate.
@@ -137,6 +159,20 @@ mod tests {
         // 10 ms later 100 KB refilled (capped at the bucket size).
         let t1 = t0 + std::time::Duration::from_millis(10);
         assert!(p.consume(10_000, t1).is_zero());
+    }
+
+    #[test]
+    fn batch_target_scales_with_rate_and_clamps() {
+        let (rate, shared) = PacerRate::new();
+        let p = Pacer::new(rate);
+        // Default 100 Mbps → 50 KB batches (4 ms worth of wire time).
+        assert_eq!(p.batch_target_bytes(), 50_000);
+        // Floor rate 25 Mbps → 12.5 KB, clamped up to the minimum.
+        shared.store(MIN_PACER_BPS, Ordering::Relaxed);
+        assert_eq!(p.batch_target_bytes(), BATCH_MIN_BYTES);
+        // Ceiling rate 200 Mbps → 100 KB.
+        shared.store(MAX_PACER_BPS, Ordering::Relaxed);
+        assert_eq!(p.batch_target_bytes(), 100_000);
     }
 
     #[test]
