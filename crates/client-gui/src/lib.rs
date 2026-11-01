@@ -8,6 +8,7 @@
 //! same session in the UDS Launcher; an HTML5 front-end is another
 //! possibility) without touching the protocol code.
 
+mod altgr;
 mod connect;
 mod gpu;
 mod keymap;

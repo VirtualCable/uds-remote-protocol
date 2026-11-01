@@ -40,6 +40,8 @@ pub struct SessionView {
     /// Keys currently held down, as (scancode, extended), so they can all be
     /// released when the window loses focus (otherwise they stick remotely).
     pressed_keys: std::collections::HashSet<(u16, bool)>,
+    /// AltGr↔Ctrl pairing state (Windows' fake LCtrl events are unreliable).
+    altgr: crate::altgr::AltGr,
 }
 
 struct Texture {
@@ -79,6 +81,7 @@ impl SessionView {
             prev_stats: None,
             show_stats: false,
             pressed_keys: std::collections::HashSet::new(),
+            altgr: crate::altgr::AltGr::default(),
         }
     }
 
@@ -179,25 +182,59 @@ impl SessionView {
         true
     }
 
+    /// Sends one key event and tracks it in the held set.
+    fn send_key(&mut self, key: (u16, bool), down: bool) {
+        if down {
+            self.pressed_keys.insert(key);
+        } else {
+            self.pressed_keys.remove(&key);
+        }
+        let (scancode, extended) = key;
+        let _ = self.commands.try_send(ClientCommand::Input(InputMessage::Key {
+            down,
+            scancode,
+            extended,
+        }));
+    }
+
     /// Forwards a key press/release to the remote and tracks the held set.
+    /// AltGr (RAlt) is paired with an owned LCtrl (see `altgr` module).
     pub fn handle_key(&mut self, code: KeyCode, down: bool) {
-        if let Some((scancode, extended)) = keymap::map_key(code) {
-            if down {
-                self.pressed_keys.insert((scancode, extended));
-            } else {
-                self.pressed_keys.remove(&(scancode, extended));
+        const LCTRL: (u16, bool) = (0x1D, false);
+        match (code, down) {
+            (KeyCode::ControlLeft, true) => self.altgr.ctrl_down(std::time::Instant::now()),
+            (KeyCode::ControlLeft, false) => self.altgr.ctrl_up(),
+            (KeyCode::AltRight, down) => {
+                let now = std::time::Instant::now();
+                let action = if down {
+                    self.altgr.altgr_down(now, self.pressed_keys.contains(&LCTRL))
+                } else {
+                    self.altgr.altgr_up()
+                };
+                match action {
+                    crate::altgr::CtrlAction::Press => self.send_key(LCTRL, true),
+                    // Release after the RAlt-up below (mirror of the OS order).
+                    crate::altgr::CtrlAction::Release | crate::altgr::CtrlAction::Keep => {}
+                }
+                if let Some(key) = keymap::map_key(code) {
+                    self.send_key(key, down);
+                }
+                if action == crate::altgr::CtrlAction::Release {
+                    self.send_key(LCTRL, false);
+                }
+                return;
             }
-            let _ = self.commands.try_send(ClientCommand::Input(InputMessage::Key {
-                down,
-                scancode,
-                extended,
-            }));
+            _ => {}
+        }
+        if let Some(key) = keymap::map_key(code) {
+            self.send_key(key, down);
         }
     }
 
     /// Releases every key currently held (window lost focus, so the matching
     /// key-up events will never reach us and the keys would stick remotely).
     pub fn release_all_keys(&mut self) {
+        self.altgr.reset();
         for (scancode, extended) in self.pressed_keys.drain() {
             let _ = self.commands.try_send(ClientCommand::Input(InputMessage::Key {
                 down: false,
