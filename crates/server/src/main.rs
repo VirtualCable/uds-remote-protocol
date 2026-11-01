@@ -540,6 +540,13 @@ fn spawn_audio(
         // Absolute pacing: accumulate the frame period instead of sleeping a
         // fixed duration, so encode time does not drift the audio clock.
         let mut next_tick = Instant::now();
+        // Level telemetry (audio counterpart of the display pipeline line):
+        // peak/RMS of the source over 5 s windows, so "the client hears
+        // nothing / hears noise" is diagnosable from the agent log alone.
+        let mut level_peak = 0i32;
+        let mut level_sq = 0u64;
+        let mut level_samples = 0u64;
+        let mut level_last = Instant::now();
         loop {
             // Same liveness rule as the capture thread: die with the session.
             if tx.is_closed() {
@@ -551,6 +558,29 @@ fn spawn_audio(
             if let Err(e) = source.fill_frame(&mut pcm) {
                 warn!("audio source failed: {e:#}");
                 return;
+            }
+            for &s in &pcm {
+                let v = i32::from(s).abs();
+                level_peak = level_peak.max(v);
+                level_sq += u64::try_from(v * v).unwrap_or(0); // v >= 0 by abs()
+            }
+            level_samples += pcm.len() as u64;
+            if level_last.elapsed() >= STATS_LOG_INTERVAL {
+                #[allow(clippy::cast_precision_loss)] // RMS of i16 peaks is small
+                let rms = if level_samples == 0 {
+                    0.0
+                } else {
+                    (level_sq as f64 / level_samples as f64).sqrt()
+                };
+                info!(
+                    peak = level_peak,
+                    rms = (rms * 10.0).round() / 10.0,
+                    "audio source level"
+                );
+                level_peak = 0;
+                level_sq = 0;
+                level_samples = 0;
+                level_last = Instant::now();
             }
             // PoC DTX (§9.1): only the silence onset goes out (keepalives
             // disabled — the video leg keeps UDP warm, and ~500 ms-spaced
