@@ -37,6 +37,9 @@ pub struct SessionView {
     prev_stats: Option<(StatsSnapshot, std::time::Instant)>,
     /// Debug overlay visible (toggled with F3, not forwarded to the remote).
     show_stats: bool,
+    /// Keys currently held down, as (scancode, extended), so they can all be
+    /// released when the window loses focus (otherwise they stick remotely).
+    pressed_keys: std::collections::HashSet<(u16, bool)>,
 }
 
 struct Texture {
@@ -75,6 +78,7 @@ impl SessionView {
             stats: None,
             prev_stats: None,
             show_stats: false,
+            pressed_keys: std::collections::HashSet::new(),
         }
     }
 
@@ -113,7 +117,17 @@ impl SessionView {
                     if display_id == 0 {
                         self.display_size = (width, height);
                         self.codec = Some(codec);
-                        self.texture = Some(make_texture(gpu, width, height));
+                        // Recreate the texture only when the geometry changes:
+                        // on a codec switch (same size) keeping it retains the
+                        // last presented frame instead of flashing black until
+                        // the first frame of the new codec arrives.
+                        let size_changed = self
+                            .texture
+                            .as_ref()
+                            .is_none_or(|t| t.texture.width() != width || t.texture.height() != height);
+                        if size_changed {
+                            self.texture = Some(make_texture(gpu, width, height));
+                        }
                         let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(
                             width.max(1),
                             height.max(1),
@@ -165,11 +179,28 @@ impl SessionView {
         true
     }
 
-    /// Forwards a key press/release to the remote.
-    pub fn handle_key(&self, code: KeyCode, down: bool) {
+    /// Forwards a key press/release to the remote and tracks the held set.
+    pub fn handle_key(&mut self, code: KeyCode, down: bool) {
         if let Some((scancode, extended)) = keymap::map_key(code) {
+            if down {
+                self.pressed_keys.insert((scancode, extended));
+            } else {
+                self.pressed_keys.remove(&(scancode, extended));
+            }
             let _ = self.commands.try_send(ClientCommand::Input(InputMessage::Key {
                 down,
+                scancode,
+                extended,
+            }));
+        }
+    }
+
+    /// Releases every key currently held (window lost focus, so the matching
+    /// key-up events will never reach us and the keys would stick remotely).
+    pub fn release_all_keys(&mut self) {
+        for (scancode, extended) in self.pressed_keys.drain() {
+            let _ = self.commands.try_send(ClientCommand::Input(InputMessage::Key {
+                down: false,
                 scancode,
                 extended,
             }));

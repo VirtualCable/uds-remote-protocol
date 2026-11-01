@@ -224,7 +224,7 @@ impl ApplicationHandler for App {
                 // the remote (neither the press nor the release).
                 let is_f3 = session_view::physical_code(&event) == Some(winit::keyboard::KeyCode::F3);
                 if event.state != ElementState::Pressed {
-                    if let Mode::Session(view, _) = &self.mode
+                    if let Mode::Session(view, _) = &mut self.mode
                         && !is_f3
                         && let Some(code) = session_view::physical_code(&event)
                     {
@@ -274,6 +274,13 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(true) => {
                 if let Mode::Session(view, _) = &mut self.mode {
                     view.sync_clipboard();
+                }
+            }
+            WindowEvent::Focused(false) => {
+                // The key-up events of any held keys go to the newly focused
+                // window, not to us: release them all or they stick remotely.
+                if let Mode::Session(view, _) = &mut self.mode {
+                    view.release_all_keys();
                 }
             }
             WindowEvent::RedrawRequested => self.render(),
