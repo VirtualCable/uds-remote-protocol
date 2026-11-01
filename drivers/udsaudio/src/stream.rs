@@ -144,7 +144,8 @@ impl WaveRtStream {
 
     /// Moves the PCM the engine exposed since the last position query
     /// between the audio buffer and the ring. Direction depends on
-    /// [`StreamRole`]. Lock-free; safe at any IRQL.
+    /// [`StreamRole`]. Lock-free; safe at any IRQL. Updates `last_pos` to
+    /// the frame-aligned end of the moved span.
     fn pump(&mut self, byte_pos: u64) {
         let Some(ring) = self.ring else { return; };
         if self.role == StreamRole::LoopbackSink && !self.is_feeder {
@@ -154,16 +155,22 @@ impl WaveRtStream {
             return;
         }
         let size = u64::from(self.audio_buffer_size);
-        if byte_pos <= self.last_pos {
+        // Work on whole frames. The clock position has arbitrary parity, but
+        // the engine writes and reads whole frames; moving a span whose
+        // boundaries are not frame-aligned byte-shifts every sample for
+        // every downstream reader (heard as full-scale noise).
+        let align = u64::from(self.format.frame_bytes());
+        let end = byte_pos - (byte_pos % align);
+        if end <= self.last_pos {
             return;
         }
         // A long stall (paused engine, missed queries) can put the position
         // more than one buffer ahead; only the newest buffer-worth matters.
-        let mut span = byte_pos - self.last_pos;
+        let mut span = end - self.last_pos;
         if span > size {
             span = size;
         }
-        let start = (byte_pos - span) % size;
+        let start = (end - span) % size;
         let first_len = span.min(size - start);
         let rest = span - first_len;
         // SAFETY: start < size and first_len <= size - start, so the first
@@ -193,6 +200,7 @@ impl WaveRtStream {
                 StreamRole::None => {}
             }
         }
+        self.last_pos = end;
     }
 
     /// Releases the loopback-feeder claim if this stream holds it.
@@ -378,9 +386,9 @@ unsafe extern "C" fn stream_get_position(
         // Exchange the bytes the engine exposed since the last query. For
         // capture this fills the region before the engine reads it (it only
         // consumes up to the position we report); for render it harvests
-        // what the engine wrote after our previous report.
+        // what the engine wrote after our previous report. `pump` owns
+        // `last_pos` (it advances it to the frame-aligned end of the span).
         stream.pump(byte_pos);
-        stream.last_pos = byte_pos;
         let pos = &mut *position;
         pos.PlayOffset = byte_pos;
         pos.WriteOffset = byte_pos;
