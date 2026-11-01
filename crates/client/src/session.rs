@@ -10,6 +10,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -197,9 +199,6 @@ impl Session {
                     }
                 }
                 _ = present_tick.tick() => {
-                    if !core.avsync_tick() {
-                        return Ok(());
-                    }
                     for ev in core.storage.pump() {
                         if !emit(&core.events, ev) {
                             return Ok(());
@@ -287,10 +286,11 @@ impl Session {
                     // limit re-asks every 500 ms while the stream stays
                     // broken.
                     let dropped = core.reasm.dropped_frames();
-                    if (dropped > core.prev_dropped || core.recovery.awaiting)
+                    let awaiting = core.recovery_awaiting.load(Ordering::Relaxed);
+                    if (dropped > core.prev_dropped || awaiting)
                         && core.last_key_req.is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_MIN_INTERVAL)
                     {
-                        info!(dropped, awaiting = core.recovery.awaiting, "stream broken; requesting keyframe");
+                        info!(dropped, awaiting, "stream broken; requesting keyframe");
                         let req = ControlMessage::RequestKeyframe { display_id: 0 };
                         stream.send(channel::CONTROL, &req.encode()?).await?;
                         core.stats.record_keyframe_request();
@@ -373,9 +373,6 @@ impl Session {
                     }
                 }
                 _ = present_tick.tick() => {
-                    if !core.avsync_tick() {
-                        return Ok(());
-                    }
                     for ev in core.storage.pump() {
                         if !emit(&core.events, ev) {
                             return Ok(());
@@ -502,16 +499,6 @@ fn micros_since(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
-/// Decode-error recovery state (§12.2): when a predictive decoder errors
-/// (a lost delta frame breaks the reference chain), the client asks for a
-/// keyframe and tolerates decode errors until the stream decodes again
-/// instead of dying on the first broken frame.
-#[derive(Default)]
-struct DecodeRecovery {
-    /// True while the stream is known-broken and a keyframe is awaited.
-    awaiting: bool,
-}
-
 /// A decoded frame waiting for the audio clock to catch up (§9.1).
 struct HeldFrame {
     display_id: u8,
@@ -553,99 +540,155 @@ impl PresentQueue {
     }
 }
 
-/// Mutable state shared by the two session loops.
-struct Core {
+/// One work item for the decode thread (§15.3).
+enum DecodeJob {
+    /// Display announced (`DisplayInfo`): codec for the display.
+    Announce { display_id: u8, codec: VideoCodecType },
+    /// One reassembled display frame.
+    Frame(protocol::fragment::ReassembledFrame),
+}
+
+/// Decode jobs in flight. Bounded: a consumer too slow to decode must drop
+/// frames (breaking the predictive chain → keyframe) instead of building
+/// presentation latency.
+const DECODE_QUEUE_CAPACITY: usize = 4;
+
+/// Decode + presentation worker (§15.3): owns the decoders, the recovery
+/// state and the A/V presentation queue so video decode and framebuffer
+/// writes never block the network task (audio datagrams and probe acks
+/// share that task's recv loop; a 20 ms VP9 decode behind a keyframe burst
+/// was enough to push them past the audio jitter window).
+struct DecodeWorker {
+    rx: flume::Receiver<DecodeJob>,
     events: flume::Sender<ClientEvent>,
     displays: Displays,
-    reasm: Reassembler,
     /// One decoder per display (§8.3); created from DisplayInfo
     /// announcements, or Raw on first frame for servers that do not
     /// announce (§8.4 compat).
     decoders: HashMap<u8, Box<dyn VideoDecoder>>,
-    recovery: DecodeRecovery,
-    audio: AudioClient,
-    mic: MicClient,
+    /// Shared with the network task: it drives the keyframe requests.
+    recovery_awaiting: Arc<AtomicBool>,
+    /// Audio playback cursor (capture-clock ms), for the A/V decisions.
+    audio_clock: Arc<AtomicI64>,
     present_queue: PresentQueue,
     avsync_stats: SyncStats,
     avsync_log: Instant,
-    /// Live stats accumulator shared with the audio thread; snapshots go to
-    /// the consumer once per second (§15.3 debug aid).
-    stats: std::sync::Arc<crate::stats::SessionStats>,
-    /// Rate-limit state for keyframe requests (riesgos §2.1).
-    last_key_req: Option<Instant>,
-    prev_dropped: u64,
-    /// Clipboard wire state (M8).
-    clip: protocol::ClipboardSession,
-    /// Clipboard messages queued for sending (handle_packet is synchronous;
-    /// the receive loops drain this after each packet).
-    clip_out: Vec<protocol::ClipboardMessage>,
-    /// Storage transfers state (M8, model B); its `out` queue is drained
-    /// by the receive loops like `clip_out`.
-    storage: crate::storage::StorageClient,
-    /// Smartcard request dispatcher (§17); `None` while disabled.
-    smartcard: Option<crate::smartcard::SmartcardService>,
-    /// Reply channel of the smartcard dispatcher (replies are drained by
-    /// `flush_out` onto the reliable stream).
-    scard_tx: flume::Sender<protocol::SmartcardMessage>,
-    scard_rx: flume::Receiver<protocol::SmartcardMessage>,
-    /// Inline smartcard replies produced while the dispatcher is disabled
-    /// (`SCARD_E_NO_SERVICE` — a request is never left unanswered).
-    scard_out: Vec<protocol::SmartcardMessage>,
+    stats: Arc<crate::stats::SessionStats>,
 }
 
-impl Core {
-    fn new(
+impl DecodeWorker {
+    fn spawn(
         events: flume::Sender<ClientEvent>,
         displays: Displays,
-        config: &ClientConfig,
-        clock_start: Instant,
-    ) -> Self {
-        let (scard_tx, scard_rx) = flume::unbounded();
-        let smartcard = config
-            .smartcard
-            .then(|| crate::smartcard::SmartcardService::start(crate::smartcard::default_backend(), scard_tx.clone()));
-        let stats = std::sync::Arc::new(crate::stats::SessionStats::default());
-        Self {
+        audio_clock: Arc<AtomicI64>,
+        stats: Arc<crate::stats::SessionStats>,
+    ) -> (flume::Sender<DecodeJob>, Arc<AtomicBool>) {
+        let (tx, rx) = flume::bounded(DECODE_QUEUE_CAPACITY);
+        let recovery_awaiting = Arc::new(AtomicBool::new(false));
+        let mut worker = Self {
+            rx,
             events,
             displays,
-            reasm: Reassembler::new(),
             decoders: HashMap::new(),
-            recovery: DecodeRecovery::default(),
-            audio: AudioClient::new(config.audio, config.audio_dump.clone(), std::sync::Arc::clone(&stats)),
-            mic: MicClient::new(config.mic, clock_start),
+            recovery_awaiting: Arc::clone(&recovery_awaiting),
+            audio_clock,
             present_queue: PresentQueue::new(),
             avsync_stats: SyncStats::default(),
             avsync_log: Instant::now(),
             stats,
-            last_key_req: None,
-            prev_dropped: 0,
-            clip: protocol::ClipboardSession::new(),
-            clip_out: Vec::new(),
-            storage: crate::storage::StorageClient::new(),
-            smartcard,
-            scard_tx,
-            scard_rx,
-            scard_out: Vec::new(),
+        };
+        std::thread::spawn(move || worker.run());
+        (tx, recovery_awaiting)
+    }
+
+    fn audio_now_ms(&self) -> Option<u32> {
+        let v = self.audio_clock.load(Ordering::Relaxed);
+        u32::try_from(v).ok()
+    }
+
+    /// Main loop: drains decode jobs, then pumps the presentation queue at
+    /// the present cadence (§9.1). Ends when the session drops the sender.
+    fn run(&mut self) {
+        loop {
+            match self.rx.recv_timeout(PRESENT_TICK) {
+                Ok(job) => self.apply(job),
+                Err(flume::RecvTimeoutError::Timeout) => {}
+                Err(flume::RecvTimeoutError::Disconnected) => return,
+            }
+            // Catch up on queued frames before pumping: decode is the
+            // bottleneck this thread exists to absorb.
+            while let Ok(job) = self.rx.try_recv() {
+                self.apply(job);
+            }
+            if !self.avsync_pump() {
+                return; // consumer gone
+            }
         }
     }
 
-    /// Applies `ClientCommand::SmartcardEnable`: starts or stops the
-    /// request dispatcher (§17). Starting with no PC/SC backend still
-    /// answers every request, with `SCARD_E_NO_SERVICE`.
-    fn set_smartcard(&mut self, on: bool) {
-        match (on, self.smartcard.is_some()) {
-            (true, false) => {
-                info!("smartcard redirection enabled");
-                self.smartcard = Some(crate::smartcard::SmartcardService::start(
-                    crate::smartcard::default_backend(),
-                    self.scard_tx.clone(),
-                ));
+    fn apply(&mut self, job: DecodeJob) {
+        match job {
+            DecodeJob::Announce { display_id, codec } => match codec::build_decoder(codec) {
+                Ok(dec) => {
+                    self.decoders.insert(display_id, dec);
+                }
+                Err(e) => {
+                    warn!(codec = codec.wire_id(), "cannot build decoder: {e}");
+                    let _ = emit(
+                        &self.events,
+                        ClientEvent::Error(format!("cannot build video decoder: {e}")),
+                    );
+                }
+            },
+            DecodeJob::Frame(complete) => self.decode_frame(complete),
+        }
+    }
+
+    fn decode_frame(&mut self, complete: protocol::fragment::ReassembledFrame) {
+        let decoder = match self.decoders.entry(complete.display_id) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                if complete.display_id == 0 {
+                    warn!("no DisplayInfo received; assuming raw codec");
+                    match codec::build_decoder(VideoCodecType::Raw) {
+                        Ok(d) => e.insert(d),
+                        Err(e) => {
+                            warn!("cannot build the raw decoder: {e}");
+                            return;
+                        }
+                    }
+                } else {
+                    warn!(
+                        display_id = complete.display_id,
+                        "frame for unknown display; dropped"
+                    );
+                    return;
+                }
             }
-            (false, true) => {
-                info!("smartcard redirection disabled");
-                self.smartcard = None;
+        };
+        match decoder.decode(&EncodedPacket {
+            data: complete.data,
+            keyframe: true,
+        }) {
+            Ok(frame) => {
+                self.recovery_awaiting.store(false, Ordering::Relaxed);
+                // Every display is presented into its own framebuffer
+                // (§8.3, §15.3); the A/V sync decision (§9.1) decides:
+                // present, hold for the audio clock, or drop.
+                self.present_or_hold(complete.display_id, frame, complete.capture_ts_ms);
             }
-            _ => {}
+            Err(e) => {
+                // A lost fragment breaks the predictive chain: tolerate
+                // the error and let the network task ask for a keyframe
+                // (§12.2).
+                if !self.recovery_awaiting.swap(true, Ordering::Relaxed) {
+                    warn!("decode failed ({e}); awaiting keyframe");
+                    let _ = emit(
+                        &self.events,
+                        ClientEvent::Error(format!("video decode failed: {e}")),
+                    );
+                }
+            }
         }
     }
 
@@ -671,27 +714,25 @@ impl Core {
     }
 
     /// Applies the A/V sync decision (§9.1) to one freshly decoded frame.
-    /// Returns `false` when the consumer is gone.
-    fn present_or_hold(&mut self, display_id: u8, frame: codec::DecodedFrame, video_ts_ms: u32) -> bool {
-        let audio_now = self.audio.audio_now_ms();
+    fn present_or_hold(&mut self, display_id: u8, frame: codec::DecodedFrame, video_ts_ms: u32) {
+        let audio_now = self.audio_now_ms();
         match avsync::decide(video_ts_ms, audio_now.unwrap_or(0), audio_now.is_some()) {
             avsync::PresentDecision::PresentNow => {
                 if let Some(now) = audio_now {
                     self.avsync_stats
                         .record_present(i64::from(video_ts_ms) - i64::from(now));
                 }
-                self.present(display_id, &frame)
+                // A gone consumer is noticed by the pump on the next tick.
+                let _ = self.present(display_id, &frame);
             }
             avsync::PresentDecision::HoldUntil(ts) => {
                 self.stats.record_hold();
                 self.present_queue
                     .hold(display_id, ts, frame, &mut self.avsync_stats, &self.stats);
-                true
             }
             avsync::PresentDecision::Drop => {
                 self.avsync_stats.record_stale_drop();
                 self.stats.record_stale_drop();
-                true
             }
         }
     }
@@ -699,8 +740,8 @@ impl Core {
     /// Presentation-queue pump (§9.1): presents due held frames (an absent
     /// audio clock flushes everything so video never stalls) and logs the
     /// sync stats periodically. Returns `false` when the consumer is gone.
-    fn avsync_tick(&mut self) -> bool {
-        let audio_now = self.audio.audio_now_ms();
+    fn avsync_pump(&mut self) -> bool {
+        let audio_now = self.audio_now_ms();
         self.stats.set_avsync(
             u32::try_from(self.present_queue.frames.len()).unwrap_or(u32::MAX),
             audio_now.is_some(),
@@ -739,6 +780,103 @@ impl Core {
             self.avsync_log = Instant::now();
         }
         true
+    }
+}
+
+/// Mutable state shared by the two session loops.
+struct Core {
+    events: flume::Sender<ClientEvent>,
+    displays: Displays,
+    reasm: Reassembler,
+    /// Decode + presentation work goes to the decode thread (§15.3).
+    decode_tx: flume::Sender<DecodeJob>,
+    /// Decode-error recovery flag, owned by the decode thread (§12.2).
+    recovery_awaiting: Arc<AtomicBool>,
+    audio: AudioClient,
+    mic: MicClient,
+    /// Live stats accumulator shared with the audio thread; snapshots go to
+    /// the consumer once per second (§15.3 debug aid).
+    stats: std::sync::Arc<crate::stats::SessionStats>,
+    /// Rate-limit state for keyframe requests (riesgos §2.1).
+    last_key_req: Option<Instant>,
+    prev_dropped: u64,
+    /// Clipboard wire state (M8).
+    clip: protocol::ClipboardSession,
+    /// Clipboard messages queued for sending (handle_packet is synchronous;
+    /// the receive loops drain this after each packet).
+    clip_out: Vec<protocol::ClipboardMessage>,
+    /// Storage transfers state (M8, model B); its `out` queue is drained
+    /// by the receive loops like `clip_out`.
+    storage: crate::storage::StorageClient,
+    /// Smartcard request dispatcher (§17); `None` while disabled.
+    smartcard: Option<crate::smartcard::SmartcardService>,
+    /// Reply channel of the smartcard dispatcher (replies are drained by
+    /// `flush_out` onto the reliable stream).
+    scard_tx: flume::Sender<protocol::SmartcardMessage>,
+    scard_rx: flume::Receiver<protocol::SmartcardMessage>,
+    /// Inline smartcard replies produced while the dispatcher is disabled
+    /// (`SCARD_E_NO_SERVICE` — a request is never left unanswered).
+    scard_out: Vec<protocol::SmartcardMessage>,
+}
+
+impl Core {
+    fn new(
+        events: flume::Sender<ClientEvent>,
+        displays: Displays,
+        config: &ClientConfig,
+        clock_start: Instant,
+    ) -> Self {
+        let (scard_tx, scard_rx) = flume::unbounded();
+        let smartcard = config
+            .smartcard
+            .then(|| crate::smartcard::SmartcardService::start(crate::smartcard::default_backend(), scard_tx.clone()));
+        let stats = std::sync::Arc::new(crate::stats::SessionStats::default());
+        let audio = AudioClient::new(config.audio, config.audio_dump.clone(), std::sync::Arc::clone(&stats));
+        let (decode_tx, recovery_awaiting) = DecodeWorker::spawn(
+            events.clone(),
+            displays.clone(),
+            audio.shared_clock(),
+            std::sync::Arc::clone(&stats),
+        );
+        Self {
+            events,
+            displays,
+            reasm: Reassembler::new(),
+            decode_tx,
+            recovery_awaiting,
+            audio,
+            mic: MicClient::new(config.mic, clock_start),
+            stats,
+            last_key_req: None,
+            prev_dropped: 0,
+            clip: protocol::ClipboardSession::new(),
+            clip_out: Vec::new(),
+            storage: crate::storage::StorageClient::new(),
+            smartcard,
+            scard_tx,
+            scard_rx,
+            scard_out: Vec::new(),
+        }
+    }
+
+    /// Applies `ClientCommand::SmartcardEnable`: starts or stops the
+    /// request dispatcher (§17). Starting with no PC/SC backend still
+    /// answers every request, with `SCARD_E_NO_SERVICE`.
+    fn set_smartcard(&mut self, on: bool) {
+        match (on, self.smartcard.is_some()) {
+            (true, false) => {
+                info!("smartcard redirection enabled");
+                self.smartcard = Some(crate::smartcard::SmartcardService::start(
+                    crate::smartcard::default_backend(),
+                    self.scard_tx.clone(),
+                ));
+            }
+            (false, true) => {
+                info!("smartcard redirection disabled");
+                self.smartcard = None;
+            }
+            _ => {}
+        }
     }
 
     /// Handles one received packet; returns `false` when the session should
@@ -865,46 +1003,16 @@ impl Core {
         if ch == channel::DISPLAY
             && let Some(complete) = self.reasm.push(packet)?
         {
-            let decoder = match self.decoders.entry(complete.display_id) {
-                std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    if complete.display_id == 0 {
-                        warn!("no DisplayInfo received; assuming raw codec");
-                        e.insert(codec::build_decoder(VideoCodecType::Raw)?)
-                    } else {
-                        warn!(
-                            display_id = complete.display_id,
-                            "frame for unknown display; dropped"
-                        );
-                        return Ok(true);
-                    }
-                }
-            };
-            match decoder.decode(&EncodedPacket {
-                data: complete.data,
-                keyframe: true,
-            }) {
-                Ok(frame) => {
-                    self.recovery.awaiting = false;
-                    // Every display is presented into its own framebuffer
-                    // (§8.3, §15.3); the A/V sync decision (§9.1) decides:
-                    // present, hold for the audio clock, or drop.
-                    if !self.present_or_hold(complete.display_id, frame, complete.capture_ts_ms) {
-                        return Ok(false);
-                    }
-                }
-                Err(e) => {
-                    // A lost fragment breaks the predictive chain: tolerate
-                    // the error and let the loop ask for a keyframe (§12.2).
-                    if !self.recovery.awaiting {
-                        warn!("decode failed ({e}); awaiting keyframe");
-                        let _ = emit(
-                            &self.events,
-                            ClientEvent::Error(format!("video decode failed: {e}")),
-                        );
-                    }
-                    self.recovery.awaiting = true;
-                }
+            // Decode + presentation run on the decode thread (§15.3); this
+            // task only reassembles, so audio and probes never wait behind
+            // a video decode. A full queue means the consumer cannot keep
+            // up: drop the frame and mark the stream broken so the loop
+            // asks for a keyframe (same handling as a loss, §12.2).
+            if let Err(flume::TrySendError::Full(_)) =
+                self.decode_tx.try_send(DecodeJob::Frame(complete))
+            {
+                self.recovery_awaiting.store(true, Ordering::Relaxed);
+                self.stats.record_stale_drop();
             }
         }
         Ok(true)
@@ -920,37 +1028,34 @@ impl Core {
                 codec,
             }) => {
                 let codec_type = VideoCodecType::from_wire_id(codec);
-                match codec_type.map(codec::build_decoder).transpose() {
-                    Ok(Some(dec)) => {
-                        info!(display_id, width, height, codec, "display announced");
-                        self.decoders.insert(display_id, dec);
-                        // The framebuffer exists from the announcement on,
-                        // so the consumer can fetch it immediately (§15.3).
-                        self.displays.get_or_insert(display_id);
-                        let _ = emit(
-                            &self.events,
-                            ClientEvent::DisplayInfo {
-                                display_id,
-                                width,
-                                height,
-                                codec: codec_type.expect("decoder exists"),
-                            },
-                        );
+                if let Some(codec_type) = codec_type {
+                    info!(display_id, width, height, codec, "display announced");
+                    // The decoder is built on the decode thread (§15.3);
+                    // the framebuffer exists from the announcement on so
+                    // the consumer can fetch it immediately.
+                    self.displays.get_or_insert(display_id);
+                    if self
+                        .decode_tx
+                        .try_send(DecodeJob::Announce { display_id, codec: codec_type })
+                        .is_err()
+                    {
+                        warn!("decode queue full/disconnected; DisplayInfo lost");
                     }
-                    Ok(None) => {
-                        warn!(codec, "unknown codec id; frames will be dropped");
-                        let _ = emit(
-                            &self.events,
-                            ClientEvent::Error(format!("unknown video codec id {codec}")),
-                        );
-                    }
-                    Err(e) => {
-                        warn!(codec, "cannot build decoder: {e}");
-                        let _ = emit(
-                            &self.events,
-                            ClientEvent::Error(format!("cannot build video decoder: {e}")),
-                        );
-                    }
+                    let _ = emit(
+                        &self.events,
+                        ClientEvent::DisplayInfo {
+                            display_id,
+                            width,
+                            height,
+                            codec: codec_type,
+                        },
+                    );
+                } else {
+                    warn!(codec, "unknown codec id; frames will be dropped");
+                    let _ = emit(
+                        &self.events,
+                        ClientEvent::Error(format!("unknown video codec id {codec}")),
+                    );
                 }
             }
             Ok(ControlMessage::AudioConfig {

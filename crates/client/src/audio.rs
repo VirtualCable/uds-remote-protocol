@@ -112,6 +112,13 @@ impl AudioClient {
         u32::try_from(v).ok()
     }
 
+    /// Shared audio-clock cell for the decode worker thread (§9.1): it runs
+    /// the A/V sync decisions off the network task.
+    #[must_use]
+    pub(crate) fn shared_clock(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.now_ms)
+    }
+
     /// Applies a stream announcement from the server.
     pub fn configure(&mut self, spec: AudioSpec) {
         if let Some(tx) = &self.tx
