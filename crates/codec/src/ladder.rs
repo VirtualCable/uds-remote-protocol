@@ -75,19 +75,24 @@ pub struct LadderPolicy {
 }
 
 impl LadderPolicy {
-    /// "balanced" defaults from the §8.4 measurements: bandwidth crossing at
-    /// ~5 % area, CPU-saver crossing at ~25-30 %; balanced sits in between.
+    /// "balanced" defaults from the §8.4 measurements, hardened after the
+    /// first interactive runs: a minimize/restore burst (~0.3-0.5 s of hot
+    /// EMA) must never switch the regime. The up threshold sits near the
+    /// CPU-saver crossing (~25-30 % area) rather than the bandwidth one,
+    /// the holds double, the dwell doubles, and the slower EMA
+    /// (`ema_alpha` 0.05) absorbs single-frame spikes completely. All of it
+    /// stays configurable per session (`[standalone.ladder]`, `--ladder`).
     #[must_use]
     pub fn balanced() -> Self {
         Self {
-            up_threshold_pct: 12.0,
-            down_threshold_pct: 7.0,
-            hold_up: Duration::from_secs(1),
-            hold_down: Duration::from_secs(4),
-            min_dwell: Duration::from_secs(5),
+            up_threshold_pct: 18.0,
+            down_threshold_pct: 9.0,
+            hold_up: Duration::from_secs(2),
+            hold_down: Duration::from_secs(8),
+            min_dwell: Duration::from_secs(10),
             backoff: 1.25,
             dwell_max: Duration::from_secs(120),
-            ema_alpha: 0.1,
+            ema_alpha: 0.05,
         }
     }
 }

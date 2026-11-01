@@ -560,6 +560,9 @@ const DECODE_QUEUE_CAPACITY: usize = 4;
 /// was enough to push them past the audio jitter window).
 struct DecodeWorker {
     rx: flume::Receiver<DecodeJob>,
+    /// Control jobs (Announce). Unbounded and drained before frames: a
+    /// codec switch must never be lost behind a full frame queue.
+    ctl_rx: flume::Receiver<DecodeJob>,
     events: flume::Sender<ClientEvent>,
     displays: Displays,
     /// One decoder per display (§8.3); created from DisplayInfo
@@ -582,11 +585,13 @@ impl DecodeWorker {
         displays: Displays,
         audio_clock: Arc<AtomicI64>,
         stats: Arc<crate::stats::SessionStats>,
-    ) -> (flume::Sender<DecodeJob>, Arc<AtomicBool>) {
+    ) -> (flume::Sender<DecodeJob>, flume::Sender<DecodeJob>, Arc<AtomicBool>) {
         let (tx, rx) = flume::bounded(DECODE_QUEUE_CAPACITY);
+        let (ctl_tx, ctl_rx) = flume::unbounded();
         let recovery_awaiting = Arc::new(AtomicBool::new(false));
         let mut worker = Self {
             rx,
+            ctl_rx,
             events,
             displays,
             decoders: HashMap::new(),
@@ -597,8 +602,11 @@ impl DecodeWorker {
             avsync_log: Instant::now(),
             stats,
         };
-        std::thread::spawn(move || worker.run());
-        (tx, recovery_awaiting)
+        std::thread::Builder::new()
+            .name("decode-worker".into())
+            .spawn(move || worker.run())
+            .expect("spawning the decode worker");
+        (tx, ctl_tx, recovery_awaiting)
     }
 
     fn audio_now_ms(&self) -> Option<u32> {
@@ -610,6 +618,11 @@ impl DecodeWorker {
     /// the present cadence (§9.1). Ends when the session drops the sender.
     fn run(&mut self) {
         loop {
+            // Control jobs first: an Announce lost behind a frame burst
+            // would leave every frame undecodable until the next one.
+            while let Ok(job) = self.ctl_rx.try_recv() {
+                self.apply(job);
+            }
             match self.rx.recv_timeout(PRESENT_TICK) {
                 Ok(job) => self.apply(job),
                 Err(flume::RecvTimeoutError::Timeout) => {}
@@ -790,6 +803,9 @@ struct Core {
     reasm: Reassembler,
     /// Decode + presentation work goes to the decode thread (§15.3).
     decode_tx: flume::Sender<DecodeJob>,
+    /// Unbounded control channel to the decode thread (Announce only);
+    /// control jobs are never droppable.
+    decode_ctl_tx: flume::Sender<DecodeJob>,
     /// Decode-error recovery flag, owned by the decode thread (§12.2).
     recovery_awaiting: Arc<AtomicBool>,
     audio: AudioClient,
@@ -832,7 +848,7 @@ impl Core {
             .then(|| crate::smartcard::SmartcardService::start(crate::smartcard::default_backend(), scard_tx.clone()));
         let stats = std::sync::Arc::new(crate::stats::SessionStats::default());
         let audio = AudioClient::new(config.audio, config.audio_dump.clone(), std::sync::Arc::clone(&stats));
-        let (decode_tx, recovery_awaiting) = DecodeWorker::spawn(
+        let (decode_tx, decode_ctl_tx, recovery_awaiting) = DecodeWorker::spawn(
             events.clone(),
             displays.clone(),
             audio.shared_clock(),
@@ -843,6 +859,7 @@ impl Core {
             displays,
             reasm: Reassembler::new(),
             decode_tx,
+            decode_ctl_tx,
             recovery_awaiting,
             audio,
             mic: MicClient::new(config.mic, clock_start),
@@ -1007,12 +1024,20 @@ impl Core {
             // task only reassembles, so audio and probes never wait behind
             // a video decode. A full queue means the consumer cannot keep
             // up: drop the frame and mark the stream broken so the loop
-            // asks for a keyframe (same handling as a loss, §12.2).
-            if let Err(flume::TrySendError::Full(_)) =
-                self.decode_tx.try_send(DecodeJob::Frame(complete))
-            {
-                self.recovery_awaiting.store(true, Ordering::Relaxed);
-                self.stats.record_stale_drop();
+            // asks for a keyframe (same handling as a loss, §12.2). A
+            // disconnected queue means the decode worker died (its panic
+            // is logged by the panic hook): the session cannot present
+            // video ever again, so end it with a visible error instead of
+            // leaving a black window.
+            match self.decode_tx.try_send(DecodeJob::Frame(complete)) {
+                Ok(()) => {}
+                Err(flume::TrySendError::Full(_)) => {
+                    self.recovery_awaiting.store(true, Ordering::Relaxed);
+                    self.stats.record_stale_drop();
+                }
+                Err(flume::TrySendError::Disconnected(_)) => {
+                    anyhow::bail!("decode worker died; ending session");
+                }
             }
         }
         Ok(true)
@@ -1035,11 +1060,11 @@ impl Core {
                     // the consumer can fetch it immediately.
                     self.displays.get_or_insert(display_id);
                     if self
-                        .decode_tx
-                        .try_send(DecodeJob::Announce { display_id, codec: codec_type })
+                        .decode_ctl_tx
+                        .send(DecodeJob::Announce { display_id, codec: codec_type })
                         .is_err()
                     {
-                        warn!("decode queue full/disconnected; DisplayInfo lost");
+                        warn!("decode worker gone; DisplayInfo lost");
                     }
                     let _ = emit(
                         &self.events,

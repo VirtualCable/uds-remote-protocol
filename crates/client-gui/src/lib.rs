@@ -38,7 +38,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Optional session features chosen by the caller (CLI flags of the
 /// reference client; checkboxes in a future iteration).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct SessionFlags {
     /// Audio playback (server-side announcement permitting).
     pub audio: bool,
@@ -46,6 +46,9 @@ pub struct SessionFlags {
     pub smartcard: bool,
     /// Ask the server to cover the physical console (M7).
     pub privacy_screen: bool,
+    /// Lab aid: dump every decoded audio frame to this file as raw s16le
+    /// PCM (diagnosing server-side capture noise vs client decode).
+    pub audio_dump: Option<std::path::PathBuf>,
 }
 
 pub use server_config::ticket_bytes;
@@ -87,7 +90,7 @@ struct App {
 
 impl App {
     fn start_session(&mut self, form: &ConnectForm) {
-        match spawn_session(form, self.flags) {
+        match spawn_session(form, &self.flags) {
             Ok((view, result)) => self.mode = Mode::Session(Box::new(view), result),
             Err(e) => {
                 let mut dialog = ConnectDialog::default();
@@ -304,7 +307,7 @@ impl ApplicationHandler for App {
 /// Builds the client session and spawns its worker thread.
 fn spawn_session(
     form: &ConnectForm,
-    flags: SessionFlags,
+    flags: &SessionFlags,
 ) -> Result<(SessionView, flume::Receiver<Result<(), String>>), String> {
     let addr: SocketAddr = form
         .addr
@@ -317,7 +320,7 @@ fn spawn_session(
         ticket: ticket_bytes(&form.ticket),
         key,
         audio: flags.audio,
-        audio_dump: None,
+        audio_dump: flags.audio_dump.clone(),
         mic: MicMode::Off,
         privacy_screen: flags.privacy_screen,
         smartcard: flags.smartcard,

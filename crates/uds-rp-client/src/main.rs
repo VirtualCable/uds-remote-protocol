@@ -18,6 +18,7 @@ fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
+    install_panic_hook();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -37,6 +38,7 @@ fn run() -> Result<()> {
         audio: true,
         smartcard: false,
         privacy_screen: false,
+        audio_dump: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -44,6 +46,7 @@ fn run() -> Result<()> {
             "--no-audio" => flags.audio = false,
             "--smartcard" => flags.smartcard = true,
             "--privacy" => flags.privacy_screen = true,
+            "--audio-dump" => flags.audio_dump = Some(take(&mut it, "--audio-dump")?.into()),
             "--addr" => form.addr = take(&mut it, "--addr")?,
             "--ticket" => form.ticket = take(&mut it, "--ticket")?,
             "--key" => form.key_hex = take(&mut it, "--key")?,
@@ -66,4 +69,30 @@ fn run() -> Result<()> {
 
 fn take(it: &mut std::iter::Skip<std::env::Args>, flag: &str) -> Result<String> {
     it.next().context(format!("missing value for {flag}"))
+}
+
+/// Routes worker-thread panics into the tracing log: launched from the
+/// desktop there is no console, so a panicking decode/audio thread would
+/// otherwise die silently (the default hook only writes to stderr). The
+/// default hook still runs afterwards, keeping console behavior unchanged.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload().downcast_ref::<&str>().map_or_else(
+            || {
+                info.payload()
+                    .downcast_ref::<String>()
+                    .map_or("<non-string payload>", String::as_str)
+            },
+            |s| s,
+        );
+        let location = info.location().map_or_else(
+            || "<unknown>".to_string(),
+            |l| format!("{}:{}:{}", l.file(), l.line(), l.column()),
+        );
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("<unnamed>");
+        tracing::error!(thread = name, %location, payload, "thread panicked");
+        default_hook(info);
+    }));
 }
