@@ -5,7 +5,7 @@
 //!                 [--source synthetic|dxgi] [--output N | --output-name SUBSTR]
 //!                 [--preset NAME] [--bitrate KBPS]
 //!                 [--width N] [--height N] [--fps N] [--max-frames N]
-//!                 [--audio-preset NAME] [--audio-source auto|synthetic|wasapi]
+//!                 [--audio-preset NAME] [--audio-source auto|synthetic|uds-loopback|wasapi]
 //!                 [--no-audio] [--mic-sink null|wav:PATH]`
 //!
 //! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`,
@@ -22,12 +22,14 @@
 //! Audio (§9) is served by default: one Opus frame (preset named by
 //! `--audio-preset`, a name from `codec::AUDIO_PRESETS`, default
 //! `opus-music`) per datagram on channel `AUDIO_OUT`. `--no-audio` disables
-//! it. `--audio-source` picks the capture: `wasapi` (real desktop loopback,
-//! Windows with the `windows-capture` feature), `synthetic` (two-tone
-//! generator) or `auto` (the default: WASAPI where available, synthetic
-//! elsewhere; a WASAPI init failure under `auto` falls back to synthetic
-//! with a warning, while an explicit `wasapi` failure disables audio with a
-//! loud error).
+//! it. `--audio-source` picks the capture: `uds-loopback` (the udsaudio
+//! driver's render→loopback ring read via the control device — the preferred
+//! source when the driver is installed: it bypasses the engine loopback
+//! path, which delivered garbage bursts on stream starts), `wasapi` (real
+//! desktop loopback, Windows with the `windows-capture` feature),
+//! `synthetic` (two-tone generator) or `auto` (the default: driver loopback,
+//! then WASAPI, then synthetic; an explicit source failure disables audio
+//! with a loud error).
 //!
 //! The session ticket is printed on startup when not given; pass it to the
 //! test client with `--ticket`.
@@ -648,8 +650,28 @@ fn create_audio_source(kind: &str, preset: &AudioPreset) -> Option<Box<dyn Audio
             }
         }
     };
+    #[cfg(all(windows, feature = "windows-capture"))]
+    let uds_loopback = |explicit: bool| {
+        match server::audio_uds::UdsLoopbackSource::new(
+            preset.sample_rate,
+            preset.channels,
+            preset.frame_samples(),
+        ) {
+            Ok(s) => Some(Box::new(s) as Box<dyn AudioSource>),
+            Err(e) => {
+                if explicit {
+                    error!("UDS driver loopback init failed; audio disabled: {e:#}");
+                } else {
+                    info!("UDS driver loopback unavailable ({e:#}); trying WASAPI");
+                }
+                None
+            }
+        }
+    };
     match kind {
         "synthetic" => Some(synthetic()),
+        #[cfg(all(windows, feature = "windows-capture"))]
+        "uds-loopback" => uds_loopback(true),
         #[cfg(all(windows, feature = "windows-capture"))]
         "wasapi" => wasapi(true),
         #[cfg(not(all(windows, feature = "windows-capture")))]
@@ -658,9 +680,17 @@ fn create_audio_source(kind: &str, preset: &AudioPreset) -> Option<Box<dyn Audio
             None
         }
         "auto" => {
+            // Prefer the driver ring: it is entirely under our control and
+            // cannot exhibit the engine-loopback garbage bursts. Fall back
+            // to WASAPI loopback (driver not installed) and then synthetic.
             #[cfg(all(windows, feature = "windows-capture"))]
-            if let Some(s) = wasapi(false) {
-                return Some(s);
+            {
+                if let Some(s) = uds_loopback(false) {
+                    return Some(s);
+                }
+                if let Some(s) = wasapi(false) {
+                    return Some(s);
+                }
             }
             Some(synthetic())
         }

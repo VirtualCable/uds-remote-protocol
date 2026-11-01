@@ -646,6 +646,17 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// `CTL_CODE`); keep both in sync.
 pub const IOCTL_PUSH_MIC: u32 = ctl_code(34, 0x800, 0, 0);
 
+/// `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)`:
+/// pops bytes from the render→loopback ring into the caller's output buffer.
+/// The session agent uses it to read the session mix directly, bypassing
+/// the WASAPI loopback path entirely (the engine's loopback tap delivered
+/// full-scale garbage for ~20 s every time a stream started on the endpoint).
+/// Returns the number of bytes actually popped (0 when the ring is empty);
+/// the reader synthesizes silence for the gap. Note the ring keeps its SPSC
+/// contract: while a WASAPI loopback capture stream exists it competes with
+/// IOCTL readers for the same bytes.
+pub const IOCTL_READ_LOOPBACK: u32 = ctl_code(34, 0x801, 0, 0);
+
 /// Win32/WDK `CTL_CODE` macro as a const fn (host-testable).
 #[must_use]
 pub const fn ctl_code(device_type: u32, function: u32, method: u32, access: u32) -> u32 {
@@ -1076,6 +1087,7 @@ mod tests {
         // FILE_ANY_ACCESS=0) = 0x22_2000. The user-mode tool must compute
         // the same value with the Win32 CTL_CODE macro.
         assert_eq!(IOCTL_PUSH_MIC, 0x0022_2000);
+        assert_eq!(IOCTL_READ_LOOPBACK, 0x0022_2004);
     }
 
     #[test]

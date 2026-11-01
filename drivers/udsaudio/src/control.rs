@@ -210,6 +210,21 @@ pub unsafe extern "C" fn dispatch_device_control(device: PDEVICE_OBJECT, irp: PI
             return complete(irp, STATUS_INVALID_PARAMETER, 0);
         }
         let params = (*stack).Parameters.DeviceIoControl;
+        if params.IoControlCode == logic::IOCTL_READ_LOOPBACK {
+            let out_len = params.OutputBufferLength as usize;
+            // Whole stereo frames only (48 kHz s16 stereo: 4-byte frames).
+            let out_len = out_len - (out_len % 4);
+            if out_len == 0 {
+                return complete(irp, STATUS_INVALID_BUFFER_SIZE, 0);
+            }
+            let system_buffer = (*irp).AssociatedIrp.SystemBuffer;
+            if system_buffer.is_null() {
+                return complete(irp, STATUS_INVALID_PARAMETER, 0);
+            }
+            let out = core::slice::from_raw_parts_mut(system_buffer as *mut u8, out_len);
+            let popped = crate::stream::loopback_ring().pop(out);
+            return complete(irp, STATUS_SUCCESS, popped);
+        }
         if params.IoControlCode != logic::IOCTL_PUSH_MIC {
             dlog!("IOCTL rejected 0x%I64x", u64::from(params.IoControlCode));
             return complete(irp, STATUS_INVALID_DEVICE_REQUEST, 0);
