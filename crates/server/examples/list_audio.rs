@@ -23,10 +23,12 @@ fn main() -> anyhow::Result<()> {
 
     for (flow, label) in [(eRender, "RENDER "), (eCapture, "CAPTURE")] {
         // All states, so a present-but-unplugged endpoint still shows up.
-        let mask = DEVICE_STATE_ACTIVE
-            | DEVICE_STATE_DISABLED
-            | DEVICE_STATE_NOTPRESENT
-            | DEVICE_STATE_UNPLUGGED;
+        let mask = windows::Win32::Media::Audio::DEVICE_STATE(
+            DEVICE_STATE_ACTIVE.0
+                | DEVICE_STATE_DISABLED.0
+                | DEVICE_STATE_NOTPRESENT.0
+                | DEVICE_STATE_UNPLUGGED.0,
+        );
         let collection = unsafe { enumerator.EnumAudioEndpoints(flow, mask) }?;
         let count = unsafe { collection.GetCount() }?;
         for i in 0..count {
