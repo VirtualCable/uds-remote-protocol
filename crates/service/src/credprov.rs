@@ -42,6 +42,14 @@ use windows::core::PCWSTR;
 /// Lab credential file: username / domain / password, one per line.
 pub(crate) const CREDS_PATH: &str = r"C:\ProgramData\UdsRp\credprov-creds.conf";
 
+/// Lab auto-logon arm flag (one-shot): credentials are pushed to the
+/// provider only while this file exists, and it is removed once the
+/// provider reports the logon result. Without it the provider is never
+/// armed, so the machine never auto-logs on at boot just because LogonUI
+/// enumerated providers (§18.30). Production arms on a validated remote
+/// connection instead of a flag file.
+pub(crate) const ARM_PATH: &str = r"C:\ProgramData\UdsRp\arm-autologon";
+
 /// How long to wait for a response frame before re-checking the stop flag.
 const POLL: Duration = Duration::from_millis(500);
 
@@ -87,9 +95,12 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
     }
     info!("credential provider connected");
 
-    if let Some(creds) = creds {
+    let armed = std::path::Path::new(ARM_PATH).exists();
+    if let Some(creds) = creds.filter(|_| armed) {
         pipe.send_request(&Request::SetCredentials(creds.clone()))?;
-        info!(user = %creds.username, "credentials pushed to the provider");
+        info!(user = %creds.username, "credentials pushed to the provider (armed)");
+    } else if creds.is_some() {
+        info!("credentials available but auto-logon not armed; not pushing");
     }
 
     // Read frames until the provider goes away or we are asked to stop.
@@ -109,13 +120,25 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
                 status,
                 substatus,
                 message,
-            }) => info!(
-                success,
-                status = format_args!("0x{status:08X}"),
-                substatus = format_args!("0x{substatus:08X}"),
-                message,
-                "provider LogonResult"
-            ),
+            }) => {
+                info!(
+                    success,
+                    status = format_args!("0x{status:08X}"),
+                    substatus = format_args!("0x{substatus:08X}"),
+                    message,
+                    "provider LogonResult"
+                );
+                // One-shot: consume the arm flag whatever the outcome, and
+                // scrub the provider's store on failure so a bad credential
+                // cannot retry forever behind our back.
+                if std::fs::remove_file(ARM_PATH).is_ok() {
+                    info!("auto-logon arm flag consumed");
+                }
+                if !success {
+                    pipe.send_request(&Request::ClearCredentials)?;
+                    info!("provider credentials cleared after failed logon");
+                }
+            }
             Some(Response::Pong) => info!("provider Pong"),
             None => {} // poll timeout: re-check the stop flag
         }
