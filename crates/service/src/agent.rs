@@ -89,6 +89,12 @@ pub struct Agent {
     spawned_at: Instant,
 }
 
+// SAFETY: an Agent only carries raw handle values (process/job HANDLEs) and
+// plain data. Win32 process and job handles are usable from any thread, so
+// moving an Agent between threads (the watch loop owns it, the listener
+// produces it) is sound.
+unsafe impl Send for Agent {}
+
 impl Agent {
     /// Spawns the agent (`server.exe`, expected next to our own executable)
     /// into the active console session with the given key + ticket. Returns

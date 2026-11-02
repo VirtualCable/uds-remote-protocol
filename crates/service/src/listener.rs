@@ -38,13 +38,13 @@ pub struct AgentSlot {
 impl AgentSlot {
     /// Stores a freshly spawned agent.
     pub fn set(&self, agent: Agent, socket: std::net::TcpStream) {
-        *self.inner.lock().expect("agent slot poisoned") = Some((agent, socket));
+        *self.inner.lock().expect("agent slot poisoned") = Some((agent, Some(socket)));
     }
 
     /// Replaces the slot contents, returning the previous agent (already
     /// dead or about to be replaced after a wedge).
     pub fn take(&self) -> Option<(Agent, Option<std::net::TcpStream>)> {
-        self.inner.lock().expect("agent slot poisoned").take().map(|(a, s)| (a, Some(s)))
+        self.inner.lock().expect("agent slot poisoned").take()
     }
 
     /// Kills and clears the current agent, if any (service shutdown).
