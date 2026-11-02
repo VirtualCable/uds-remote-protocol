@@ -23,7 +23,8 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::System::Threading::{
-    CreateMutexW, MUTEX_ALL_ACCESS, OpenMutexW, ReleaseMutex, WaitForSingleObject,
+    CreateMutexW, MUTEX_ACCESS_RIGHTS, MUTEX_MODIFY_STATE, OpenMutexW, ReleaseMutex,
+    SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -49,9 +50,17 @@ pub fn acquire() -> Result<SessionMutex> {
     let name: Vec<u16> = SESSION_MUTEX.encode_utf16().chain(std::iter::once(0)).collect();
     // Preferred path: open the service-created global mutex (the service has
     // the privilege to create Global\ objects; a standard session user does
-    // not) and take ownership of it.
+    // not) and take ownership of it. Only the rights we use are requested
+    // (SYNCHRONIZE to wait, MODIFY_STATE to release): the service's DACL
+    // grants Everyone exactly those, nothing more (§18.33).
     // SAFETY: `name` is null-terminated and outlives the call.
-    if let Ok(handle) = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, false, PCWSTR(name.as_ptr())) } {
+    if let Ok(handle) = unsafe {
+        OpenMutexW(
+            MUTEX_ACCESS_RIGHTS(MUTEX_MODIFY_STATE.0 | SYNCHRONIZATION_SYNCHRONIZE.0),
+            false,
+            PCWSTR(name.as_ptr()),
+        )
+    } {
         // SAFETY: `handle` is live and unowned-by-us so far.
         match unsafe { WaitForSingleObject(handle, 0) } {
             WAIT_OBJECT_0 | WAIT_ABANDONED => {

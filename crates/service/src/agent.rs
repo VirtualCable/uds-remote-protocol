@@ -39,9 +39,9 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CreateMutexW, CreateProcessAsUserW, MUTEX_ALL_ACCESS, OpenMutexW,
-    PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES, STARTUPINFOW,
-    SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CreateMutexW, CreateProcessAsUserW, MUTEX_ACCESS_RIGHTS,
+    MUTEX_MODIFY_STATE, OpenMutexW, PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES,
+    STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 
@@ -193,8 +193,16 @@ impl Agent {
             return true;
         }
         let name = HSTRING::from(SESSION_MUTEX);
-        // SAFETY: `name` is null-terminated and outlives the call.
-        let handle = unsafe { OpenMutexW(SYNCHRONIZATION_SYNCHRONIZE, false, &name) };
+        // SAFETY: `name` is null-terminated and outlives the call. MODIFY_STATE
+        // is requested too because the wait below can ACQUIRE the mutex (when
+        // free or abandoned) and we then have to release it.
+        let handle = unsafe {
+            OpenMutexW(
+                MUTEX_ACCESS_RIGHTS(MUTEX_MODIFY_STATE.0 | SYNCHRONIZATION_SYNCHRONIZE.0),
+                false,
+                &name,
+            )
+        };
         let Ok(raw) = handle else {
             // No mutex at all past the grace period: the agent never got as
             // far as creating it — wedged.
@@ -341,8 +349,13 @@ fn open_agent_log() -> Result<OwnedHandle> {
 /// takes ownership for its lifetime; this handle just keeps the object
 /// alive and unowned between agents.
 fn ensure_session_mutex() -> Option<OwnedHandle> {
-    // DACL: Everyone full access — the mutex carries no data, it is just an
-    // ownership token, and the agent runs as an arbitrary standard user.
+    // DACL: Everyone gets ONLY acquire/release rights (SYNCHRONIZE |
+    // MUTEX_MODIFY_STATE) — never WRITE_DAC/WRITE_OWNER/DELETE, so a local
+    // process cannot tamper with or destroy the watchdog token. The agent
+    // runs as an arbitrary standard user, so acquire rights must be granted
+    // broadly; the residual risk (a local process hogging the mutex to block
+    // agent startup) is loud (the agent refuses to start) and inherent — a
+    // local user can always DoS their own session (§18.33).
     let mut world_sid = vec![0u8; 68];
     let mut sid_len = world_sid.len() as u32;
     let sid_ok = unsafe {
@@ -370,7 +383,7 @@ fn ensure_session_mutex() -> Option<OwnedHandle> {
             && AddAccessAllowedAce(
                 acl_buf.as_mut_ptr().cast::<ACL>(),
                 ACL_REVISION,
-                MUTEX_ALL_ACCESS.0,
+                MUTEX_MODIFY_STATE.0 | SYNCHRONIZATION_SYNCHRONIZE.0,
                 PSID(world_sid.as_mut_ptr().cast()),
             )
             .is_ok()
