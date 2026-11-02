@@ -30,6 +30,41 @@ const DISP_CHANGE_OK: DISP_CHANGE = DISP_CHANGE(0);
 /// DeviceString substring identifying our IddCx adapter's displays.
 const UDS_DISPLAY_MARKER: &str = "UDS Virtual Display";
 
+/// Logs every display device and the position/resolution of those attached
+/// to the desktop. Diagnostic gold when a console agent's pointer mapping
+/// breaks: a displaced primary or a widened desktop bounding box is visible
+/// here at a glance (§18.29/§18.30 incidents).
+pub fn log_desktop_topology() {
+    for i in 0..32u32 {
+        let mut dd = DISPLAY_DEVICEW {
+            cb: u32::try_from(size_of::<DISPLAY_DEVICEW>()).expect("struct fits in u32"),
+            ..Default::default()
+        };
+        // SAFETY: `dd` is a correctly sized out-struct.
+        if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &raw mut dd, 0) }.as_bool() {
+            break;
+        }
+        let name = utf16_z(&dd.DeviceName);
+        let attached =
+            dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP == DISPLAY_DEVICE_ATTACHED_TO_DESKTOP;
+        if !attached {
+            continue;
+        }
+        let detail = current_devmode(&name).map_or_else(
+            || "no devmode".to_string(),
+            |dm| {
+                // SAFETY: plain field reads on an initialized struct.
+                let pos = unsafe { dm.Anonymous1.Anonymous2.dmPosition };
+                format!(
+                    "pos=({},{}) {}x{}@{}Hz",
+                    pos.x, pos.y, dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency
+                )
+            },
+        );
+        info!(device = %name, uds = is_uds_display(&dd), detail, "desktop display");
+    }
+}
+
 /// Attaches every detached UDS virtual display to the desktop. Windows
 /// auto-places new displays to the right of the existing ones, which widens
 /// the desktop bounding box; some console agents (SPICE's vdagent, KVM
