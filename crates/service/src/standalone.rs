@@ -1,19 +1,21 @@
-//! Standalone (broker-less) mode wiring for the orchestrator service.
+//! Connection-mode wiring for the orchestrator service.
 //!
 //! When the shared server configuration file (`uds-rp-server.toml`, same
-//! lookup order as the agent) selects `connection_method = "standalone"`,
-//! the service switches from laboratory behaviour to reference behaviour:
+//! lookup order as the agent) selects a connection method, the service
+//! switches from laboratory behaviour to a real deployment mode:
 //!
-//! - the session key and ticket come from the file (fixed, documented)
-//!   instead of being generated randomly on each service run, so the
-//!   reference client can connect with the configured human ticket;
-//! - the standalone auto-logon credentials are pushed to the credential
+//! - **standalone**: the session key and ticket come from the file (fixed,
+//!   documented) instead of being generated randomly on each service run,
+//!   so the reference client can connect with the configured human ticket;
+//!   the standalone auto-logon credentials are pushed to the credential
 //!   provider through its named pipe, taking precedence over the lab
 //!   credentials file.
-//!
-//! This is the reference deployment the phase-4 broker integration mirrors:
-//! the broker-backed service will fetch per-session tickets and credentials
-//! from the broker instead of a file.
+//! - **pq**: tickets are validated against the UDS broker (the `connection`
+//!   kind of the `actor/v3` `ticket` action); each validated session gets
+//!   its own key, credentials and parameters from the broker response
+//!   (see the `broker` crate).
+
+use std::sync::Arc;
 
 use tracing::{info, warn};
 use udscredprov::logic::Credentials;
@@ -42,10 +44,26 @@ pub struct StandaloneRuntime {
     pub stats_csv: String,
 }
 
-/// Loads the standalone runtime from the shared config file. Returns `None`
-/// when there is no config file or it is not in standalone mode (laboratory
-/// defaults apply); logs and returns `None` on malformed files.
-pub fn load() -> Option<StandaloneRuntime> {
+/// Active connection mode for the service.
+pub enum Runtime {
+    /// Broker-less reference mode (fixed ticket and key from the config).
+    Standalone(StandaloneRuntime),
+    /// Broker-backed mode: per-session tickets validated via `actor/v3`.
+    Pq(PqRuntime),
+}
+
+/// Broker-backed runtime: the provider plus the public listen address.
+pub struct PqRuntime {
+    /// Validates tickets against the broker and fetches session grants.
+    pub provider: Arc<broker::PqProvider>,
+    /// Listen address for the validating listener.
+    pub bind: String,
+}
+
+/// Loads the configured connection mode. Returns `None` when there is no
+/// config file or it selects `oneshot` (laboratory defaults apply); logs
+/// and returns `None` on malformed files.
+pub fn load() -> Option<Runtime> {
     let path = server_config::find_config_file()?;
     let config = match server_config::load(&path) {
         Ok(config) => config,
@@ -54,10 +72,43 @@ pub fn load() -> Option<StandaloneRuntime> {
             return None;
         }
     };
-    if config.connection_method != server_config::ConnectionMethod::Standalone {
-        info!(path = %path.display(), "server config is not in standalone mode; laboratory credentials");
-        return None;
+    match config.connection_method {
+        server_config::ConnectionMethod::Standalone => {
+            load_standalone(&path, &config).map(Runtime::Standalone)
+        }
+        server_config::ConnectionMethod::Pq => load_pq(&path, &config).map(Runtime::Pq),
+        server_config::ConnectionMethod::Oneshot => {
+            info!(path = %path.display(), "server config is in oneshot mode; laboratory credentials");
+            None
+        }
     }
+}
+
+/// Broker-backed mode from the `[broker]` section.
+fn load_pq(path: &std::path::Path, config: &server_config::ServerConfig) -> Option<PqRuntime> {
+    let broker_config = match &config.broker {
+        Some(broker) if !broker.url.is_empty() && !broker.token.is_empty() => broker,
+        _ => {
+            warn!(path = %path.display(), "pq mode without a complete [broker] section (url, token); ignoring the config");
+            return None;
+        }
+    };
+    let provider = match broker::PqProvider::new(&broker_config.url, &broker_config.token, broker_config.verify_ssl) {
+        Ok(provider) => provider,
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), path = %path.display(), "cannot build the broker provider; ignoring the config");
+            return None;
+        }
+    };
+    info!(path = %path.display(), bind = %config.bind, url = %broker_config.url, "pq mode: tickets validated against the broker");
+    Some(PqRuntime {
+        provider: Arc::new(provider),
+        bind: config.bind.to_string(),
+    })
+}
+
+/// Standalone (reference) mode from the `[standalone]` section.
+fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig) -> Option<StandaloneRuntime> {
     let standalone = match &config.standalone {
         Some(standalone) if !standalone.ticket.is_empty() => standalone,
         _ => {

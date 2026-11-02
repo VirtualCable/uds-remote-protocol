@@ -13,6 +13,7 @@ workspace = true
 anyhow.workspace = true
 protocol.workspace = true
 server-config.workspace = true
+broker = { path = "../broker" }
 service-proto.workspace = true
 getrandom.workspace = true
 tracing.workspace = true

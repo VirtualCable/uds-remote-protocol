@@ -160,10 +160,35 @@ impl<T: ReliableTransport> EncryptedStream<T> {
     /// "session unknown" and the call fails with
     /// [`TransportError::UnexpectedMessage`]).
     pub async fn server_handshake(
-        mut inner: T,
+        inner: T,
         key: &[u8; consts::KEY_LENGTH],
         session: Option<StreamSeqs>,
     ) -> Result<Self> {
+        Self::server_handshake_with(inner, session, |_ticket| {
+            let key = *key;
+            async move { Ok(key) }
+        })
+        .await
+    }
+
+    /// Server handshake with late key resolution (broker mode): the peer's
+    /// Hello carries the ticket in cleartext, so the pre-shared key can be
+    /// resolved per ticket (e.g. pulled from the UDS broker) instead of
+    /// being fixed upfront. `resolve` receives the wire ticket and must
+    /// return the PSK; any error rejects the handshake before any key
+    /// material exists.
+    ///
+    /// Everything else (version check, Recover handling, v4 possession
+    /// proof) behaves exactly as in [`EncryptedStream::server_handshake`].
+    pub async fn server_handshake_with<R, Fut>(
+        mut inner: T,
+        session: Option<StreamSeqs>,
+        resolve: R,
+    ) -> Result<Self>
+    where
+        R: FnOnce([u8; protocol::TICKET_LENGTH]) -> Fut,
+        Fut: std::future::Future<Output = Result<[u8; consts::KEY_LENGTH]>>,
+    {
         let mut buf = [0u8; Hello::ENCODED_LEN];
         read_full(&mut inner, &mut buf).await?;
         let hello = Hello::decode(&buf)?;
@@ -175,7 +200,8 @@ impl<T: ReliableTransport> EncryptedStream<T> {
                 got: hello.version,
             });
         }
-        let keys = derive_session_keys(&hello.ticket, key)?;
+        let key = resolve(hello.ticket).await?;
+        let keys = derive_session_keys(&hello.ticket, &key)?;
         let mut stream = Self::with_keys(inner, &keys, Role::Server);
         stream.peer_hello = Some(hello);
 

@@ -49,6 +49,9 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     /// Standalone section (required when `connection_method = "standalone"`).
     pub standalone: Option<StandaloneConfig>,
+    /// Broker section (required when `connection_method = "pq"`; used by
+    /// the service, not by the reference server).
+    pub broker: Option<BrokerConfig>,
 }
 
 impl Default for ServerConfig {
@@ -58,6 +61,7 @@ impl Default for ServerConfig {
             shared_key: String::new(),
             bind: SocketAddr::from(([0, 0, 0, 0], 19790)),
             standalone: None,
+            broker: None,
         }
     }
 }
@@ -70,6 +74,33 @@ pub enum ConnectionMethod {
     Oneshot,
     /// Fixed human ticket from the config file (reference mode).
     Standalone,
+    /// Per-session tickets validated against the UDS broker (the
+    /// `connection` kind of the `actor/v3` `ticket` action). Only the
+    /// service supports this mode.
+    Pq,
+}
+
+/// Broker connection parameters (`connection_method = "pq"`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct BrokerConfig {
+    /// Full URL of the ticket endpoint (e.g.
+    /// `https://broker/uds/rest/actor/v3/ticket/connection`).
+    pub url: String,
+    /// Actor token authenticating the service against `actor/v3`.
+    pub token: String,
+    /// Verify the broker's TLS certificate (keep `true` in production).
+    pub verify_ssl: bool,
+}
+
+impl Default for BrokerConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            token: String::new(),
+            verify_ssl: true,
+        }
+    }
 }
 
 /// Fixed-ticket session definition (reference mode, see module docs).
@@ -363,6 +394,17 @@ impl TicketValidator for StandaloneValidator {
 impl ServerConfig {
     /// Parses and validates the config, resolving secrets.
     pub fn validated(self) -> Result<ResolvedConfig> {
+        // The reference server only speaks the laboratory modes; pq tickets
+        // are validated by the service against the broker.
+        if self.connection_method == ConnectionMethod::Pq {
+            let broker = self
+                .broker
+                .as_ref()
+                .context("connection_method = \"pq\" requires a [broker] section")?;
+            anyhow::ensure!(!broker.url.is_empty(), "broker.url must not be empty");
+            anyhow::ensure!(!broker.token.is_empty(), "broker.token must not be empty");
+            bail!("connection_method = \"pq\" is only supported by the service");
+        }
         anyhow::ensure!(
             !self.shared_key.is_empty(),
             "shared_key must not be empty (hex, 32 bytes)"
@@ -387,6 +429,9 @@ impl ServerConfig {
                 );
                 Box::new(StandaloneValidator::new(&standalone))
             }
+            // Handled above with an early bail (the reference server does
+            // not speak pq; only the service does).
+            ConnectionMethod::Pq => unreachable!("pq mode bails out before validation"),
         };
         Ok(ResolvedConfig {
             bind: self.bind,

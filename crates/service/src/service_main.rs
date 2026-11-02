@@ -42,10 +42,13 @@ pub fn run_dispatch() -> Result<()> {
 pub fn run_console() {
     logging::init();
     info!("console mode: running service body in the foreground (Ctrl+C to stop)");
-    let standalone = crate::standalone::load();
-    let creds = standalone.as_ref().and_then(|s| s.creds.clone());
-    crate::credprov::spawn(&STOP_REQUESTED, creds);
-    service_body(standalone.as_ref());
+    let runtime = crate::standalone::load();
+    let creds_slot = std::sync::Arc::new(std::sync::Mutex::new(match &runtime {
+        Some(crate::standalone::Runtime::Standalone(standalone)) => standalone.creds.clone(),
+        _ => None,
+    }));
+    crate::credprov::spawn(&STOP_REQUESTED, std::sync::Arc::clone(&creds_slot));
+    service_body(runtime, creds_slot);
 }
 
 /// `ServiceMain` callback invoked by the SCM dispatcher.
@@ -67,10 +70,13 @@ fn service_main_impl() -> Result<()> {
 
     report_status(status_handle, SERVICE_RUNNING)?;
     info!("service started");
-    let standalone = crate::standalone::load();
-    let creds = standalone.as_ref().and_then(|s| s.creds.clone());
-    crate::credprov::spawn(&STOP_REQUESTED, creds);
-    service_body(standalone.as_ref());
+    let runtime = crate::standalone::load();
+    let creds_slot = std::sync::Arc::new(std::sync::Mutex::new(match &runtime {
+        Some(crate::standalone::Runtime::Standalone(standalone)) => standalone.creds.clone(),
+        _ => None,
+    }));
+    crate::credprov::spawn(&STOP_REQUESTED, std::sync::Arc::clone(&creds_slot));
+    service_body(runtime, creds_slot);
 
     report_status(status_handle, SERVICE_STOPPED)?;
     info!("service stopped");
@@ -79,8 +85,11 @@ fn service_main_impl() -> Result<()> {
 
 /// Service body: watch loop that keeps one session agent alive in the
 /// console session (spawn, watchdog, respawn with a crash-loop cap).
-fn service_body(standalone: Option<&crate::standalone::StandaloneRuntime>) {
-    agent::watch_loop(&STOP_REQUESTED, standalone);
+fn service_body(
+    runtime: Option<crate::standalone::Runtime>,
+    creds_slot: std::sync::Arc<std::sync::Mutex<Option<udscredprov::logic::Credentials>>>,
+) {
+    agent::watch_loop(&STOP_REQUESTED, runtime, creds_slot);
 }
 
 /// `HandlerEx` callback: the SCM asks us to stop/shutdown.

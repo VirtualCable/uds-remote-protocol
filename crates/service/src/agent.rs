@@ -455,14 +455,19 @@ fn ensure_session_mutex() -> Option<OwnedHandle> {
     }
 }
 
-pub(crate) fn watch_loop(stop: &'static AtomicBool, standalone: Option<&crate::standalone::StandaloneRuntime>) {
+pub(crate) fn watch_loop(
+    stop: &'static AtomicBool,
+    runtime: Option<crate::standalone::Runtime>,
+    creds_slot: std::sync::Arc<std::sync::Mutex<Option<udscredprov::logic::Credentials>>>,
+) {
     // Pre-create the global session mutex before any agent spawns: only a
     // privileged process can create Global\ objects (see ensure_session_mutex).
     let _session_mutex = ensure_session_mutex();
-    // Standalone mode (§18.32): the service owns the validating listener and
-    // spawns one agent per validated connection; the watch loop only watches.
-    if let Some(standalone) = standalone {
-        watch_standalone(stop, standalone);
+    // Standalone/pq modes (§18.32): the service owns the validating listener
+    // and spawns one agent per validated connection; the watch loop only
+    // watches.
+    if let Some(runtime) = runtime {
+        watch_with_listener(stop, runtime, creds_slot);
         return;
     }
     let mut agent: Option<Agent> = None;
@@ -556,15 +561,20 @@ pub(crate) fn watch_loop(stop: &'static AtomicBool, standalone: Option<&crate::s
     }
 }
 
-/// Standalone watch body (§18.32): the listener thread owns the public TCP
-/// endpoint, validates each connection (handshake + possession proof) and
+/// Validating-listener watch body (§18.32): the listener thread owns the
+/// public TCP endpoint, validates each connection (handshake + possession
+/// proof, against the fixed standalone ticket or the broker in pq mode) and
 /// spawns one session agent per validated client. This loop only supervises:
 /// it clears dead agents, kills wedged ones, and cleans up on service stop.
 /// No proactive spawn and no respawn cap: agents map one-to-one to client
 /// connections, so a crash loop cannot spin here.
-fn watch_standalone(stop: &'static AtomicBool, standalone: &crate::standalone::StandaloneRuntime) {
+fn watch_with_listener(
+    stop: &'static AtomicBool,
+    runtime: crate::standalone::Runtime,
+    creds_slot: std::sync::Arc<std::sync::Mutex<Option<udscredprov::logic::Credentials>>>,
+) {
     let slot = std::sync::Arc::new(crate::listener::AgentSlot::default());
-    crate::listener::spawn(stop, standalone.clone(), std::sync::Arc::clone(&slot));
+    crate::listener::spawn(stop, runtime, std::sync::Arc::clone(&slot), creds_slot);
     while !stop.load(Ordering::Relaxed) {
         slot.clear_if_dead();
         slot.kill_if_unhealthy();

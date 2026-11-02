@@ -53,29 +53,33 @@ pub(crate) const ARM_PATH: &str = r"C:\ProgramData\UdsRp\arm-autologon";
 /// How long to wait for a response frame before re-checking the stop flag.
 const POLL: Duration = Duration::from_millis(500);
 
-/// Starts the pipe server on a background thread. `creds_override` (the
-/// standalone configuration credentials) takes precedence over the lab
-/// credentials file when present.
-pub fn spawn(stop: &'static AtomicBool, creds_override: Option<Credentials>) {
+/// Starts the pipe server on a background thread. `creds_slot` carries the
+/// active auto-logon credentials: pre-filled in standalone mode (taking
+/// precedence over the lab credentials file), filled per session by the
+/// listener in broker (pq) mode, and cleared when that session ends.
+pub fn spawn(stop: &'static AtomicBool, creds_slot: std::sync::Arc<std::sync::Mutex<Option<Credentials>>>) {
     std::thread::Builder::new()
         .name("credprov-pipe".into())
-        .spawn(move || pipe_loop(stop, creds_override))
+        .spawn(move || pipe_loop(stop, creds_slot))
         .expect("cannot spawn the credential-provider pipe thread");
 }
 
-fn pipe_loop(stop: &AtomicBool, creds_override: Option<Credentials>) {
-    let creds = match creds_override {
-        Some(creds) => Some(creds),
-        None => match load_credentials() {
-            Ok(creds) => creds,
-            Err(err) => {
-                error!(error = %format!("{err:#}"), "cannot read {CREDS_PATH}; serving without credentials");
-                None
-            }
-        },
+fn pipe_loop(stop: &AtomicBool, creds_slot: std::sync::Arc<std::sync::Mutex<Option<Credentials>>>) {
+    // Lab fallback: only consulted when the slot is empty.
+    let file_creds = match load_credentials() {
+        Ok(creds) => creds,
+        Err(err) => {
+            error!(error = %format!("{err:#}"), "cannot read {CREDS_PATH}; serving without file credentials");
+            None
+        }
     };
-    info!(has_credentials = creds.is_some(), "credential-provider pipe server listening");
+    info!("credential-provider pipe server listening");
     while !stop.load(Ordering::Relaxed) {
+        let creds = creds_slot
+            .lock()
+            .expect("creds slot poisoned")
+            .clone()
+            .or_else(|| file_creds.clone());
         match serve_one(stop, creds.as_ref()) {
             Ok(()) => info!("credential provider disconnected; recreating the pipe"),
             Err(err) => warn!(error = %format!("{err:#}"), "credential-provider pipe cycle failed"),

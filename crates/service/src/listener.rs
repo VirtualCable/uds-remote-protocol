@@ -20,13 +20,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
+use broker::ConnectionProvider as _;
 use tracing::{error, info, warn};
 use transport::{EncryptedStream, TcpTransport};
+use udscredprov::logic::Credentials;
 use windows::Win32::Networking::WinSock::{WSAPROTOCOL_INFOW, WSADuplicateSocketW};
 use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 
 use crate::agent::Agent;
-use crate::standalone::StandaloneRuntime;
 
 /// Shared slot for the live session agent (and its handed-off socket, kept
 /// alive until the agent has surely materialized its own copy).
@@ -91,11 +92,16 @@ impl AgentSlot {
 
 /// Starts the validating listener on a dedicated thread with its own
 /// current-thread tokio runtime (the service itself is sync).
-pub fn spawn(stop: &'static AtomicBool, standalone: StandaloneRuntime, slot: Arc<AgentSlot>) {
+pub fn spawn(
+    stop: &'static AtomicBool,
+    runtime: crate::standalone::Runtime,
+    slot: Arc<AgentSlot>,
+    creds_slot: Arc<Mutex<Option<Credentials>>>,
+) {
     std::thread::Builder::new()
         .name("udsrp-listener".into())
         .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
+            let runtime_tokio = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
@@ -105,20 +111,29 @@ pub fn spawn(stop: &'static AtomicBool, standalone: StandaloneRuntime, slot: Arc
                     return;
                 }
             };
-            runtime.block_on(accept_loop(stop, standalone, slot));
+            runtime_tokio.block_on(accept_loop(stop, runtime, slot, creds_slot));
         })
         .expect("cannot spawn the listener thread");
 }
 
-async fn accept_loop(stop: &AtomicBool, standalone: StandaloneRuntime, slot: Arc<AgentSlot>) {
-    let listener = match tokio::net::TcpListener::bind(&standalone.bind).await {
+async fn accept_loop(
+    stop: &AtomicBool,
+    runtime: crate::standalone::Runtime,
+    slot: Arc<AgentSlot>,
+    creds_slot: Arc<Mutex<Option<Credentials>>>,
+) {
+    let bind = match &runtime {
+        crate::standalone::Runtime::Standalone(standalone) => &standalone.bind,
+        crate::standalone::Runtime::Pq(pq) => &pq.bind,
+    };
+    let listener = match tokio::net::TcpListener::bind(bind).await {
         Ok(listener) => listener,
         Err(err) => {
-            error!(error = %format!("{err:#}"), bind = %standalone.bind, "cannot bind the service listener");
+            error!(error = %format!("{err:#}"), %bind, "cannot bind the service listener");
             return;
         }
     };
-    info!(bind = %standalone.bind, "service listener up (validating; handoff to session agent)");
+    info!(%bind, "service listener up (validating; handoff to session agent)");
     while !stop.load(Ordering::Relaxed) {
         let accepted = tokio::select! {
             _ = wait_for_stop(stop) => break,
@@ -132,11 +147,12 @@ async fn accept_loop(stop: &AtomicBool, standalone: StandaloneRuntime, slot: Arc
             }
         };
         info!(%peer, "connection accepted by the service");
-        let standalone = &standalone;
+        let runtime = &runtime;
         let slot = &slot;
+        let creds_slot = &creds_slot;
         // Sequential on purpose (one session per machine): a second client
         // waits until the current attempt resolves.
-        if let Err(err) = handle_connection(socket, standalone, slot).await {
+        if let Err(err) = handle_connection(socket, peer, runtime, slot, creds_slot).await {
             warn!(%peer, error = %format!("{err:#}"), "connection rejected before handoff");
         }
     }
@@ -156,23 +172,69 @@ const LOGON_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn handle_connection(
     socket: tokio::net::TcpStream,
-    standalone: &StandaloneRuntime,
+    peer: std::net::SocketAddr,
+    runtime: &crate::standalone::Runtime,
     slot: &Arc<AgentSlot>,
+    creds_slot: &Arc<Mutex<Option<Credentials>>>,
 ) -> Result<()> {
     if slot.has_live_agent() {
         // SESSION_BUSY (§18.38): one interactive session per machine.
         bail!("a session agent is already serving a client");
     }
-    let stream = tokio::time::timeout(
-        HANDSHAKE_TIMEOUT,
-        EncryptedStream::server_handshake(TcpTransport::new(socket), &standalone.key, None),
-    )
-    .await
-    .context("handshake timed out")??;
-    info!("handshake validated (possession proof passed)");
+    // Broker mode resolves the PSK per ticket: the grant (key, credentials,
+    // session parameters) lands in `grant_slot` during the handshake.
+    let grant_slot: Arc<Mutex<Option<broker::SessionGrant>>> = Arc::new(Mutex::new(None));
+    let peer_ip = peer.ip().to_string();
+    let stream = match runtime {
+        crate::standalone::Runtime::Standalone(standalone) => {
+            tokio::time::timeout(
+                HANDSHAKE_TIMEOUT,
+                EncryptedStream::server_handshake(TcpTransport::new(socket), &standalone.key, None),
+            )
+            .await
+            .context("handshake timed out")??
+        }
+        crate::standalone::Runtime::Pq(pq) => {
+            let provider = Arc::clone(&pq.provider);
+            let grants = Arc::clone(&grant_slot);
+            tokio::time::timeout(
+                HANDSHAKE_TIMEOUT,
+                EncryptedStream::server_handshake_with(TcpTransport::new(socket), None, move |ticket| {
+                    let provider = Arc::clone(&provider);
+                    let grants = Arc::clone(&grants);
+                    let ip = peer_ip.clone();
+                    async move {
+                        let grant = provider.start(&ticket, &ip).await.map_err(|err| {
+                            transport::TransportError::UnexpectedMessage(format!("broker: {err:#}"))
+                        })?;
+                        let key = grant.key;
+                        *grants.lock().expect("grant slot poisoned") = Some(grant);
+                        Ok(key)
+                    }
+                }),
+            )
+            .await
+            .context("handshake timed out")??
+        }
+    };
+    info!(mode = mode_name(runtime), "handshake validated (possession proof passed)");
+    let grant = grant_slot.lock().expect("grant slot poisoned").take();
+
+    // Per-session credentials (broker mode) replace the credprov slot for
+    // the autologon below; standalone mode keeps its configured credentials.
+    let creds = match runtime {
+        crate::standalone::Runtime::Standalone(standalone) => standalone.creds.clone(),
+        crate::standalone::Runtime::Pq(_) => grant
+            .as_ref()
+            .and_then(|grant| grant.credentials.clone())
+            .map(|creds| Credentials::new(creds.user.trim(), &creds.domain, &creds.password)),
+    };
+    if matches!(runtime, crate::standalone::Runtime::Pq(_)) {
+        *creds_slot.lock().expect("creds slot poisoned") = creds.clone();
+    }
 
     // From here on the client is authenticated: side effects are allowed.
-    ensure_console_session(standalone).await?;
+    ensure_console_session(creds.as_ref()).await?;
 
     let (inner, hello, seqs) = stream.into_handoff();
     let socket = inner.into_stream().into_std().context("tokio -> std socket")?;
@@ -181,26 +243,90 @@ async fn handle_connection(
         bail!("no console session after the logon wait");
     };
     let socket_info = duplicate_socket_into(&socket, agent.pid)?;
-    let config = service_proto::AgentConfig {
-        key: standalone.key,
-        ticket: standalone.ticket,
-        bind: standalone.bind.clone(),
-        output_name: standalone.output_name.clone().unwrap_or_default(),
-        preset: standalone.preset.clone(),
-        ladder: standalone.ladder.clone(),
-        fps_adapt: standalone.fps_adapt.clone(),
-        stats_csv: standalone.stats_csv.clone(),
-        handoff: Some(service_proto::HandoffInfo {
-            send_seq: seqs.send,
-            recv_seq: seqs.recv,
-            hello: hello.encode().to_vec(),
-            socket_info,
-        }),
+    let video = grant.as_ref().and_then(|grant| grant.video.clone());
+    let config = match runtime {
+        crate::standalone::Runtime::Standalone(standalone) => service_proto::AgentConfig {
+            key: standalone.key,
+            ticket: standalone.ticket,
+            bind: standalone.bind.clone(),
+            output_name: standalone.output_name.clone().unwrap_or_default(),
+            preset: standalone.preset.clone(),
+            ladder: standalone.ladder.clone(),
+            fps_adapt: standalone.fps_adapt.clone(),
+            stats_csv: standalone.stats_csv.clone(),
+            handoff: Some(service_proto::HandoffInfo {
+                send_seq: seqs.send,
+                recv_seq: seqs.recv,
+                hello: hello.encode().to_vec(),
+                socket_info,
+            }),
+        },
+        crate::standalone::Runtime::Pq(pq) => {
+            let key = grant.as_ref().expect("pq mode grants a session").key;
+            service_proto::AgentConfig {
+                key,
+                ticket: hello.ticket,
+                bind: pq.bind.clone(),
+                output_name: String::new(),
+                preset: video
+                    .as_ref()
+                    .and_then(|video| video.preset.clone())
+                    .unwrap_or_else(|| "ladder".to_string()),
+                ladder: video
+                    .as_ref()
+                    .and_then(|video| video.ladder.clone())
+                    .unwrap_or_default(),
+                fps_adapt: video
+                    .and_then(|video| video.adaptive_fps)
+                    .unwrap_or_default(),
+                stats_csv: String::new(),
+                handoff: Some(service_proto::HandoffInfo {
+                    send_seq: seqs.send,
+                    recv_seq: seqs.recv,
+                    hello: hello.encode().to_vec(),
+                    socket_info,
+                }),
+            }
+        }
     };
     Agent::write_config(pipe, &config)?;
     info!(pid = agent.pid, "connection handed off to the session agent");
     slot.set(agent, socket);
+
+    // Broker mode: notify the broker when the session ends (best effort;
+    // traffic counters are not plumbed back from the agent yet).
+    if let crate::standalone::Runtime::Pq(pq) = runtime
+        && let Some(grant) = grant.filter(|grant| grant.notify.is_some())
+    {
+        let provider = Arc::clone(&pq.provider);
+        let slot = Arc::clone(slot);
+        let creds_slot = Arc::clone(creds_slot);
+        tokio::spawn(async move {
+            let started = Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                if !slot.has_live_agent() {
+                    break;
+                }
+            }
+            let stats = broker::SessionStats {
+                elapsed: started.elapsed(),
+                bytes_sent: 0,
+                bytes_received: 0,
+            };
+            provider.stop(&grant, &stats).await;
+            // The per-session credentials are one-shot: drop them.
+            *creds_slot.lock().expect("creds slot poisoned") = None;
+        });
+    }
     Ok(())
+}
+
+fn mode_name(runtime: &crate::standalone::Runtime) -> &'static str {
+    match runtime {
+        crate::standalone::Runtime::Standalone(_) => "standalone",
+        crate::standalone::Runtime::Pq(_) => "pq",
+    }
 }
 
 /// Duplicates `socket` into the process `pid` and returns the serialized
@@ -231,12 +357,12 @@ fn duplicate_socket_into(socket: &std::net::TcpStream, pid: u32) -> Result<Vec<u
 
 /// Ensures an interactive console session exists, triggering the autologon
 /// (arm flag + synthetic SAS; the credential provider pipe then pushes the
-/// standalone credentials) when the machine sits at the logon screen.
-async fn ensure_console_session(standalone: &StandaloneRuntime) -> Result<()> {
+/// session credentials) when the machine sits at the logon screen.
+async fn ensure_console_session(creds: Option<&Credentials>) -> Result<()> {
     if unsafe { WTSGetActiveConsoleSessionId() } != 0xFFFF_FFFF {
         return Ok(());
     }
-    let Some(creds) = &standalone.creds else {
+    let Some(creds) = creds else {
         bail!("no console session and no autologon credentials configured");
     };
     info!(user = %creds.username, "no console session; arming autologon and sending SAS");
