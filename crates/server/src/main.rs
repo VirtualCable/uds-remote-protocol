@@ -509,11 +509,11 @@ fn spawn_capture(
     args: &Args,
     fps_shared: Arc<AtomicU32>,
     clock_start: Instant,
-) -> mpsc::Receiver<CaptureMsg> {
+) -> (mpsc::Receiver<CaptureMsg>, std::thread::JoinHandle<()>) {
     let kind = args.source.clone();
     let (width, height, output) = (args.width, args.height, args.output.clone());
     let (tx, rx) = mpsc::channel(2);
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let mut source = match Source::new(&kind, &output, width, height) {
             Ok(s) => s,
             Err(e) => {
@@ -566,7 +566,48 @@ fn spawn_capture(
             }
         }
     });
-    rx
+    (rx, handle)
+}
+
+/// Stops the capture thread: dropping the receiver closes the channel (the
+/// thread exits on its next liveness check or failed send), then the join
+/// waits for the DXGI duplication to be fully released. Must run BEFORE any
+/// console mode change (§18.37): a mode applied with a live duplication
+/// poisons capture for the rest of the process on the Basic Render Driver
+/// stack — every new duplication then fails with access-lost forever.
+fn stop_capture(
+    rx_slot: &mut Option<mpsc::Receiver<CaptureMsg>>,
+    handle_slot: &mut Option<std::thread::JoinHandle<()>>,
+) {
+    rx_slot.take();
+    if let Some(handle) = handle_slot.take()
+        && handle.join().is_err()
+    {
+        warn!("capture thread panicked");
+    }
+}
+
+/// Spawns a fresh capture thread into the slots (after [`stop_capture`]).
+fn start_capture(
+    args: &Args,
+    fps_shared: &Arc<AtomicU32>,
+    clock_start: Instant,
+    rx_slot: &mut Option<mpsc::Receiver<CaptureMsg>>,
+    handle_slot: &mut Option<std::thread::JoinHandle<()>>,
+) {
+    let (rx, handle) = spawn_capture(args, Arc::clone(fps_shared), clock_start);
+    *rx_slot = Some(rx);
+    *handle_slot = Some(handle);
+}
+
+/// Receives the next capture message; pends forever while the capture
+/// thread is down for a display-mode change (§18.37), so it can sit in a
+/// `select!` branch.
+async fn recv_capture(rx: &mut Option<mpsc::Receiver<CaptureMsg>>) -> Option<CaptureMsg> {
+    match rx {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
 }
 
 fn micros_since(start: Instant) -> u64 {
@@ -1438,8 +1479,10 @@ async fn serve_stream<T: ReliableTransport>(
     let mut legs = Legs { udp: udp_sink, stream: Box::new(stream), frag_tx };
 
     let fps_shared = Arc::new(AtomicU32::new(args.fps.max(1)));
-    let mut frame_rx = spawn_capture(args, Arc::clone(&fps_shared), clock_start);
-    let ready = match frame_rx.recv().await {
+    let mut frame_rx: Option<mpsc::Receiver<CaptureMsg>> = None;
+    let mut frame_handle: Option<std::thread::JoinHandle<()>> = None;
+    start_capture(args, &fps_shared, clock_start, &mut frame_rx, &mut frame_handle);
+    let ready = match recv_capture(&mut frame_rx).await {
         Some(CaptureMsg::Ready(r)) => r?,
         other => bail!("capture thread ended before reporting readiness ({other:?})"),
     };
@@ -1569,8 +1612,49 @@ async fn serve_stream<T: ReliableTransport>(
     let mut liveness_tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
-            msg = frame_rx.recv() => {
+            msg = recv_capture(&mut frame_rx) => {
                 match msg {
+                    Some(CaptureMsg::Ready(r)) => {
+                        // Capture (re)start after a display-mode change
+                        // (§18.37): adopt the new geometry, rebuild the
+                        // encoder and re-announce the display.
+                        match r {
+                            Ok(ready) => {
+                                info!(
+                                    w = ready.width,
+                                    h = ready.height,
+                                    "capture restarted; rebuilding encoder"
+                                );
+                                width = ready.width;
+                                height = ready.height;
+                                encoder = build_encoder(args, width, height)?;
+                                announce_display(&mut legs, &mut encoder, width, height).await?;
+                            }
+                            Err(e) => {
+                                // The fresh capture could not initialize on
+                                // the new mode: treat it as poisoned — roll
+                                // the console back and respawn once. With no
+                                // mode applied there is nothing to roll back
+                                // to; the session cannot capture at all.
+                                warn!("capture failed to start after the mode change: {e:#}");
+                                if let Some(mode) = display_mode.applied() {
+                                    bad_modes.push(mode);
+                                    stop_capture(&mut frame_rx, &mut frame_handle);
+                                    display_mode.restore();
+                                    start_capture(
+                                        args,
+                                        &fps_shared,
+                                        clock_start,
+                                        &mut frame_rx,
+                                        &mut frame_handle,
+                                    );
+                                    resize_pending = Some(Instant::now());
+                                } else {
+                                    bail!("capture thread failed to start: {e:#}");
+                                }
+                            }
+                        }
+                    }
                     Some(CaptureMsg::Frame(frame)) => {
                         // Any frame proves the capture is healthy again.
                         resize_pending = None;
@@ -1687,7 +1771,9 @@ async fn serve_stream<T: ReliableTransport>(
                 // instantly) rolls back to the original console mode instead
                 // of leaving the session blind until the storm breaker. The
                 // failed mode is blacklisted so a queued request does not
-                // re-apply it in a loop.
+                // re-apply it in a loop. Capture is restarted around the
+                // restore too: the mode change must never happen with a
+                // live duplication (see the resize path below).
                 if let Some(since) = resize_pending
                     && since.elapsed() >= RESIZE_FRAME_TIMEOUT
                 {
@@ -1697,15 +1783,22 @@ async fn serve_stream<T: ReliableTransport>(
                     if let Some(mode) = display_mode.applied() {
                         bad_modes.push(mode);
                     }
+                    stop_capture(&mut frame_rx, &mut frame_handle);
                     display_mode.restore();
+                    start_capture(args, &fps_shared, clock_start, &mut frame_rx, &mut frame_handle);
                     resize_pending = None;
                 }
                 // Mid-session resize (§18.37): re-apply the resolution
                 // policy with the client's new preference. The mode change
-                // invalidates the DXGI duplication (access-lost); capture
-                // recovers in its own thread. The encoder is rebuilt and
-                // re-announced right away — waiting for the first frame of
-                // the new geometry would leave the client blind meanwhile.
+                // invalidates the DXGI duplication — and on the Basic
+                // Render Driver stack a mode change with a LIVE duplication
+                // poisons every future duplication of this process
+                // (permanent access-lost storm). So the capture thread is
+                // stopped (releasing the duplication) BEFORE the mode is
+                // applied and a fresh one is spawned right after: same
+                // condition as session start, which works. The new thread
+                // reports Ready with the new geometry; the encoder rebuild
+                // and re-announce happen in the capture branch.
                 // Mode changes are serialized: while a previous change has
                 // not delivered a frame, new requests wait for later ticks
                 // (a window drag would otherwise stack mode changes on top
@@ -1718,22 +1811,25 @@ async fn serve_stream<T: ReliableTransport>(
                             fixed: args.fixed_resolution,
                             preferred: request,
                         };
-                        if display_mode.apply(&policy) {
-                            let mode = display_mode.applied();
-                            if mode.is_some_and(|m| bad_modes.contains(&m)) {
-                                // Known-poisonous mode: roll back at once and
-                                // keep the session on the current geometry.
-                                warn!(?mode, "resize targeted a blacklisted mode; reverting");
-                                display_mode.restore();
-                            } else {
-                                if let Some((w, h)) = mode {
-                                    info!(w, h, "resize applied; rebuilding encoder");
-                                    width = w;
-                                    height = h;
-                                    encoder = build_encoder(args, width, height)?;
-                                    announce_display(&mut legs, &mut encoder, width, height).await?;
+                        match display_mode.plan(&policy) {
+                            // No change needed (no aspect match, or already
+                            // at the target mode): leave the console alone.
+                            None => {}
+                            Some(target) if bad_modes.contains(&target) => {
+                                warn!(?target, "resize targeted a blacklisted mode; ignored");
+                            }
+                            Some(_) => {
+                                stop_capture(&mut frame_rx, &mut frame_handle);
+                                if display_mode.apply(&policy) {
+                                    resize_pending = Some(Instant::now());
                                 }
-                                resize_pending = Some(Instant::now());
+                                start_capture(
+                                    args,
+                                    &fps_shared,
+                                    clock_start,
+                                    &mut frame_rx,
+                                    &mut frame_handle,
+                                );
                             }
                         }
                     }

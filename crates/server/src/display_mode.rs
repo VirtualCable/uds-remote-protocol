@@ -91,6 +91,12 @@ mod stub {
             false
         }
 
+        /// The stub never plans a mode change.
+        #[must_use]
+        pub fn plan(&self, _policy: &super::ResolutionPolicy) -> Option<(u32, u32)> {
+            None
+        }
+
         /// No mode is ever applied by the stub.
         #[must_use]
         pub fn applied(&self) -> Option<(u32, u32)> {
@@ -222,6 +228,22 @@ mod win {
         #[must_use]
         pub fn applied(&self) -> Option<(u32, u32)> {
             self.applied
+        }
+
+        /// Computes the target mode for `policy` without touching the
+        /// console. Returns `None` when nothing should change (no match, or
+        /// the target is already applied). Lets the caller release the DXGI
+        /// duplication BEFORE the mode is set (§18.37: applying a mode with
+        /// a live duplication poisons capture for the rest of the process
+        /// on the Basic Render Driver stack).
+        #[must_use]
+        pub fn plan(&self, policy: &ResolutionPolicy) -> Option<(u32, u32)> {
+            let target = super::pick_mode(policy, &supported_modes())?;
+            if self.applied == Some(target) {
+                None
+            } else {
+                Some(target)
+            }
         }
 
         /// Restores the original mode immediately (poison-mode revert,
