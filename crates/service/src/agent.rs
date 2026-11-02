@@ -371,20 +371,42 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
     unsafe {
         OpenProcessToken(
             GetCurrentProcess(),
-            TOKEN_ACCESS_MASK(TOKEN_DUPLICATE.0 | TOKEN_QUERY.0),
+            TOKEN_ACCESS_MASK(TOKEN_DUPLICATE.0 | TOKEN_QUERY.0 | TOKEN_ADJUST_PRIVILEGES.0),
             &raw mut token_handle,
         )
     }
     .context("OpenProcessToken(self)")?;
     let own_token = OwnedHandle(token_handle);
 
+    // SeTcbPrivilege is present in a SYSTEM token but DISABLED by default.
+    // The privilege check of SetTokenInformation(TokenSessionId) runs against
+    // the CALLER's token, so it must be enabled on our own process token
+    // (persists for the process lifetime — the future secure-desktop helper
+    // spawn needs it too).
+    let mut luid = windows::Win32::Foundation::LUID::default();
+    unsafe { LookupPrivilegeValueW(None, SE_TCB_NAME, &raw mut luid) }
+        .context("LookupPrivilegeValue(SeTcbPrivilege)")?;
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [windows::Win32::Security::LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    // SAFETY: `own_token` has ADJUST_PRIVILEGES; `privileges` outlives the
+    // call. AdjustTokenPrivileges reports success even when nothing changed;
+    // the SetTokenInformation below is the real check.
+    unsafe {
+        AdjustTokenPrivileges(own_token.0, false, Some(&raw const privileges), 0, None, None)
+    }
+    .context("AdjustTokenPrivileges(SeTcbPrivilege)")?;
+
     let mut dup_handle = HANDLE::default();
     let dup_access = TOKEN_ACCESS_MASK(
         TOKEN_ASSIGN_PRIMARY.0
             | TOKEN_DUPLICATE.0
             | TOKEN_QUERY.0
-            | TOKEN_ADJUST_SESSIONID.0
-            | TOKEN_ADJUST_PRIVILEGES.0,
+            | TOKEN_ADJUST_SESSIONID.0,
     );
     // SAFETY: `own_token` is open with DUPLICATE; the out pointer is valid.
     unsafe {
@@ -399,27 +421,8 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
     }
     .context("DuplicateTokenEx(self)")?;
     let probe_token = OwnedHandle(dup_handle);
-    // SeTcbPrivilege is present in a SYSTEM token but DISABLED by default;
-    // SetTokenInformation(TokenSessionId) checks for the *enabled* privilege.
-    let mut luid = windows::Win32::Foundation::LUID::default();
-    unsafe { LookupPrivilegeValueW(None, SE_TCB_NAME, &raw mut luid) }
-        .context("LookupPrivilegeValue(SeTcbPrivilege)")?;
-    let privileges = TOKEN_PRIVILEGES {
-        PrivilegeCount: 1,
-        Privileges: [windows::Win32::Security::LUID_AND_ATTRIBUTES {
-            Luid: luid,
-            Attributes: SE_PRIVILEGE_ENABLED,
-        }],
-    };
-    // SAFETY: `probe_token` has ADJUST_PRIVILEGES; `privileges` outlives the
-    // call. Note: AdjustTokenPrivileges reports success even when nothing
-    // changed; the SetTokenInformation below is the real check.
-    unsafe {
-        AdjustTokenPrivileges(probe_token.0, false, Some(&raw const privileges), 0, None, None)
-    }
-    .context("AdjustTokenPrivileges(SeTcbPrivilege)")?;
     // SAFETY: `probe_token` has ADJUST_SESSIONID; `session_id` outlives the
-    // call. Requires SeTcbPrivilege — enabled just above.
+    // call; the caller's SeTcbPrivilege is enabled above.
     unsafe {
         SetTokenInformation(
             probe_token.0,
