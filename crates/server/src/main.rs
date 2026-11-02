@@ -82,6 +82,10 @@ struct Args {
     bitrate: Option<u32>,
     width: u32,
     height: u32,
+    /// Server-fixed console resolution (§18.37): when set, the client's
+    /// HELLO/DesktopResize preference is ignored and this mode (or the
+    /// closest supported one) is applied for the session.
+    fixed_resolution: Option<(u32, u32)>,
     fps: u32,
     max_frames: Option<u32>,
     audio: bool,
@@ -98,6 +102,7 @@ struct Args {
     handoff: Option<service_proto::HandoffInfo>,
 }
 
+#[allow(clippy::too_many_lines)] // config file + CLI + agent-config frame seeding
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         bind: "127.0.0.1:19790".parse().expect("valid default"),
@@ -111,6 +116,7 @@ fn parse_args() -> Result<Args> {
         bitrate: None,
         width: 640,
         height: 480,
+        fixed_resolution: None,
         fps: 30,
         max_frames: None,
         audio: true,
@@ -154,6 +160,9 @@ fn parse_args() -> Result<Args> {
             args.preset = config.preset;
             args.ladder = config.ladder;
             args.fps_adapt = config.fps_adapt;
+            if config.fixed_resolution.0 > 0 && config.fixed_resolution.1 > 0 {
+                args.fixed_resolution = Some(config.fixed_resolution);
+            }
             if !config.stats_csv.is_empty() {
                 args.stats_csv = Some(config.stats_csv.into());
             }
@@ -189,6 +198,9 @@ fn parse_args() -> Result<Args> {
             "--bitrate" => args.bitrate = Some(value.parse().context("bad --bitrate")?),
             "--width" => args.width = value.parse().context("bad --width")?,
             "--height" => args.height = value.parse().context("bad --height")?,
+            "--resolution" => {
+                args.fixed_resolution = Some(parse_resolution(&value).context("bad --resolution")?);
+            }
             "--fps" => args.fps = value.parse().context("bad --fps")?,
             "--max-frames" => args.max_frames = Some(value.parse().context("bad --max-frames")?),
             "--audio-preset" => args.audio_preset = value,
@@ -203,6 +215,17 @@ fn parse_args() -> Result<Args> {
         bail!("--key <hex64> or --agent-config-stdin is required");
     }
     Ok(args)
+}
+
+/// Parses a `"WIDTHxHEIGHT"` resolution string (e.g. `1920x1080`).
+fn parse_resolution(value: &str) -> Result<(u32, u32)> {
+    let (w, h) = value
+        .split_once(['x', 'X'])
+        .context("expected WIDTHxHEIGHT")?;
+    let w: u32 = w.trim().parse().context("bad width")?;
+    let h: u32 = h.trim().parse().context("bad height")?;
+    anyhow::ensure!(w > 0 && h > 0, "resolution must be non-zero");
+    Ok((w, h))
 }
 
 /// Applies a TOML config file (reference/standalone mode) to `args`.
@@ -233,6 +256,10 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
         args.ticket = Some(server::config::ticket_bytes(&standalone.ticket));
         args.width = standalone.width;
         args.height = standalone.height;
+        if let Some(resolution) = &standalone.resolution {
+            args.fixed_resolution =
+                Some(parse_resolution(resolution).context("bad standalone.resolution")?);
+        }
         args.fps = standalone.fps;
         args.preset.clone_from(&standalone.preset);
         args.ladder = standalone.ladder.to_wire();
@@ -434,13 +461,13 @@ async fn display_sender(
     }
 }
 
-/// Capture source startup report: geometry plus the captured output's GDI
-/// device name (for input coordinate translation, §10).
+/// Capture source startup report: the display geometry. (Pointer
+/// coordinates are desktop-normalized end to end, §18.37, so the output
+/// device name is no longer needed for input translation.)
 #[derive(Debug)]
 struct ReadyInfo {
     width: u32,
     height: u32,
-    output_device: Option<String>,
 }
 
 /// Capture thread → main loop messages.
@@ -490,11 +517,7 @@ fn spawn_capture(
             }
         };
         let (width, height) = source.dimensions();
-        let ready = ReadyInfo {
-            width,
-            height,
-            output_device: source.output_device(),
-        };
+        let ready = ReadyInfo { width, height };
         if tx.blocking_send(CaptureMsg::Ready(Ok(ready))).is_err() {
             return;
         }
@@ -1199,13 +1222,13 @@ async fn handle_frame<T: ReliableTransport>(
 
 /// Real injection on Windows (`SendInput`), logging elsewhere (§10).
 #[cfg(all(windows, feature = "windows-capture"))]
-fn new_injector(output_device: Option<&str>) -> Box<dyn server::input::InputInjector> {
-    Box::new(server::input::SendInputInjector::new(output_device))
+fn new_injector() -> Box<dyn server::input::InputInjector> {
+    Box::new(server::input::SendInputInjector::new())
 }
 
 /// Development injector: logs input events without a Windows session.
 #[cfg(not(all(windows, feature = "windows-capture")))]
-fn new_injector(_output_device: Option<&str>) -> Box<dyn server::input::InputInjector> {
+fn new_injector() -> Box<dyn server::input::InputInjector> {
     Box::new(server::input::LogInjector::default())
 }
 
@@ -1353,6 +1376,24 @@ async fn serve_stream<T: ReliableTransport>(
         warn!("privacy screen ignored: incompatible with console-mirror capture");
     }
 
+    // Resolution policy (§18.36/§18.37): a fixed server resolution wins;
+    // otherwise approach the client's HELLO preference without exceeding it.
+    // Applied before capture starts so the first frames already carry the
+    // final geometry; the guard restores the original mode on session end.
+    let mut display_mode = server::display_mode::DisplayModeGuard::new();
+    {
+        let preferred = stream
+            .peer_hello()
+            .map_or((0, 0), |h| (u32::from(h.pref_width), u32::from(h.pref_height)));
+        let policy = server::display_mode::ResolutionPolicy {
+            fixed: args.fixed_resolution,
+            preferred,
+        };
+        if display_mode.apply(&policy) {
+            info!(?args.fixed_resolution, ?preferred, "session resolution applied");
+        }
+    }
+
     let mut udp_bind = args.bind;
     udp_bind.set_port(0);
     let (pending, token) = udp_offer(&mut stream, &udp_bind.to_string(), ticket, key).await?;
@@ -1397,7 +1438,7 @@ async fn serve_stream<T: ReliableTransport>(
         Some(CaptureMsg::Ready(r)) => r?,
         other => bail!("capture thread ended before reporting readiness ({other:?})"),
     };
-    let (width, height) = (ready.width, ready.height);
+    let (mut width, mut height) = (ready.width, ready.height);
     let mut encoder = build_encoder(args, width, height)?;
 
     // Announce the display codec/geometry before the first frame (§8.3/§8.4).
@@ -1482,7 +1523,7 @@ async fn serve_stream<T: ReliableTransport>(
         quality: None,
         forced_video: false,
         last_keyframe_req: None,
-        injector: new_injector(ready.output_device.as_deref()),
+        injector: new_injector(),
         video_ceiling_kbps: args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS),
         audio_ceiling_kbps,
         audio_control,
@@ -1498,6 +1539,7 @@ async fn serve_stream<T: ReliableTransport>(
             Some(server::fps::FpsAdapter::new(policy, args.fps.max(1)))
         },
         last_metrics: None,
+        resize_request: None,
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -1519,6 +1561,20 @@ async fn serve_stream<T: ReliableTransport>(
             msg = frame_rx.recv() => {
                 match msg {
                     Some(CaptureMsg::Frame(frame)) => {
+                        // Geometry change (mid-session resize, §18.37): the
+                        // capture recovered from access-lost with a new mode;
+                        // rebuild the encoder and re-announce the display.
+                        if frame.width != width || frame.height != height {
+                            info!(
+                                old = ?(width, height),
+                                new = ?(frame.width, frame.height),
+                                "display geometry changed; rebuilding encoder"
+                            );
+                            width = frame.width;
+                            height = frame.height;
+                            encoder = build_encoder(args, width, height)?;
+                            announce_display(&mut legs, &mut encoder, width, height).await?;
+                        }
                         frame_id = handle_frame(
                             &frame,
                             &mut legs,
@@ -1612,6 +1668,18 @@ async fn serve_stream<T: ReliableTransport>(
             _ = liveness_tick.tick() => {
                 if last_recv.elapsed() >= CLIENT_LIVENESS_TIMEOUT {
                     bail!("client silent for {CLIENT_LIVENESS_TIMEOUT:?}; session dead");
+                }
+                // Mid-session resize (§18.37): re-apply the resolution
+                // policy with the client's new preference. The mode change
+                // invalidates the DXGI duplication (access-lost); capture
+                // recovers and the new geometry triggers an encoder rebuild
+                // + fresh DisplayInfo in the frame branch below.
+                if let Some(request) = ctl.resize_request.take() {
+                    let policy = server::display_mode::ResolutionPolicy {
+                        fixed: args.fixed_resolution,
+                        preferred: request,
+                    };
+                    display_mode.apply(&policy);
                 }
             }
             msg = scard_rx.recv() => {
@@ -1797,6 +1865,9 @@ struct ControlState {
     fps_adapter: Option<server::fps::FpsAdapter>,
     /// Last link-quality report (for the telemetry CSV, §12.8).
     last_metrics: Option<(u64, u64, u16)>,
+    /// Pending mid-session desktop resize requested by the client
+    /// (`DesktopResize`, §18.37); applied by the liveness tick.
+    resize_request: Option<(u32, u32)>,
 }
 
 impl ControlState {
@@ -1862,6 +1933,10 @@ fn handle_stream_packet(
                 encoder.request_keyframe();
                 ctl.last_keyframe_req = Some(Instant::now());
             }
+        }
+        Ok(ControlMessage::DesktopResize { width, height }) => {
+            info!(width, height, "desktop resize requested by client (§18.37)");
+            ctl.resize_request = Some((width, height));
         }
         Ok(_) => {} // other control messages: not handled here yet
         Err(e) => warn!("undecodable control message: {e}"),
@@ -2104,18 +2179,6 @@ impl Source {
             Self::Dxgi { source, .. } => {
                 use server::capture::FrameSource as _;
                 source.dimensions()
-            }
-        }
-    }
-
-    /// GDI device name of the captured output, when the source has one.
-    fn output_device(&self) -> Option<String> {
-        match self {
-            Self::Synthetic(_) => None,
-            #[cfg(all(windows, feature = "windows-capture"))]
-            Self::Dxgi { source, .. } => {
-                use server::capture::FrameSource as _;
-                source.output_device().map(str::to_owned)
             }
         }
     }

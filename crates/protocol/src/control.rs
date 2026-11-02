@@ -142,6 +142,19 @@ pub enum ControlMessage {
         /// In-band FEC expected on the encoder.
         fec: bool,
     },
+    /// Desktop resize request, client → server (§18.37): the client's
+    /// preferred resolution changed mid-session (window resize, fullscreen
+    /// toggle). The server re-applies its resolution policy (fixed config
+    /// wins; otherwise closest supported mode not exceeding the request)
+    /// and answers with a fresh `DisplayInfo` carrying the real geometry.
+    /// Appended at the end so existing postcard variant indices do not
+    /// shift.
+    DesktopResize {
+        /// Preferred width in pixels.
+        width: u32,
+        /// Preferred height in pixels.
+        height: u32,
+    },
 }
 
 impl ControlMessage {

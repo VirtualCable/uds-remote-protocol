@@ -82,7 +82,7 @@ async fn client_stream(addr: SocketAddr) -> EncryptedStream<Box<dyn transport::R
         .connect(&Target::new(addr, ticket(), secret()))
         .await
         .unwrap();
-    EncryptedStream::client_handshake(raw, &ticket(), &secret(), 0)
+    EncryptedStream::client_handshake(raw, &ticket(), &secret(), 0, (0, 0))
         .await
         .unwrap()
 }

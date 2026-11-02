@@ -32,7 +32,7 @@
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 5;
+pub const AGENT_CONFIG_VERSION: u8 = 6;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -91,6 +91,9 @@ pub struct AgentConfig {
     /// Path of the per-session telemetry CSV; empty disables it (telemetry
     /// then only goes to the log every STATS_LOG_INTERVAL).
     pub stats_csv: String,
+    /// Server-fixed console resolution (§18.37); `(0, 0)` means the agent
+    /// approaches the client's preferred mode instead.
+    pub fixed_resolution: (u32, u32),
     /// Validated-connection handoff: when present, the agent must not bind
     /// its own listener; it rebuilds the connected socket and continues the
     /// stream from these seqs.
@@ -151,6 +154,8 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(s.as_bytes());
     }
+    out.extend_from_slice(&config.fixed_resolution.0.to_le_bytes());
+    out.extend_from_slice(&config.fixed_resolution.1.to_le_bytes());
     match &config.handoff {
         None => out.push(0),
         Some(h) => {
@@ -195,9 +200,14 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         *slot = core::str::from_utf8(&rest[..len]).map_err(|_| DecodeError::BadUtf8)?;
         rest = &rest[len..];
     }
-    if rest.is_empty() {
+    if rest.len() < 9 {
         return Err(DecodeError::Truncated);
     }
+    let fixed_resolution = (
+        u32::from_le_bytes(rest[..4].try_into().expect("4-byte slice")),
+        u32::from_le_bytes(rest[4..8].try_into().expect("4-byte slice")),
+    );
+    rest = &rest[8..];
     let handoff = match rest[0] {
         0 => {
             if rest.len() != 1 {
@@ -249,6 +259,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         ladder: ladder.to_owned(),
         fps_adapt: fps_adapt.to_owned(),
         stats_csv: stats_csv.to_owned(),
+        fixed_resolution,
         handoff,
     })
 }
@@ -267,6 +278,7 @@ mod tests {
             ladder: "up=15,hold_up_ms=1500".to_owned(),
             fps_adapt: "min_fps=8".to_owned(),
             stats_csv: String::new(),
+            fixed_resolution: (1280, 720),
             handoff: None,
         }
     }

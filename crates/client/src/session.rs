@@ -81,6 +81,10 @@ pub struct ClientConfig {
     /// runs the request dispatcher against the local PC/SC backend (or
     /// answers `SCARD_E_NO_SERVICE` when there is none).
     pub smartcard: bool,
+    /// Preferred remote display resolution (§18.37), sent in the HELLO.
+    /// `(0, 0)` means no preference: the server keeps its current mode or
+    /// applies its own fixed `resolution` policy.
+    pub pref_resolution: (u16, u16),
 }
 
 /// One client session (§15.3). Build with [`Session::new`], then drive it
@@ -135,8 +139,14 @@ impl Session {
             flags |= protocol::FLAG_SMARTCARD;
         }
         let mut stream: EncryptedStream<Box<dyn ReliableTransport>> =
-            EncryptedStream::client_handshake(raw, &self.config.ticket, &self.config.key, flags)
-                .await?;
+            EncryptedStream::client_handshake(
+                raw,
+                &self.config.ticket,
+                &self.config.key,
+                flags,
+                self.config.pref_resolution,
+            )
+            .await?;
         info!(
             privacy_screen = self.config.privacy_screen,
             smartcard = self.config.smartcard,
@@ -501,11 +511,11 @@ impl Session {
                 stream.send(channel::CLIPBOARD, &offer.encode()).await?;
             }
             Ok(ClientCommand::Resize { width, height }) => {
-                warn!(
-                    width,
-                    height,
-                    "remote display-mode change not supported by the protocol yet (§15.2); ignored"
-                );
+                // §18.37: ask the server to re-apply its resolution policy
+                // with the new preference; the answer is a fresh
+                // `DisplayInfo` with the real geometry.
+                let msg = ControlMessage::DesktopResize { width, height };
+                stream.send(channel::CONTROL, &msg.encode()?).await?;
             }
             Ok(ClientCommand::RequestKeyframe { display_id }) => {
                 if core

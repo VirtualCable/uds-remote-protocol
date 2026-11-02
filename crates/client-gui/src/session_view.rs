@@ -107,6 +107,13 @@ impl SessionView {
         let _ = self.commands.try_send(ClientCommand::Close);
     }
 
+    /// Notifies the session of a new preferred resolution (§18.37): the
+    /// server re-applies its resolution policy and answers with a fresh
+    /// `DisplayInfo` carrying the real geometry.
+    pub fn resize(&self, width: u32, height: u32) {
+        let _ = self.commands.try_send(ClientCommand::Resize { width, height });
+    }
+
     /// Drains pending session events; returns false when the session is gone.
     pub fn poll_events(&mut self, gpu: &Gpu, window: &Window, event_loop: &ActiveEventLoop) -> bool {
         while let Ok(event) = self.events.try_recv() {
@@ -249,28 +256,26 @@ impl SessionView {
         }
     }
 
-    /// Forwards pointer motion, mapping window coordinates to display pixels.
+    /// Forwards pointer motion, normalized to 0..=65535 over the window
+    /// (§18.37): the server maps it onto the whole desktop at injection
+    /// time, so resizes never race and no side stores the other's geometry.
     pub fn handle_pointer_move(&mut self, x: f64, y: f64, window: &Window) {
         self.pointer = (x, y);
-        let (dw, dh) = self.display_size;
-        if dw == 0 || dh == 0 {
-            return;
-        }
         let size = window.inner_size();
         if size.width == 0 || size.height == 0 {
             return;
         }
-        #[expect(clippy::cast_possible_truncation)]
-        let (dx, dy) = (
-            (x * f64::from(dw) / f64::from(size.width)).round() as i32,
-            (y * f64::from(dh) / f64::from(size.height)).round() as i32,
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (nx, ny) = (
+            (x / f64::from(size.width) * 65535.0).round().clamp(0.0, 65535.0) as u16,
+            (y / f64::from(size.height) * 65535.0).round().clamp(0.0, 65535.0) as u16,
         );
         let _ = self
             .commands
             .try_send(ClientCommand::Input(InputMessage::PointerMove {
                 display_id: 0,
-                x: dx.clamp(0, dw.saturating_sub(1).cast_signed()),
-                y: dy.clamp(0, dh.saturating_sub(1).cast_signed()),
+                x: nx,
+                y: ny,
             }));
     }
 

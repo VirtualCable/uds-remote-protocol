@@ -259,6 +259,7 @@ async fn handle_connection(
             ladder: standalone.ladder.clone(),
             fps_adapt: standalone.fps_adapt.clone(),
             stats_csv: standalone.stats_csv.clone(),
+            fixed_resolution: standalone.fixed_resolution.unwrap_or((0, 0)),
             handoff: Some(service_proto::HandoffInfo {
                 send_seq: seqs.send,
                 recv_seq: seqs.recv,
@@ -285,6 +286,13 @@ async fn handle_connection(
                     .and_then(|video| video.adaptive_fps)
                     .unwrap_or_default(),
                 stats_csv: String::new(),
+                // §18.37: a fixed display policy in the ticket wins over the
+                // client's preference; otherwise the agent approaches it.
+                fixed_resolution: grant
+                    .as_ref()
+                    .and_then(|grant| grant.display.as_ref())
+                    .filter(|display| display.fixed)
+                    .map_or((0, 0), |display| (display.width, display.height)),
                 handoff: Some(service_proto::HandoffInfo {
                     send_seq: seqs.send,
                     recv_seq: seqs.recv,

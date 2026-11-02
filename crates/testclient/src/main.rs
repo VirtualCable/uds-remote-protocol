@@ -83,14 +83,17 @@ impl SelfTest {
     /// Fixed schedule: `(delay from start, message)`.
     fn schedule() -> Vec<(Duration, InputMessage)> {
         use InputMessage as I;
+        // Fixed schedule: `(delay from start, message)`. Pointer positions
+        // are normalized 0..=65535 (§18.37); the values below target roughly
+        // the same spots as the old pixel schedule on a ~1680x1050 desktop.
         let mut v: Vec<(Duration, InputMessage)> = vec![
-            (Duration::from_millis(2000), I::PointerMove { display_id: 0, x: 700, y: 400 }),
+            (Duration::from_millis(2000), I::PointerMove { display_id: 0, x: 27306, y: 24965 }),
             (Duration::from_millis(2500), I::PointerButton { button: PointerButton::Left, down: true }),
             (Duration::from_millis(2600), I::PointerButton { button: PointerButton::Left, down: false }),
-            (Duration::from_millis(4000), I::PointerMove { display_id: 0, x: 45, y: 46 }),
+            (Duration::from_millis(4000), I::PointerMove { display_id: 0, x: 1755, y: 2871 }),
             (Duration::from_millis(4500), I::PointerButton { button: PointerButton::Left, down: true }),
             (Duration::from_millis(4600), I::PointerButton { button: PointerButton::Left, down: false }),
-            (Duration::from_millis(8000), I::PointerMove { display_id: 0, x: 700, y: 400 }),
+            (Duration::from_millis(8000), I::PointerMove { display_id: 0, x: 27306, y: 24965 }),
             (Duration::from_millis(8500), I::PointerButton { button: PointerButton::Right, down: true }),
             (Duration::from_millis(8600), I::PointerButton { button: PointerButton::Right, down: false }),
         ];
@@ -504,7 +507,7 @@ fn dump_frame_ppm(displays: &Displays, path: &std::path::Path) -> Result<()> {
 /// Input event capture over the minifb window (§10): polls at ~125 Hz and
 /// emits protocol messages for the diffs (moves, buttons, keys).
 struct InputPoll {
-    last_pos: Option<(i32, i32)>,
+    last_pos: Option<(u16, u16)>,
     buttons: [bool; 3],
     keys: Vec<minifb::Key>,
 }
@@ -522,14 +525,18 @@ impl InputPoll {
         if fw == 0 || fh == 0 {
             return out;
         }
-        // Pointer position, mapped from window to display-local pixels.
+        // Pointer position, normalized to 0..=65535 over the window
+        // (§18.37): the server maps it onto the whole desktop.
         if let Some((mx, my)) = window.get_mouse_pos(minifb::MouseMode::Clamp) {
             let (ww, wh) = window.get_size();
             // Screen sizes are tiny; f32 precision is more than enough here.
             #[allow(clippy::cast_precision_loss)]
-            let (fwf, wwf, fhf, whf) = (fw as f32, ww.max(1) as f32, fh as f32, wh.max(1) as f32);
+            let (wwf, whf) = (ww.max(1) as f32, wh.max(1) as f32);
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let pos = ((mx * fwf / wwf) as i32, (my * fhf / whf) as i32);
+            let pos = (
+                (mx / wwf * 65535.0).clamp(0.0, 65535.0) as u16,
+                (my / whf * 65535.0).clamp(0.0, 65535.0) as u16,
+            );
             if self.last_pos != Some(pos) {
                 self.last_pos = Some(pos);
                 out.push(InputMessage::PointerMove { display_id: 0, x: pos.0, y: pos.1 });
@@ -720,6 +727,7 @@ async fn run() -> Result<()> {
         mic: args.mic,
         privacy_screen: args.privacy,
         smartcard: args.smartcard,
+        pref_resolution: (0, 0),
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);
     let (session, commands, displays) = Session::new(config, events_tx);

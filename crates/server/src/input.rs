@@ -15,9 +15,10 @@
 //! - Keyboard: `SendInput` with `KEYEVENTF_SCANCODE` (+ `KEYEVENTF_EXTENDEDKEY`
 //!   when the message carries the `0xE0` flag): Set 1 scancodes straight
 //!   through, layouts stay a client-side concern.
-//! - Pointer: coordinates arrive display-local; the injector translates them
-//!   to virtual-desktop pixels via the monitor layout and sends normalized
-//!   absolute moves (`MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`).
+//! - Pointer: coordinates arrive **normalized to 0..=65535 over the whole
+//!   virtual desktop** (§18.37), exactly the range
+//!   `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK` expects, so injection
+//!   is a pass-through — no monitor-layout translation, no resize races.
 
 use protocol::{InputMessage, PointerButton};
 
@@ -25,8 +26,8 @@ use protocol::{InputMessage, PointerButton};
 pub trait InputInjector {
     /// Key press/release (Set 1 scancode + extended flag).
     fn key(&mut self, down: bool, scancode: u16, extended: bool);
-    /// Absolute pointer move, display-local pixels.
-    fn pointer_move(&mut self, display_id: u8, x: i32, y: i32);
+    /// Absolute pointer move, normalized 0..=65535 over the virtual desktop.
+    fn pointer_move(&mut self, display_id: u8, x: u16, y: u16);
     /// Pointer button press/release.
     fn pointer_button(&mut self, button: PointerButton, down: bool);
     /// Wheel motion in detents (positive = up/right).
@@ -67,7 +68,7 @@ impl InputInjector for LogInjector {
         tracing::debug!(down, scancode, extended, "input key");
     }
 
-    fn pointer_move(&mut self, display_id: u8, x: i32, y: i32) {
+    fn pointer_move(&mut self, display_id: u8, x: u16, y: u16) {
         self.events += 1;
         tracing::trace!(display_id, x, y, "input move");
     }
@@ -103,106 +104,25 @@ mod win {
         MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
         SendInput, VIRTUAL_KEY,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-        SM_YVIRTUALSCREEN,
-    };
-    use windows::Win32::Foundation::{LPARAM, RECT};
-    use windows::Win32::Graphics::Gdi::{
-        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
-    };
-    use windows::core::BOOL;
 
     /// `XBUTTON1`/`XBUTTON2` values for `MOUSEINPUT.mouseData` (winuser.h).
     const XBUTTON1: u32 = 0x0001;
     const XBUTTON2: u32 = 0x0002;
 
     /// Sends input events to the session the process runs in (§10).
-    pub struct SendInputInjector {
-        /// GDI device name of the captured output (e.g. `\\.\DISPLAY2`).
-        /// Display-local pointer coordinates are translated through this
-        /// monitor's desktop rectangle; without it they are assumed to start
-        /// at the primary monitor's origin.
-        output_device: Option<String>,
-    }
-
-    impl Default for SendInputInjector {
-        fn default() -> Self {
-            Self::new(None)
-        }
-    }
-
-    /// One pass over the desktop monitors; the callback gets each monitor's
-    /// device name and rectangle and may stop the enumeration with `false`.
-    fn for_each_monitor(mut f: impl FnMut(&str, RECT) -> bool) {
-        unsafe extern "system" fn tramp(
-            monitor: HMONITOR,
-            _hdc: HDC,
-            _rect: *mut RECT,
-            data: LPARAM,
-        ) -> BOOL {
-            // SAFETY: `data` is the `&mut dyn FnMut` installed by the caller;
-            // `info` is a valid, correctly sized out struct.
-            let f = unsafe { &mut *(data.0 as *mut &mut dyn FnMut(&str, RECT) -> bool) };
-            let mut info = MONITORINFOEXW {
-                monitorInfo: windows::Win32::Graphics::Gdi::MONITORINFO {
-                    cbSize: u32::try_from(std::mem::size_of::<MONITORINFOEXW>()).unwrap_or(0),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let ok = unsafe { GetMonitorInfoW(monitor, (&raw mut info).cast()) };
-            if !ok.as_bool() {
-                return true.into();
-            }
-            let name = {
-                let len = info
-                    .szDevice
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(info.szDevice.len());
-                String::from_utf16_lossy(&info.szDevice[..len])
-            };
-            f(&name, info.monitorInfo.rcMonitor).into()
-        }
-        let mut f: &mut dyn FnMut(&str, RECT) -> bool = &mut f;
-        // SAFETY: `f` outlives the call and is only used by `tramp` above.
-        unsafe {
-            let _ = EnumDisplayMonitors(None, None, Some(tramp), LPARAM((&raw mut f) as isize));
-        }
-    }
+    ///
+    /// Pointer coordinates arrive normalized to 0..=65535 over the whole
+    /// virtual desktop (§18.37), the exact range
+    /// `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK` expects, so moves
+    /// are a pass-through: no monitor-layout translation, no resize races.
+    #[derive(Default)]
+    pub struct SendInputInjector;
 
     impl SendInputInjector {
-        /// Creates an injector bound to the captured `output_device` (GDI
-        /// device name) when known.
+        /// Creates an injector.
         #[must_use]
-        pub fn new(output_device: Option<&str>) -> Self {
-            Self {
-                output_device: output_device.map(str::to_owned),
-            }
-        }
-
-        /// Desktop rectangle of the captured output, resolved on each move
-        /// (monitor topology changes at runtime when the virtual display
-        /// attaches/detaches). Falls back to the primary monitor at the
-        /// desktop origin.
-        fn output_rect(&self) -> (i32, i32, i32, i32) {
-            if let Some(device) = &self.output_device {
-                let mut found = None;
-                for_each_monitor(|name, rect| {
-                    if name == device {
-                        found = Some(rect);
-                        false
-                    } else {
-                        true
-                    }
-                });
-                if let Some(rect) = found {
-                    return (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
-                }
-                tracing::warn!(device, "captured output not attached; using primary-origin mapping");
-            }
-            (0, 0, 0, 0)
+        pub fn new() -> Self {
+            Self
         }
 
         fn send(inputs: &[INPUT]) {
@@ -253,56 +173,14 @@ mod win {
             Self::send(&[input]);
         }
 
-        fn pointer_move(&mut self, _display_id: u8, x: i32, y: i32) {
-            // Display-local → virtual-desktop: offset by the captured
-            // monitor's desktop rectangle (extended layouts place it
-            // anywhere, not at the origin).
-            let (left, top, _, _) = self.output_rect();
-            let (dx, dy) = (left + x, top + y);
-            // Refresh the virtual-desktop metrics on every move: the virtual
-            // display attaching/detaching changes them mid-session.
-            // SAFETY: GetSystemMetrics is always safe to call.
-            let (ox, oy, w, h) = unsafe {
-                (
-                    GetSystemMetrics(SM_XVIRTUALSCREEN),
-                    GetSystemMetrics(SM_YVIRTUALSCREEN),
-                    GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1),
-                    GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1),
-                )
-            };
-            // Normalize to 0..65535 over the virtual desktop.
-            let nx = i32::try_from((i64::from(dx - ox) * 65_535 / i64::from(w)).clamp(0, 65_535))
-                .unwrap_or(0);
-            let ny = i32::try_from((i64::from(dy - oy) * 65_535 / i64::from(h)).clamp(0, 65_535))
-                .unwrap_or(0);
-            // Diagnostics (§10 bring-up): one line per second at most, so a
-            // moved-but-misplaced pointer is debuggable from agent.log
-            // without flooding it.
-            {
-                use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-                static LAST_LOG: AtomicU64 = AtomicU64::new(0);
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let prev = LAST_LOG.load(AtomicOrdering::Relaxed);
-                if now_ms.saturating_sub(prev) >= 1000
-                    && LAST_LOG
-                        .compare_exchange(prev, now_ms, AtomicOrdering::Relaxed, AtomicOrdering::Relaxed)
-                        .is_ok()
-                {
-                    tracing::info!(
-                        x, y, left, top, ox, oy, w, h, nx, ny,
-                        device = ?self.output_device,
-                        "pointer move mapping"
-                    );
-                }
-            }
+        fn pointer_move(&mut self, _display_id: u8, x: u16, y: u16) {
+            // Normalized 0..=65535 over the virtual desktop (§18.37):
+            // straight into MOUSEEVENTF_ABSOLUTE | VIRTUALDESK.
             Self::send(&[Self::mouse(
                 MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                 0,
-                nx,
-                ny,
+                i32::from(x),
+                i32::from(y),
             )]);
         }
 

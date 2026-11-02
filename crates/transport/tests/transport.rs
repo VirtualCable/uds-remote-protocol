@@ -29,7 +29,7 @@ async fn connect(addr: std::net::SocketAddr) -> EncryptedStream<Box<dyn Reliable
         .connect(&Target::new(addr, test_ticket(), test_key()))
         .await
         .unwrap();
-    EncryptedStream::client_handshake(raw, &test_ticket(), &test_key(), 0)
+    EncryptedStream::client_handshake(raw, &test_ticket(), &test_key(), 0, (0, 0))
         .await
         .unwrap()
 }
@@ -56,6 +56,8 @@ async fn server_rejects_a_mismatched_protocol_version() {
         command: protocol::Command::Open,
         flags: 0,
         ticket: test_ticket(),
+        pref_width: 0,
+        pref_height: 0,
     };
     raw.send(&hello.encode()).await.unwrap();
 
@@ -263,7 +265,7 @@ async fn server_rejects_a_wrong_psk_at_the_possession_proof() {
         .connect(&Target::new(addr, test_ticket(), wrong_key))
         .await
         .unwrap();
-    let client = EncryptedStream::client_handshake(raw, &test_ticket(), &wrong_key, 0).await;
+    let client = EncryptedStream::client_handshake(raw, &test_ticket(), &wrong_key, 0, (0, 0)).await;
 
     let server_result = server.await.unwrap();
     assert!(server_result.is_err(), "wrong-PSK handshake must fail");

@@ -47,6 +47,9 @@ pub struct StandaloneRuntime {
     pub fps_adapt: String,
     /// Per-session telemetry CSV path (empty = disabled).
     pub stats_csv: String,
+    /// Server-fixed console resolution (§18.37); `None` lets the agent
+    /// approach the client's preferred mode.
+    pub fixed_resolution: Option<(u32, u32)>,
 }
 
 /// Active connection mode for the service.
@@ -158,5 +161,12 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
             .map(server_config::AdaptiveFpsTuning::to_wire)
             .unwrap_or_default(),
         stats_csv: standalone.stats_csv.clone().unwrap_or_default(),
+        fixed_resolution: standalone
+            .resolution
+            .as_deref()
+            .and_then(|resolution| {
+                let (w, h) = resolution.split_once(['x', 'X'])?;
+                Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+            }),
     })
 }

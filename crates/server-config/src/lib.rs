@@ -124,6 +124,10 @@ pub struct StandaloneConfig {
     pub width: u32,
     /// See `width`.
     pub height: u32,
+    /// Fixed console resolution `"WIDTHxHEIGHT"` (§18.37): when set, the
+    /// server is authoritative and the client's preference is ignored.
+    /// Unset: the agent approaches the client's preferred mode.
+    pub resolution: Option<String>,
     /// Frames per second for capture.
     pub fps: u32,
     /// Codec preset name (from `codec::PRESETS`).
@@ -291,6 +295,7 @@ impl Default for StandaloneConfig {
             domain: None,
             width: 1920,
             height: 1080,
+            resolution: None,
             fps: 30,
             preset: "ladder".to_string(),
             output_name: None,

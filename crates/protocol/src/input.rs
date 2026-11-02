@@ -10,9 +10,11 @@
 //! Keyboard events carry **Set 1 scancodes** (not virtual keys) plus an
 //! `extended` flag (`0xE0` prefix), like RDP/SPICE: the server maps them
 //! with `SendInput`/`MapVirtualKey`, so client keyboard layouts never leak
-//! into the protocol. Pointer coordinates are absolute pixels local to a
-//! display (multi-monitor ready: `display_id`, §8.3); the server knows the
-//! monitor layout and translates to virtual-desktop coordinates.
+//! into the protocol. Pointer coordinates are **normalized to 0..=65535
+//! over the whole virtual desktop** (§18.37): the client normalizes against
+//! its own window and the server maps straight onto the current desktop
+//! size at injection time — no side stores the other's geometry, resizes
+//! never race, and multi-monitor needs no wire change.
 //!
 //! Wire format: tag byte + big-endian fields.
 
@@ -88,15 +90,16 @@ pub enum InputMessage {
         /// True for extended keys (arrows, Ins/Del/Home/End/PgUp/PgDn...).
         extended: bool,
     },
-    /// Absolute pointer move, in display-local pixels.
+    /// Absolute pointer move, normalized coordinates (0..=65535 over the
+    /// whole virtual desktop on each axis, §18.37).
     PointerMove {
-        /// Display the pointer is on (0 = primary).
+        /// Display the pointer is on (0 = primary; informational, the
+        /// normalized coordinates already span the whole desktop).
         display_id: u8,
-        /// X coordinate inside the display (may be negative when crossing
-        /// between displays with negative virtual-desktop origins).
-        x: i32,
-        /// Y coordinate inside the display.
-        y: i32,
+        /// Normalized X (0 = left edge, 65535 = right edge).
+        x: u16,
+        /// Normalized Y (0 = top edge, 65535 = bottom edge).
+        y: u16,
     },
     /// Pointer button press/release.
     PointerButton {
@@ -125,7 +128,7 @@ pub enum InputMessage {
 }
 
 const KEY_LEN: usize = 4;
-const MOVE_LEN: usize = 10;
+const MOVE_LEN: usize = 6;
 const BUTTON_LEN: usize = 3;
 const WHEEL_LEN: usize = 5;
 const SYNC_LEN: usize = 2;
@@ -155,8 +158,8 @@ impl InputMessage {
             Self::PointerMove { display_id, x, y } => {
                 out[0] = TAG_POINTER_MOVE;
                 out[1] = display_id;
-                out[2..6].copy_from_slice(&x.to_be_bytes());
-                out[6..10].copy_from_slice(&y.to_be_bytes());
+                out[2..4].copy_from_slice(&x.to_be_bytes());
+                out[4..6].copy_from_slice(&y.to_be_bytes());
             }
             Self::PointerButton { button, down } => {
                 out[0] = TAG_POINTER_BUTTON;
@@ -203,13 +206,13 @@ impl InputMessage {
                 })
             }
             TAG_POINTER_MOVE => {
-                if rest.len() < 9 {
+                if rest.len() < 5 {
                     return Err(InputError::Truncated);
                 }
                 Ok(Self::PointerMove {
                     display_id: rest[0],
-                    x: i32::from_be_bytes(rest[1..5].try_into().expect("4-byte slice")),
-                    y: i32::from_be_bytes(rest[5..9].try_into().expect("4-byte slice")),
+                    x: u16::from_be_bytes(rest[1..3].try_into().expect("2-byte slice")),
+                    y: u16::from_be_bytes(rest[3..5].try_into().expect("2-byte slice")),
                 })
             }
             TAG_POINTER_BUTTON => {
@@ -258,7 +261,7 @@ mod tests {
         for msg in [
             InputMessage::Key { down: true, scancode: 0x1E, extended: false },
             InputMessage::Key { down: false, scancode: 0x4D, extended: true },
-            InputMessage::PointerMove { display_id: 2, x: -500, y: 3840 },
+            InputMessage::PointerMove { display_id: 2, x: 500, y: 65535 },
             InputMessage::PointerButton { button: PointerButton::X2, down: true },
             InputMessage::PointerButton { button: PointerButton::Left, down: false },
             InputMessage::PointerWheel { delta: -3, hdelta: 2 },

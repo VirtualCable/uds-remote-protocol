@@ -82,17 +82,22 @@ impl<T: ReliableTransport> EncryptedStream<T> {
     /// ML-KEM comes later).
     ///
     /// `flags` is the HELLO flags byte (see `protocol::FLAG_PRIVACY_SCREEN`).
+    /// `pref` is the client's preferred display resolution (§18.37);
+    /// `(0, 0)` means no preference.
     pub async fn client_handshake(
         mut inner: T,
         ticket: &[u8; TICKET_LENGTH],
         key: &[u8; consts::KEY_LENGTH],
         flags: u8,
+        pref: (u16, u16),
     ) -> Result<Self> {
         let hello = Hello {
             version: PROTOCOL_VERSION,
             command: Command::Open,
             flags,
             ticket: *ticket,
+            pref_width: pref.0,
+            pref_height: pref.1,
         };
         inner.send(&hello.encode()).await?;
         let keys = derive_session_keys(ticket, key)?;
@@ -118,18 +123,22 @@ impl<T: ReliableTransport> EncryptedStream<T> {
     /// `max(own, peer expectation)` so a `(key, nonce)` pair never repeats,
     /// even for records lost in flight during the drop.
     /// `flags` is the HELLO flags byte (see `protocol::FLAG_PRIVACY_SCREEN`).
+    /// `pref` is the client's preferred display resolution (§18.37).
     pub async fn client_recover(
         mut inner: T,
         ticket: &[u8; TICKET_LENGTH],
         key: &[u8; consts::KEY_LENGTH],
         seqs: StreamSeqs,
         flags: u8,
+        pref: (u16, u16),
     ) -> Result<RecoverOutcome<T>> {
         let hello = Hello {
             version: PROTOCOL_VERSION,
             command: Command::Recover,
             flags,
             ticket: *ticket,
+            pref_width: pref.0,
+            pref_height: pref.1,
         };
         inner.send(&hello.encode()).await?;
 

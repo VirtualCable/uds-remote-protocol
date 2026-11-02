@@ -10,14 +10,17 @@ use crate::error::ProtocolError;
 /// Signature at the start of the handshake ("UDSRP/01").
 pub const HANDSHAKE_SIGNATURE: [u8; 8] = *b"UDSRP/01";
 
-/// Current protocol version. v4: the handshake ends with a possession proof
+/// Current protocol version. v5: the HELLO carries the client's preferred
+/// display resolution (§18.37) and pointer coordinates are normalized to
+/// 0..=65535 over the whole desktop. v4: the handshake ends with a
+/// possession proof
 /// (server sends a random nonce, client answers SHA-384 over it and the
 /// session keys) so a listener can tell a client holding the PSK from a
 /// random peer before triggering any side effects (autologon). v3: the HELLO
 /// carries a flags byte (bit 0 = privacy screen, M7); v2: the display
 /// fragment header carries `capture_ts_ms` (§9.1 A/V lip-sync); v1 peers
 /// misparse it, so the handshake rejects any version mismatch.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Session ticket length.
 pub const TICKET_LENGTH: usize = 48;
@@ -54,7 +57,7 @@ impl Command {
 }
 
 /// HELLO message of the handshake (8B signature + 2B version + 1B command +
-/// 1B flags + 48B ticket).
+/// 1B flags + 48B ticket + 2B preferred width + 2B preferred height).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     /// Protocol version of the sender.
@@ -65,11 +68,17 @@ pub struct Hello {
     pub flags: u8,
     /// Session ticket issued by the broker (or pre-shared in the PoC).
     pub ticket: [u8; TICKET_LENGTH],
+    /// Preferred display width in pixels (§18.37; 0 = no preference).
+    /// The server applies the closest supported mode not exceeding it,
+    /// unless its own config fixes the resolution (Server > Client).
+    pub pref_width: u16,
+    /// Preferred display height in pixels (0 = no preference).
+    pub pref_height: u16,
 }
 
 impl Hello {
     /// Wire size of the encoded message.
-    pub const ENCODED_LEN: usize = 8 + 2 + 1 + 1 + TICKET_LENGTH;
+    pub const ENCODED_LEN: usize = 8 + 2 + 1 + 1 + TICKET_LENGTH + 4;
 
     /// Encodes the message to its binary form.
     #[must_use]
@@ -79,7 +88,11 @@ impl Hello {
         out[8..10].copy_from_slice(&self.version.to_be_bytes());
         out[10] = self.command as u8;
         out[11] = self.flags;
-        out[12..].copy_from_slice(&self.ticket);
+        out[12..12 + TICKET_LENGTH].copy_from_slice(&self.ticket);
+        out[12 + TICKET_LENGTH..14 + TICKET_LENGTH]
+            .copy_from_slice(&self.pref_width.to_be_bytes());
+        out[14 + TICKET_LENGTH..16 + TICKET_LENGTH]
+            .copy_from_slice(&self.pref_height.to_be_bytes());
         out
     }
 
@@ -98,6 +111,16 @@ impl Hello {
             ticket: bytes[12..12 + TICKET_LENGTH]
                 .try_into()
                 .expect("48-byte slice"),
+            pref_width: u16::from_be_bytes(
+                bytes[12 + TICKET_LENGTH..14 + TICKET_LENGTH]
+                    .try_into()
+                    .expect("2-byte slice"),
+            ),
+            pref_height: u16::from_be_bytes(
+                bytes[14 + TICKET_LENGTH..16 + TICKET_LENGTH]
+                    .try_into()
+                    .expect("2-byte slice"),
+            ),
         })
     }
 }

@@ -73,6 +73,8 @@ pub fn run_gui(form: Option<ConnectForm>, flags: SessionFlags) -> Result<()> {
         mode: Mode::Dialog(form.as_ref().map_or_else(ConnectDialog::default, ConnectDialog::prefilled)),
         flags,
         pending: form,
+        pending_resize: None,
+        resize_since: Instant::now(),
         last_frame: Instant::now().checked_sub(FRAME_INTERVAL).unwrap_or_else(Instant::now),
     };
     event_loop.run_app(&mut app).context("running the event loop")
@@ -91,12 +93,29 @@ struct App {
     flags: SessionFlags,
     /// A form to auto-connect once the window exists.
     pending: Option<ConnectForm>,
+    /// Last requested window size awaiting its debounce window before it is
+    /// sent as a `DesktopResize` (§18.37).
+    pending_resize: Option<(u32, u32)>,
+    /// When `pending_resize` was last updated.
+    resize_since: Instant,
     last_frame: Instant,
 }
 
 impl App {
     fn start_session(&mut self, form: &ConnectForm) {
-        match spawn_session(form, &self.flags) {
+        // Preferred remote resolution (§18.37): the current monitor's native
+        // size, so a fullscreen session asks for exactly that mode.
+        let pref = self
+            .window
+            .as_ref()
+            .and_then(|w| w.current_monitor().map(|m| m.size()))
+            .map_or((0, 0), |s| {
+                (
+                    u16::try_from(s.width).unwrap_or(0),
+                    u16::try_from(s.height).unwrap_or(0),
+                )
+            });
+        match spawn_session(form, &self.flags, pref) {
             Ok((view, result)) => self.mode = Mode::Session(Box::new(view), result),
             Err(e) => {
                 let mut dialog = ConnectDialog::default();
@@ -224,6 +243,12 @@ impl ApplicationHandler for App {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.resize(size.width, size.height);
                 }
+                // Debounce remote resize requests (§18.37): drags produce a
+                // burst of Resized events; only the settled size goes out.
+                if matches!(self.mode, Mode::Session(..)) && size.width > 0 && size.height > 0 {
+                    self.pending_resize = Some((size.width, size.height));
+                    self.resize_since = Instant::now();
+                }
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 // F3 toggles the stats overlay locally; it is never sent to
@@ -309,6 +334,15 @@ impl ApplicationHandler for App {
             self.mode = Mode::Farewell(message);
         }
         let now = Instant::now();
+        // Flush a settled resize as a `DesktopResize` (§18.37): 400 ms
+        // without further window-size changes.
+        if let Some((w, h)) = self.pending_resize
+            && now.duration_since(self.resize_since) >= Duration::from_millis(400)
+            && let Mode::Session(view, _) = &self.mode
+        {
+            self.pending_resize = None;
+            view.resize(w, h);
+        }
         if now.duration_since(self.last_frame) >= FRAME_INTERVAL {
             self.last_frame = now;
             window.request_redraw();
@@ -321,6 +355,7 @@ impl ApplicationHandler for App {
 fn spawn_session(
     form: &ConnectForm,
     flags: &SessionFlags,
+    pref_resolution: (u16, u16),
 ) -> Result<(SessionView, flume::Receiver<Result<(), String>>), String> {
     let addr: SocketAddr = form
         .addr
@@ -337,6 +372,7 @@ fn spawn_session(
         mic: MicMode::Off,
         privacy_screen: flags.privacy_screen,
         smartcard: flags.smartcard,
+        pref_resolution,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);
     let (session, commands, displays) = Session::new(config, events_tx);

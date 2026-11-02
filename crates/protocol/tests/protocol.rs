@@ -17,6 +17,8 @@ fn hello_roundtrip() {
         command: Command::Open,
         flags: 0,
         ticket: [0x42; 48],
+        pref_width: 0,
+        pref_height: 0,
     };
     let bytes = hello.encode();
     let decoded = Hello::decode(&bytes).unwrap();
@@ -30,10 +32,12 @@ fn hello_has_signature_and_fixed_size() {
         command: Command::Test,
         flags: 0,
         ticket: [0; 48],
+        pref_width: 0,
+        pref_height: 0,
     };
     let bytes = hello.encode();
     assert_eq!(&bytes[..8], &HANDSHAKE_SIGNATURE);
-    assert_eq!(bytes.len(), 8 + 2 + 1 + 1 + 48);
+    assert_eq!(bytes.len(), 8 + 2 + 1 + 1 + 48 + 4);
 }
 
 #[test]
@@ -43,6 +47,8 @@ fn hello_flags_roundtrip() {
         command: Command::Open,
         flags: FLAG_PRIVACY_SCREEN,
         ticket: [7; 48],
+        pref_width: 0,
+        pref_height: 0,
     };
     let bytes = hello.encode();
     assert_eq!(bytes[11], FLAG_PRIVACY_SCREEN);
@@ -57,6 +63,8 @@ fn hello_bad_signature_is_rejected() {
         command: Command::Open,
         flags: 0,
         ticket: [0; 48],
+        pref_width: 0,
+        pref_height: 0,
     };
     let mut bytes = hello.encode();
     bytes[0] ^= 0xFF;
@@ -71,6 +79,8 @@ fn hello_unknown_command_is_rejected() {
         command: Command::Open,
         flags: 0,
         ticket: [0; 48],
+        pref_width: 0,
+        pref_height: 0,
     };
     let mut bytes = hello.encode();
     bytes[10] = 0xEE;
@@ -85,6 +95,8 @@ fn hello_truncated_is_rejected() {
         command: Command::Recover,
         flags: 0,
         ticket: [9; 48],
+        pref_width: 0,
+        pref_height: 0,
     };
     let bytes = hello.encode();
     assert!(Hello::decode(&bytes[..20]).is_err());

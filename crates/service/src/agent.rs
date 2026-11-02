@@ -496,6 +496,7 @@ pub(crate) fn watch_loop(
         ladder: String::new(),
         fps_adapt: String::new(),
         stats_csv: String::new(),
+        fixed_resolution: (0, 0),
         handoff: None,
     };
 

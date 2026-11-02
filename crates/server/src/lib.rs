@@ -22,6 +22,7 @@ pub mod audio_uds;
 pub mod audio_wasapi;
 pub mod capture;
 pub mod clipboard;
+pub mod display_mode;
 pub use server_config as config;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod handoff;
