@@ -48,6 +48,13 @@ use crate::capture::{
 const REINIT_BUDGET: Duration = Duration::from_secs(30);
 /// Delay between reinit attempts while the desktop settles.
 const REINIT_RETRY_DELAY: Duration = Duration::from_millis(250);
+/// Retry budget for the FIRST duplication of a source (§18.37): the capture
+/// thread is restarted around console mode changes, so its initial
+/// `DuplicateOutput` can land inside the settle window of the mode switch
+/// (denied while the display stack is mid-transition). Much shorter than
+/// [`REINIT_BUDGET`]: a genuinely locked console at session start must fail
+/// fast, not hang the connect.
+const INITIAL_CREATE_BUDGET: Duration = Duration::from_secs(3);
 
 /// Grace window after a healthy acquire during which an `ACCESS_LOST` is
 /// treated as an ordinary topology change (reinit immediately, no backoff).
@@ -100,7 +107,29 @@ pub struct DxgiSource {
 impl DxgiSource {
     /// Captures the output picked by `selector` (see [`OutputSelector`]).
     pub fn new(selector: &OutputSelector) -> anyhow::Result<Self> {
-        let dup = init_duplication(selector, false)?;
+        // Retry like `reinit` does: this creation can land inside the
+        // settle window of a console mode change applied moments ago (the
+        // capture thread is restarted around mode switches, §18.37), where
+        // `DuplicateOutput` is transiently denied.
+        let deadline = std::time::Instant::now() + INITIAL_CREATE_BUDGET;
+        let mut attempt = 0u32;
+        let dup = loop {
+            attempt += 1;
+            match init_duplication(selector, false) {
+                Ok(dup) => break dup,
+                Err(e) if std::time::Instant::now() < deadline => {
+                    if attempt == 1 {
+                        info!(error = %format!("{e:#}"), "duplication not possible yet; retrying");
+                    }
+                    std::thread::sleep(REINIT_RETRY_DELAY);
+                }
+                Err(e) => {
+                    return Err(e.context(format!(
+                        "duplication could not be created after {attempt} attempts over {INITIAL_CREATE_BUDGET:?}"
+                    )));
+                }
+            }
+        };
         Ok(Self {
             selector: selector.clone(),
             output_device: dup.output_name,

@@ -67,6 +67,9 @@ struct Args {
     download: Option<String>,
     /// Storage (M8): `--storage-list` requests the spool listing ~2 s in.
     storage_list: bool,
+    /// Lab aid: `--selftest-resize WxH` sends one `DesktopResize` request
+    /// ~4 s into the session (§18.37 E2E without a desktop).
+    selftest_resize: Option<(u32, u32)>,
     /// Smartcard redirection (§17): `--smartcard` offers the channel in
     /// the HELLO and runs the request dispatcher against the local PC/SC.
     smartcard: bool,
@@ -141,6 +144,7 @@ fn parse_args() -> Result<Args> {
         upload: None,
         download: None,
         storage_list: false,
+        selftest_resize: None,
         smartcard: false,
     };
     let mut key_seen = false;
@@ -204,6 +208,13 @@ fn parse_args() -> Result<Args> {
                 args.mic = MicMode::Tone(value.parse().context("bad --mic-test-tone")?);
             }
             "--selftest-clipboard" => args.selftest_clipboard = Some(value),
+            "--selftest-resize" => {
+                let (w, h) = value.split_once(['x', 'X']).context("bad --selftest-resize (WxH)")?;
+                args.selftest_resize = Some((
+                    w.trim().parse().context("bad --selftest-resize width")?,
+                    h.trim().parse().context("bad --selftest-resize height")?,
+                ));
+            }
             "--upload" => args.upload = Some(value.into()),
             "--download" => args.download = Some(value),
             other => bail!("unknown argument: {other}"),
@@ -758,6 +769,10 @@ async fn run() -> Result<()> {
     let mut selftest_clip = args
         .selftest_clipboard
         .map(|text| (Instant::now() + Duration::from_secs(3), text));
+    // Resize selftest (§18.37): one DesktopResize ~4 s into the session.
+    let mut selftest_resize = args
+        .selftest_resize
+        .map(|size| (Instant::now() + Duration::from_secs(4), size));
     // Storage (M8): requested transfers fire once, ~2 s into the session;
     // the session is closed when all of them settled (E2E determinism).
     let storage_at = Instant::now() + Duration::from_secs(2);
@@ -881,6 +896,13 @@ async fn run() -> Result<()> {
                     info!(len = text.len(), "selftest clipboard announce");
                     let _ = commands.try_send(ClientCommand::ClipboardChanged(text.clone()));
                     selftest_clip = None;
+                }
+                if let Some((when, (width, height))) = &selftest_resize
+                    && Instant::now() >= *when
+                {
+                    info!(width, height, "selftest resize request");
+                    let _ = commands.try_send(ClientCommand::Resize { width: *width, height: *height });
+                    selftest_resize = None;
                 }
                 if storage_pending_actions.is_some_and(|when| Instant::now() >= when) {
                     storage_pending_actions = None;
