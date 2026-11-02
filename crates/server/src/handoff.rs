@@ -6,7 +6,7 @@
 use anyhow::{Context, Result, bail};
 use tokio::net::TcpStream;
 use windows::Win32::Networking::WinSock::{
-    AF_INET, IPPROTO_TCP, SOCK_STREAM, SOCKET, WSA_FLAG_OVERLAPPED, WSAPROTOCOL_INFOW, WSASocketW,
+    AF_INET, IPPROTO_TCP, SOCK_STREAM, WSA_FLAG_OVERLAPPED, WSAPROTOCOL_INFOW, WSASocketW,
     WSAStartup, WSADATA,
 };
 
@@ -47,17 +47,15 @@ pub fn reconstruct_tcp(blob: &[u8]) -> Result<TcpStream> {
     // service; WSA_FLAG_OVERLAPPED matches how tokio uses sockets.
     let socket = unsafe {
         WSASocketW(
-            AF_INET,
-            SOCK_STREAM,
+            AF_INET.0 as i32,
+            SOCK_STREAM.0,
             IPPROTO_TCP.0,
             &info,
             0,
             WSA_FLAG_OVERLAPPED,
         )
-    };
-    if socket == SOCKET::default() || socket.0 as usize == usize::MAX {
-        return Err(std::io::Error::last_os_error()).context("WSASocketW from duplicated info");
     }
+    .context("WSASocketW from duplicated info")?;
 
     // Into std then tokio. The std TcpStream takes ownership of the socket.
     use std::os::windows::io::FromRawSocket;
