@@ -389,7 +389,7 @@ fn ensure_session_mutex() -> Option<OwnedHandle> {
     let attrs = SECURITY_ATTRIBUTES {
         nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
         lpSecurityDescriptor: sec_desc.as_mut() as *mut _ as *mut core::ffi::c_void,
-        bInheritHandle: false,
+        bInheritHandle: BOOL(0),
     };
     let mut name: Vec<u16> = SESSION_MUTEX.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: `attrs` points to a valid security descriptor; `name` is
