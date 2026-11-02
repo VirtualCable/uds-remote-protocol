@@ -19,6 +19,10 @@ use crate::gpu::{Gpu, Panel};
 use crate::keymap;
 
 /// Live session state owned by the GUI thread.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent UI flags; grouping them would obscure the event handlers"
+)]
 pub struct SessionView {
     commands: CommandSender,
     events: flume::Receiver<ClientEvent>,
@@ -42,6 +46,8 @@ pub struct SessionView {
     prev_stats: Option<(StatsSnapshot, std::time::Instant)>,
     /// Debug overlay visible (toggled with F3, not forwarded to the remote).
     show_stats: bool,
+    /// True while the remote console shows a secure desktop (§18.41).
+    secure: bool,
     /// Keys currently held down, as (scancode, extended), so they can all be
     /// released when the window loses focus (otherwise they stick remotely).
     pressed_keys: std::collections::HashSet<(u16, bool)>,
@@ -60,6 +66,11 @@ const STATS_PANEL_W: f32 = 322.0;
 const STATS_PANEL_H: f32 = 92.0;
 /// Stats overlay margin from the window edges.
 const STATS_PANEL_MARGIN: f32 = 10.0;
+
+/// Secure-desktop banner geometry (§18.41): centered top strip.
+const SECURE_BANNER_W: f32 = 460.0;
+/// Secure-desktop banner height.
+const SECURE_BANNER_H: f32 = 28.0;
 
 impl SessionView {
     /// Wires the pieces handed by `client::Session::new`.
@@ -85,6 +96,7 @@ impl SessionView {
             stats: None,
             prev_stats: None,
             show_stats: false,
+            secure: false,
             pressed_keys: std::collections::HashSet::new(),
             altgr: crate::altgr::AltGr::default(),
         }
@@ -185,6 +197,9 @@ impl SessionView {
                     self.disconnected = true;
                     self.status = "disconnected".to_string();
                     return false;
+                }
+                ClientEvent::SecureDesktop { active } => {
+                    self.secure = active;
                 }
                 ClientEvent::StorageList { .. }
                 | ClientEvent::TransferDone { .. }
@@ -419,6 +434,35 @@ impl SessionView {
                     .add_text(OwnedText::new(line.clone()).with_scale(13.0).with_color(color))
             })
             .collect()
+    }
+
+    /// Translucent banner shown while the remote console is on a secure
+    /// desktop (§18.41): centered top strip with an explanatory line.
+    #[must_use]
+    #[expect(clippy::cast_precision_loss, reason = "window sizes fit in f32")]
+    pub fn secure_banner(
+        &self,
+        window_width: u32,
+    ) -> Option<(Panel, wgpu_text::glyph_brush::OwnedSection)> {
+        use wgpu_text::glyph_brush::{OwnedSection, OwnedText};
+        if !self.secure {
+            return None;
+        }
+        let panel = Panel {
+            x: (window_width as f32 - SECURE_BANNER_W).max(0.0) / 2.0,
+            y: STATS_PANEL_MARGIN,
+            w: SECURE_BANNER_W,
+            h: SECURE_BANNER_H,
+            color: [0.35, 0.22, 0.02, 0.75],
+        };
+        let section = OwnedSection::default()
+            .with_screen_position((panel.x + 10.0, panel.y + 6.0))
+            .add_text(
+                OwnedText::new("Secure desktop (UAC / lock screen) — low rate, sanitized input")
+                    .with_scale(13.0)
+                    .with_color([1.0, 0.85, 0.55, 1.0]),
+            );
+        Some((panel, section))
     }
 
     fn upload_rects(&mut self, gpu: &Gpu, display_id: u8, rects: &[Rect]) {

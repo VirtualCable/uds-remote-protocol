@@ -148,7 +148,12 @@ impl App {
                     );
                 }
                 sections.extend(view.stats_sections(gpu.config.width));
-                let panels: Vec<gpu::Panel> = view.stats_panel(gpu.config.width).into_iter().collect();
+                let mut panels: Vec<gpu::Panel> =
+                    view.stats_panel(gpu.config.width).into_iter().collect();
+                if let Some((banner, section)) = view.secure_banner(gpu.config.width) {
+                    panels.push(banner);
+                    sections.push(section);
+                }
                 (view.texture_view(), wgpu::Color::BLACK, sections, panels)
             }
             Mode::Farewell(message) => (

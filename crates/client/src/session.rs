@@ -1214,6 +1214,13 @@ impl Core {
                     fec,
                 });
             }
+            Ok(ControlMessage::SecureDesktop { active }) => {
+                // §18.41: the console switched to/from a secure desktop
+                // (UAC, lock, Winlogon); surface it so the GUI can explain
+                // the lower frame rate and sanitized input.
+                info!(active, "secure desktop transition");
+                let _ = emit(&self.events, ClientEvent::SecureDesktop { active });
+            }
             _ => {}
         }
     }

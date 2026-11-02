@@ -865,6 +865,9 @@ async fn run() -> Result<()> {
                             let _ = commands.try_send(ClientCommand::Close);
                         }
                     }
+                    ClientEvent::SecureDesktop { active } => {
+                        info!(active, "UDSRP-SECURE-DESKTOP");
+                    }
                     ClientEvent::Error(e) => warn!("session error: {e}"),
                     ClientEvent::Disconnected => {
                         info!("session disconnected");

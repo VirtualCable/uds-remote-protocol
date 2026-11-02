@@ -134,6 +134,13 @@ pub enum ClientEvent {
     /// Live session statistics snapshot (§15.3 debug aid), emitted once
     /// per second; diff consecutive snapshots for per-second rates.
     Stats(crate::stats::StatsSnapshot),
+    /// The remote console entered or left a secure desktop (UAC prompt,
+    /// lock screen, Winlogon; §18.41). While active, video comes from the
+    /// helper's low-rate GDI capture and input is sanitized server-side.
+    SecureDesktop {
+        /// True while a secure desktop owns the remote console.
+        active: bool,
+    },
     /// Non-fatal session condition worth surfacing (e.g. the video stream
     /// broke and a keyframe was requested). Fatal errors end
     /// [`crate::Session::run`] with `Err` instead.
@@ -212,6 +219,10 @@ impl std::fmt::Debug for ClientEvent {
                 .field("message", message)
                 .finish(),
             Self::Stats(snap) => f.debug_tuple("Stats").field(snap).finish(),
+            Self::SecureDesktop { active } => f
+                .debug_struct("SecureDesktop")
+                .field("active", active)
+                .finish(),
             Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
             Self::Disconnected => f.debug_struct("Disconnected").finish(),
         }
