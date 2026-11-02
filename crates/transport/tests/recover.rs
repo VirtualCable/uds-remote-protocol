@@ -132,9 +132,9 @@ async fn recover_never_rolls_back_server_seqs() {
         panic!("server must still hold the session");
     };
 
-    // The server stored send=1/recv=1 (one echo): the resumed client must be
-    // there too, not at 0 — so no nonce ever repeats.
-    assert_eq!(recovered.seqs(), transport::StreamSeqs { send: 1, recv: 1 });
+    // The server stored send=2/recv=2 (proof exchange + one echo): the
+    // resumed client must be there too, not at 0 — so no nonce ever repeats.
+    assert_eq!(recovered.seqs(), transport::StreamSeqs { send: 2, recv: 2 });
 
     // And the session works from that point on.
     recovered.send(channel::CONTROL, b"again").await.unwrap();

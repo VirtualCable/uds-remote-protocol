@@ -86,3 +86,22 @@ pub fn derive_udp_token(
         .map_err(|_| CryptError::KeyDerivation)?;
     Ok(token)
 }
+
+/// Possession-proof length in bytes (SHA-384 output).
+pub const PROOF_LENGTH: usize = 48;
+
+/// Possession proof for the handshake (protocol v4): proves knowledge of the
+/// PSK without revealing it, as
+/// `SHA-384("crypt-proof" | nonce | c2s | s2c)` over the derived session
+/// keys. The server picks a fresh random `nonce` per connection, so a proof
+/// is never reusable.
+#[must_use]
+pub fn possession_proof(nonce: &[u8; 16], keys: &SessionKeys) -> [u8; PROOF_LENGTH] {
+    use sha2::Digest;
+    let mut h = sha2::Sha384::new();
+    h.update(b"crypt-proof");
+    h.update(nonce);
+    h.update(keys.c2s);
+    h.update(keys.s2c);
+    h.finalize().into()
+}

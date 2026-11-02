@@ -18,5 +18,8 @@ mod stream;
 
 pub use datagram::{DatagramCrypt, DatagramDecrypt};
 pub use error::CryptError;
-pub use keys::{SessionKeys, derive_datagram_keys, derive_session_keys, derive_udp_token, ratchet_key};
+pub use keys::{
+    PROOF_LENGTH, SessionKeys, derive_datagram_keys, derive_session_keys, derive_udp_token,
+    possession_proof, ratchet_key,
+};
 pub use stream::{StreamCrypt, StreamDecrypt};

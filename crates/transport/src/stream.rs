@@ -91,7 +91,16 @@ impl<T: ReliableTransport> EncryptedStream<T> {
         };
         inner.send(&hello.encode()).await?;
         let keys = derive_session_keys(ticket, key)?;
-        Ok(Self::with_keys(inner, &keys, Role::Client))
+        let mut stream = Self::with_keys(inner, &keys, Role::Client);
+        // Protocol v4: the server answers the Hello with an encrypted random
+        // nonce and expects the possession proof back; this happens on every
+        // Open (never on Recover, which is only valid against a live session
+        // that was already proven).
+        let mut nonce = [0u8; 16];
+        stream.read_control_exact(&mut nonce).await?;
+        let proof = crypt::possession_proof(&nonce, &keys);
+        stream.send(protocol::channel::CONTROL, &proof).await?;
+        Ok(stream)
     }
 
     /// Client recovery (§4.3): sends Hello (`Recover` + ticket) and the
@@ -193,8 +202,39 @@ impl<T: ReliableTransport> EncryptedStream<T> {
 
             stream.tx = StreamCrypt::with_seq(&keys.s2c, send);
             stream.rx = StreamDecrypt::with_seq(&keys.c2s, recv);
+        } else {
+            // Protocol v4, Open only: possession proof. Send a fresh random
+            // nonce (encrypted) and require the client's proof back before
+            // returning, so a caller can trust the peer holds the PSK before
+            // triggering any side effect (autologon, agent spawn). Recover
+            // is exempt: it only succeeds against a live stored session,
+            // which was already proven when it was opened.
+            let mut nonce = [0u8; 16];
+            getrandom::fill(&mut nonce)
+                .map_err(|e| TransportError::UnexpectedMessage(format!("rng: {e}")))?;
+            stream.send(protocol::channel::CONTROL, &nonce).await?;
+            let mut proof = [0u8; crypt::PROOF_LENGTH];
+            stream.read_control_exact(&mut proof).await?;
+            if !constant_time_eq(&proof, &crypt::possession_proof(&nonce, &keys)) {
+                return Err(TransportError::ProofFailed);
+            }
         }
         Ok(stream)
+    }
+
+    /// Reads exactly one record on the control channel into `buf`.
+    async fn read_control_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        let mut tmp = Vec::with_capacity(buf.len());
+        tmp.resize(buf.len().max(1024), 0);
+        let (channel, n) = self.recv_into(&mut tmp).await?;
+        if channel != protocol::channel::CONTROL || n != buf.len() {
+            return Err(TransportError::UnexpectedMessage(format!(
+                "expected a {}-byte control record, got channel {channel} with {n} bytes",
+                buf.len()
+            )));
+        }
+        buf.copy_from_slice(&tmp[..n]);
+        Ok(())
     }
 
     fn with_keys(inner: T, keys: &SessionKeys, role: Role) -> Self {
@@ -209,6 +249,28 @@ impl<T: ReliableTransport> EncryptedStream<T> {
     #[must_use]
     pub fn peer_hello(&self) -> Option<&Hello> {
         self.peer_hello.as_ref()
+    }
+
+    /// Server side, after a validated `server_handshake`: extracts the inner
+    /// transport plus the state a new owner needs to resume the stream
+    /// (service → session-agent socket handoff, §18.32). The peer Hello is
+    /// always present on a completed server handshake.
+    pub fn into_handoff(self) -> (T, Hello, StreamSeqs) {
+        let seqs = self.seqs();
+        let hello = self.peer_hello.expect("server handshake sets peer_hello");
+        (self.inner, hello, seqs)
+    }
+
+    /// Rebuilds the server side of a stream received via handoff: the caller
+    /// re-derives the session keys from ticket+PSK and supplies the seqs and
+    /// peer Hello captured by the previous owner.
+    #[must_use]
+    pub fn from_handoff(inner: T, keys: &SessionKeys, peer_hello: Hello, seqs: StreamSeqs) -> Self {
+        let mut stream = Self::with_keys(inner, keys, Role::Server);
+        stream.tx = StreamCrypt::with_seq(&keys.s2c, seqs.send);
+        stream.rx = StreamDecrypt::with_seq(&keys.c2s, seqs.recv);
+        stream.peer_hello = Some(peer_hello);
+        stream
     }
 
     /// Sends `payload` encrypted on the given channel, as a single record.
@@ -273,6 +335,18 @@ impl<T: ReliableTransport> EncryptedStream<T> {
 enum Role {
     Client,
     Server,
+}
+
+/// Constant-time comparison for proof validation.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 /// Recovery status byte: the server holds session state for the ticket.

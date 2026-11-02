@@ -237,3 +237,80 @@ async fn reliable_transport_is_dyn_compatible() {
 
     server.await.unwrap();
 }
+
+#[tokio::test]
+async fn server_rejects_a_wrong_psk_at_the_possession_proof() {
+    let listener = DirectListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let server = tokio::spawn(async move {
+        let (raw, _) = listener.accept().await.unwrap();
+        EncryptedStream::server_handshake(raw, &test_key(), None).await
+    });
+
+    // The attacker knows the ticket (it travels in the clear inside the
+    // Hello) but not the PSK: with wrong session keys it cannot even read
+    // the nonce, so the handshake fails (decrypt error, closed connection
+    // or ProofFailed) — what matters is that it never succeeds.
+    let wrong_key = [0x99; crypt::consts::KEY_LENGTH];
+    let connector = DirectConnector::new();
+    let (raw, _) = connector
+        .connect(&Target::new(addr, test_ticket(), wrong_key))
+        .await
+        .unwrap();
+    let client = EncryptedStream::client_handshake(raw, &test_ticket(), &wrong_key, 0).await;
+
+    let server_result = server.await.unwrap();
+    assert!(server_result.is_err(), "wrong-PSK handshake must fail");
+    // The client side also fails: it cannot decrypt the nonce record.
+    assert!(client.is_err());
+}
+
+#[tokio::test]
+async fn handoff_roundtrip_resumes_the_server_side_stream() {
+    let listener = DirectListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    // The "service": completes the handshake, exchanges one record each way,
+    // then hands the stream off.
+    let server = tokio::spawn(async move {
+        let (raw, _) = listener.accept().await.unwrap();
+        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None)
+            .await
+            .unwrap();
+        let mut buf = [0u8; 64];
+        let (_, n) = stream.recv_into(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"before handoff");
+        stream
+            .send(channel::CONTROL, b"from service")
+            .await
+            .unwrap();
+        stream.into_handoff()
+    });
+
+    let mut client = connect(addr).await;
+    client
+        .send(channel::CONTROL, b"before handoff")
+        .await
+        .unwrap();
+
+    let (inner, hello, seqs) = server.await.unwrap();
+    assert_eq!(hello.ticket, test_ticket());
+
+    // The "session agent": rebuilds the server side from the handoff state
+    // and continues the conversation transparently.
+    let keys = crypt::derive_session_keys(&test_ticket(), &test_key()).unwrap();
+    let mut agent = EncryptedStream::from_handoff(inner, &keys, hello, seqs);
+
+    let mut buf = [0u8; 64];
+    let (_, n) = client.recv_into(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"from service");
+
+    agent.send(channel::CONTROL, b"from agent").await.unwrap();
+    let (_, n) = client.recv_into(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"from agent");
+
+    client.send(channel::CONTROL, b"to agent").await.unwrap();
+    let (_, n) = agent.recv_into(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"to agent");
+}

@@ -2680,12 +2680,15 @@ name = "service"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crypt",
  "getrandom 0.3.4",
  "protocol",
  "server-config",
  "service-proto",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+ "transport",
  "udscredprov",
  "widestring",
  "windows",
@@ -3173,6 +3176,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "crypt",
+ "getrandom 0.3.4",
  "protocol",
  "socket2",
  "thiserror 2.0.21",

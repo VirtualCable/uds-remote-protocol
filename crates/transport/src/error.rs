@@ -38,6 +38,11 @@ pub enum TransportError {
         /// The peer's protocol version.
         got: u16,
     },
+    /// The client failed the possession proof (wrong PSK or tampering).
+    /// The server must treat this as an authentication failure: no session
+    /// side effects (autologon, agent spawn) may follow.
+    #[error("possession proof failed")]
+    ProofFailed,
 }
 
 /// Standard result of the crate.

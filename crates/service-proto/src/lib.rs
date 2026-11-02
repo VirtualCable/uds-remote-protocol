@@ -17,13 +17,17 @@
 //!          u16   ladder tuning overrides ("k=v,..."; empty = defaults)
 //!          u16   adaptive-fps overrides ("k=v,..."; empty = disabled)
 //!          u16   stats CSV path (empty = telemetry to the log only)
+//!          u8    handoff flag (0 = none, 1 = handoff block follows)
+//!          [u64  send_seq | u64 recv_seq |
+//!           u16 hello_len + Hello bytes |
+//!           u32 socket_info_len + opaque socket blob (WSAPROTOCOL_INFO)]
 //! ```
 //!
 //! Pure format code only; both the service (Windows) and the agent use it.
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 4;
+pub const AGENT_CONFIG_VERSION: u8 = 5;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -33,12 +37,32 @@ pub const TICKET_LEN: usize = 48;
 /// Maximum accepted length for any string field (defensive bound).
 pub const MAX_STRING_LEN: usize = 256;
 
+/// Maximum accepted length for the opaque socket-info blob
+/// (WSAPROTOCOL_INFO is ~400 bytes; bound generously).
+pub const MAX_SOCKET_INFO_LEN: usize = 4096;
+
 /// Minimum frame size: version + key + ticket + the u16 string lengths
-/// (all strings empty).
-const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 6 * 2;
+/// (all strings empty) + the handoff flag.
+const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 6 * 2 + 1;
 
 /// Offset where the length-prefixed string fields start.
 const STRINGS_OFF: usize = 1 + KEY_LEN + TICKET_LEN;
+
+/// Socket-handoff state for an agent that continues a connection the
+/// service already validated (§18.32): the connected socket (as an opaque
+/// `WSAPROTOCOL_INFO` blob on Windows), the stream seqs after the
+/// handshake, and the peer's Hello.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffInfo {
+    /// Next outgoing (server → client) stream seq.
+    pub send_seq: u64,
+    /// Next expected incoming (client → server) stream seq.
+    pub recv_seq: u64,
+    /// Encoded peer Hello (`protocol::Hello::ENCODED_LEN` bytes).
+    pub hello: Vec<u8>,
+    /// Opaque duplicated-socket blob (`WSAPROTOCOL_INFO` on Windows).
+    pub socket_info: Vec<u8>,
+}
 
 /// Everything the service passes to the agent it spawns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +86,10 @@ pub struct AgentConfig {
     /// Path of the per-session telemetry CSV; empty disables it (telemetry
     /// then only goes to the log every STATS_LOG_INTERVAL).
     pub stats_csv: String,
+    /// Validated-connection handoff: when present, the agent must not bind
+    /// its own listener; it rebuilds the connected socket and continues the
+    /// stream from these seqs.
+    pub handoff: Option<HandoffInfo>,
 }
 
 /// Decode failures.
@@ -118,6 +146,20 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(s.as_bytes());
     }
+    match &config.handoff {
+        None => out.push(0),
+        Some(h) => {
+            out.push(1);
+            out.extend_from_slice(&h.send_seq.to_le_bytes());
+            out.extend_from_slice(&h.recv_seq.to_le_bytes());
+            let hello_len = u16::try_from(h.hello.len()).expect("hello is a fixed-size struct");
+            out.extend_from_slice(&hello_len.to_le_bytes());
+            out.extend_from_slice(&h.hello);
+            let sock_len = u32::try_from(h.socket_info.len()).expect("socket info is bounded");
+            out.extend_from_slice(&sock_len.to_le_bytes());
+            out.extend_from_slice(&h.socket_info);
+        }
+    }
     out
 }
 
@@ -148,9 +190,50 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         *slot = core::str::from_utf8(&rest[..len]).map_err(|_| DecodeError::BadUtf8)?;
         rest = &rest[len..];
     }
-    if !rest.is_empty() {
-        return Err(DecodeError::BadLength);
+    if rest.is_empty() {
+        return Err(DecodeError::Truncated);
     }
+    let handoff = match rest[0] {
+        0 => {
+            if rest.len() != 1 {
+                return Err(DecodeError::BadLength);
+            }
+            None
+        }
+        1 => {
+            rest = &rest[1..];
+            if rest.len() < 16 + 2 {
+                return Err(DecodeError::Truncated);
+            }
+            let send_seq = u64::from_le_bytes(rest[..8].try_into().expect("8-byte slice"));
+            let recv_seq = u64::from_le_bytes(rest[8..16].try_into().expect("8-byte slice"));
+            rest = &rest[16..];
+            let hello_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+            rest = &rest[2..];
+            if hello_len > MAX_STRING_LEN || rest.len() < hello_len + 4 {
+                return Err(DecodeError::BadLength);
+            }
+            let hello = rest[..hello_len].to_vec();
+            rest = &rest[hello_len..];
+            let sock_len = u32::from_le_bytes(rest[..4].try_into().expect("4-byte slice")) as usize;
+            rest = &rest[4..];
+            if sock_len > MAX_SOCKET_INFO_LEN || rest.len() != sock_len {
+                return Err(DecodeError::BadLength);
+            }
+            let socket_info = rest[..sock_len].to_vec();
+            rest = &rest[sock_len..];
+            if !rest.is_empty() {
+                return Err(DecodeError::BadLength);
+            }
+            Some(HandoffInfo {
+                send_seq,
+                recv_seq,
+                hello,
+                socket_info,
+            })
+        }
+        _ => return Err(DecodeError::BadLength),
+    };
     let [bind, output_name, preset, ladder, fps_adapt, stats_csv] = strings;
     Ok(AgentConfig {
         key,
@@ -161,6 +244,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         ladder: ladder.to_owned(),
         fps_adapt: fps_adapt.to_owned(),
         stats_csv: stats_csv.to_owned(),
+        handoff,
     })
 }
 
@@ -178,6 +262,7 @@ mod tests {
             ladder: "up=15,hold_up_ms=1500".to_owned(),
             fps_adapt: "min_fps=8".to_owned(),
             stats_csv: String::new(),
+            handoff: None,
         }
     }
 
@@ -186,6 +271,52 @@ mod tests {
         let config = sample();
         let frame = encode_agent_config(&config);
         assert_eq!(decode_agent_config(&frame), Ok(config));
+    }
+
+    #[test]
+    fn roundtrip_with_handoff() {
+        let config = AgentConfig {
+            handoff: Some(HandoffInfo {
+                send_seq: 3,
+                recv_seq: 2,
+                hello: vec![0xAB; 64],
+                socket_info: vec![0xCD; 400],
+            }),
+            ..sample()
+        };
+        let frame = encode_agent_config(&config);
+        assert_eq!(decode_agent_config(&frame), Ok(config));
+    }
+
+    #[test]
+    fn rejects_handoff_garbage() {
+        // Flag byte 2 is not a valid handoff marker.
+        let frame = encode_agent_config(&sample());
+        let mut frame = frame;
+        let n = frame.len();
+        frame[n - 1] = 2;
+        assert_eq!(decode_agent_config(&frame), Err(DecodeError::BadLength));
+        // Flag 1 but truncated block.
+        let full = encode_agent_config(&AgentConfig {
+            handoff: Some(HandoffInfo {
+                send_seq: 3,
+                recv_seq: 2,
+                hello: vec![0xAB; 64],
+                socket_info: vec![0xCD; 400],
+            }),
+            ..sample()
+        });
+        let n = full.len();
+        assert_eq!(
+            decode_agent_config(&full[..n - 5]),
+            Err(DecodeError::BadLength)
+        );
+        // Truncated right after the flag.
+        let flag_at = encode_agent_config(&sample()).len() - 1;
+        assert_eq!(
+            decode_agent_config(&full[..=flag_at]),
+            Err(DecodeError::Truncated)
+        );
     }
 
     #[test]

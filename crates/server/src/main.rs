@@ -87,6 +87,10 @@ struct Args {
     spool: Option<std::path::PathBuf>,
     /// Per-session telemetry CSV (§12.8); `None` keeps telemetry log-only.
     stats_csv: Option<std::path::PathBuf>,
+    /// Validated-connection handoff from the orchestrator service (§18.32):
+    /// when set, the agent does not bind its own TCP listener; it rebuilds
+    /// the connected socket and serves exactly one session, then exits.
+    handoff: Option<service_proto::HandoffInfo>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -110,6 +114,7 @@ fn parse_args() -> Result<Args> {
         mic_sink: "null".to_string(),
         spool: None,
         stats_csv: None,
+        handoff: None,
     };
     let mut key_seen = false;
     // A config file (reference/standalone mode) seeds the defaults first;
@@ -147,6 +152,7 @@ fn parse_args() -> Result<Args> {
             if !config.stats_csv.is_empty() {
                 args.stats_csv = Some(config.stats_csv.into());
             }
+            args.handoff = config.handoff;
             args.source = "dxgi".to_string();
             key_seen = true;
             continue;
@@ -1292,17 +1298,28 @@ fn forward_mic(tx: &mut Option<std::sync::mpsc::Sender<Vec<u8>>>, payload: &[u8]
     }
 }
 
-// The session loop owns capture, display, audio and mic branches; splitting
-// it further would only scatter the shared session state.
-#[allow(clippy::too_many_lines)]
 async fn serve<T: ReliableTransport>(
     raw: T,
     ticket: &[u8; protocol::TICKET_LENGTH],
     key: &[u8; consts::KEY_LENGTH],
     args: &Args,
 ) -> Result<()> {
-    let mut stream = EncryptedStream::server_handshake(raw, key, None).await?;
+    let stream = EncryptedStream::server_handshake(raw, key, None).await?;
     info!("handshake done");
+    serve_stream(stream, ticket, key, args).await
+}
+
+/// Session body once the handshake is done (either completed locally in
+/// `serve` or received via the service's validated handoff, §18.32).
+// The session loop owns capture, display, audio and mic branches; splitting
+// it further would only scatter the shared session state.
+#[allow(clippy::too_many_lines)]
+async fn serve_stream<T: ReliableTransport>(
+    mut stream: EncryptedStream<T>,
+    ticket: &[u8; protocol::TICKET_LENGTH],
+    key: &[u8; consts::KEY_LENGTH],
+    args: &Args,
+) -> Result<()> {
     if stream
         .peer_hello()
         .is_some_and(|h| h.flags & protocol::FLAG_SMARTCARD != 0)
@@ -2138,7 +2155,8 @@ async fn run() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
-    let args = parse_args()?;
+    #[allow(unused_mut)] // `handoff` is taken only on Windows agent builds
+    let mut args = parse_args()?;
     // Orchestrated mode (Windows agent): hold the session mutex so the
     // service can watch us and a second agent cannot start. Manual/dev runs
     // without a peer agent are unaffected.
@@ -2152,6 +2170,39 @@ async fn run() -> Result<()> {
         t
     };
     println!("ticket: {}", protocol::hex::encode(&ticket));
+
+    // Handoff mode (§18.32): the service already accepted and validated the
+    // client connection; we rebuild the socket and serve exactly one
+    // session, then exit.
+    #[cfg(all(windows, feature = "windows-capture"))]
+    if let Some(handoff) = args.handoff.take() {
+        let stream_tokio = server::handoff::reconstruct_tcp(&handoff.socket_info)
+            .context("rebuilding the handed-off socket")?;
+        let keys = crypt::derive_session_keys(&ticket, &args.key)?;
+        let hello_bytes: &[u8; protocol::Hello::ENCODED_LEN] = handoff
+            .hello
+            .as_slice()
+            .try_into()
+            .context("handoff hello has wrong length")?;
+        let hello = protocol::Hello::decode(hello_bytes).context("decoding the handoff hello")?;
+        let seqs = transport::StreamSeqs {
+            send: handoff.send_seq,
+            recv: handoff.recv_seq,
+        };
+        let stream = EncryptedStream::from_handoff(
+            transport::TcpTransport::new(stream_tokio),
+            &keys,
+            hello,
+            seqs,
+        );
+        info!("serving handed-off connection");
+        serve_stream(stream, &ticket, &args.key, &args).await?;
+        return Ok(());
+    }
+    #[cfg(not(all(windows, feature = "windows-capture")))]
+    if args.handoff.is_some() {
+        anyhow::bail!("socket handoff is only supported on Windows");
+    }
 
     let listener = DirectListener::bind(&args.bind.to_string()).await?;
     info!(bind = %args.bind, "listening");

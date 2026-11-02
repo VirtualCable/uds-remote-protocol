@@ -19,6 +19,8 @@ pub mod capture;
 pub mod clipboard;
 pub use server_config as config;
 #[cfg(all(windows, feature = "windows-capture"))]
+pub mod handoff;
+#[cfg(all(windows, feature = "windows-capture"))]
 pub mod dxgi;
 pub mod fps;
 pub mod input;

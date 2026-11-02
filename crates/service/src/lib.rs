@@ -10,6 +10,8 @@ mod credprov;
 #[cfg(windows)]
 mod install;
 #[cfg(windows)]
+mod listener;
+#[cfg(windows)]
 mod logging;
 #[cfg(windows)]
 mod sas;

@@ -21,6 +21,13 @@ impl TcpTransport {
     pub fn new(stream: TcpStream) -> Self {
         Self { stream }
     }
+
+    /// Extracts the underlying `TcpStream` (e.g. to duplicate the socket
+    /// into another process for a connection handoff, §18.32).
+    #[must_use]
+    pub fn into_stream(self) -> TcpStream {
+        self.stream
+    }
 }
 
 #[async_trait]

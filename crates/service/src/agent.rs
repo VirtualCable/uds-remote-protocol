@@ -82,6 +82,10 @@ pub struct Agent {
     process: OwnedHandle,
     /// `None` when job assignment failed (logged; liveness still works).
     _job: Option<OwnedHandle>,
+    /// Process id (socket handoff target, §18.32).
+    pub pid: u32,
+    /// Console session the agent was spawned into.
+    pub session_id: u32,
     spawned_at: Instant,
 }
 
@@ -96,6 +100,21 @@ impl Agent {
     /// session could otherwise read (M3). Credentials are also logged so the
     /// lab client can connect.
     pub fn spawn_in_console_session(config: &service_proto::AgentConfig) -> Result<Option<Self>> {
+        let Some((agent, pipe_write)) = Self::spawn_process_in_console()? else {
+            return Ok(None);
+        };
+        write_all_and_close(&pipe_write, &service_proto::encode_agent_config(config))?;
+        info!(session_id = agent.session_id, pid = agent.pid, "session agent spawned");
+        info!(key = protocol::hex::encode(&config.key), ticket = protocol::hex::encode(&config.ticket), "lab credentials (also piped to the agent)");
+        Ok(Some(agent))
+    }
+
+    /// First half of the spawn for the handoff flow (§18.32): creates the
+    /// agent process in the console session and returns it together with the
+    /// write end of its config pipe, WITHOUT writing the config. The caller
+    /// can then use `agent.pid` (e.g. `WSADuplicateSocketW` into it) and must
+    /// finish with [`Agent::write_config`].
+    pub fn spawn_process_in_console() -> Result<Option<(Self, OwnedHandle)>> {
         let session_id = unsafe { WTSGetActiveConsoleSessionId() };
         if session_id == 0xFFFF_FFFF {
             return Ok(None);
@@ -108,8 +127,6 @@ impl Agent {
         let token = OwnedHandle(token_handle);
 
         let exe = agent_exe_path()?;
-        let key_hex = protocol::hex::encode(&config.key);
-        let ticket_hex = protocol::hex::encode(&config.ticket);
         let mut cmdline: Vec<u16> = format!("\"{}\" --agent-config-stdin", exe.display())
             .encode_utf16()
             .chain(std::iter::once(0))
@@ -167,14 +184,22 @@ impl Agent {
                 None
             }
         };
-        write_all_and_close(&pipe_write, &service_proto::encode_agent_config(config))?;
-        info!(session_id, pid = info.dwProcessId, exe = %exe.display(), "session agent spawned");
-        info!(key = key_hex, ticket = ticket_hex, "lab credentials (also piped to the agent)");
-        Ok(Some(Self {
-            process: OwnedHandle(info.hProcess),
-            _job: job,
-            spawned_at: Instant::now(),
-        }))
+        Ok(Some((
+            Self {
+                process: OwnedHandle(info.hProcess),
+                _job: job,
+                pid: info.dwProcessId,
+                session_id,
+                spawned_at: Instant::now(),
+            },
+            pipe_write,
+        )))
+    }
+
+    /// Second half of the handoff spawn: sends the config frame (with the
+    /// handoff block already filled in) down the agent's stdin pipe.
+    pub fn write_config(pipe_write: OwnedHandle, config: &service_proto::AgentConfig) -> Result<()> {
+        write_all_and_close(&pipe_write, &service_proto::encode_agent_config(config))
     }
 
     /// Whether the agent process is still alive.
@@ -424,10 +449,16 @@ fn ensure_session_mutex() -> Option<OwnedHandle> {
     }
 }
 
-pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::StandaloneRuntime>) {
+pub fn watch_loop(stop: &'static AtomicBool, standalone: Option<&crate::standalone::StandaloneRuntime>) {
     // Pre-create the global session mutex before any agent spawns: only a
     // privileged process can create Global\ objects (see ensure_session_mutex).
     let _session_mutex = ensure_session_mutex();
+    // Standalone mode (§18.32): the service owns the validating listener and
+    // spawns one agent per validated connection; the watch loop only watches.
+    if let Some(standalone) = standalone {
+        watch_standalone(stop, standalone);
+        return;
+    }
     let mut agent: Option<Agent> = None;
     let mut respawns = 0u32;
     // Key and ticket are generated once per service run; the agent gets them
@@ -440,27 +471,16 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
         error!(error = %format!("{err:#}"), "cannot generate session credentials");
         return;
     }
-    let config = match standalone {
-        Some(standalone) => service_proto::AgentConfig {
-            key: standalone.key,
-            ticket: standalone.ticket,
-            bind: standalone.bind.clone(),
-            output_name: standalone.output_name.clone().unwrap_or_default(),
-            preset: standalone.preset.clone(),
-            ladder: standalone.ladder.clone(),
-            fps_adapt: standalone.fps_adapt.clone(),
-            stats_csv: standalone.stats_csv.clone(),
-        },
-        None => service_proto::AgentConfig {
-            key,
-            ticket,
-            bind: "0.0.0.0:14433".to_owned(),
-            output_name: String::new(),
-            preset: "ladder".to_owned(),
-            ladder: String::new(),
-            fps_adapt: String::new(),
-            stats_csv: String::new(),
-        },
+    let config = service_proto::AgentConfig {
+        key,
+        ticket,
+        bind: "0.0.0.0:14433".to_owned(),
+        output_name: String::new(),
+        preset: "ladder".to_owned(),
+        ladder: String::new(),
+        fps_adapt: String::new(),
+        stats_csv: String::new(),
+        handoff: None,
     };
 
     // Unattended auto-logon (see sas.rs), gated by the one-shot arm flag
@@ -469,8 +489,7 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
     // so an armed auto-logon would wait for a human pressing Ctrl+Alt+Del
     // forever. Without the flag the machine must boot to a plain logon
     // screen and stay there.
-    let has_logon_creds = standalone.is_some_and(|s| s.creds.is_some())
-        || std::path::Path::new(crate::credprov::CREDS_PATH).exists();
+    let has_logon_creds = std::path::Path::new(crate::credprov::CREDS_PATH).exists();
     let mut last_sas: Option<Instant> = None;
     let nudge_towards_logon = |last_sas: &mut Option<Instant>| {
         if has_logon_creds
@@ -529,4 +548,21 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
         info!("service stopping: terminating the session agent");
         a.kill();
     }
+}
+
+/// Standalone watch body (§18.32): the listener thread owns the public TCP
+/// endpoint, validates each connection (handshake + possession proof) and
+/// spawns one session agent per validated client. This loop only supervises:
+/// it clears dead agents, kills wedged ones, and cleans up on service stop.
+/// No proactive spawn and no respawn cap: agents map one-to-one to client
+/// connections, so a crash loop cannot spin here.
+fn watch_standalone(stop: &'static AtomicBool, standalone: &crate::standalone::StandaloneRuntime) {
+    let slot = std::sync::Arc::new(crate::listener::AgentSlot::default());
+    crate::listener::spawn(stop, standalone.clone(), std::sync::Arc::clone(&slot));
+    while !stop.load(Ordering::Relaxed) {
+        slot.clear_if_dead();
+        slot.kill_if_unhealthy();
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    slot.kill();
 }

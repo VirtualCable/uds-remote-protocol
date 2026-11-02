@@ -43,6 +43,7 @@ windows = { workspace = true, optional = true, features = [
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
     "Win32_Security_Authorization",
+    "Win32_Networking_WinSock",
 ] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 udsscard-proto = { path = "../udsscard-proto", optional = true }

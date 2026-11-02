@@ -5,11 +5,14 @@ use crate::error::ProtocolError;
 /// Signature at the start of the handshake ("UDSRP/01").
 pub const HANDSHAKE_SIGNATURE: [u8; 8] = *b"UDSRP/01";
 
-/// Current protocol version. v3: the HELLO carries a flags byte (bit 0 =
-/// privacy screen, M7); v2: the display fragment header carries
-/// `capture_ts_ms` (§9.1 A/V lip-sync); v1 peers misparse it, so the
-/// handshake rejects any version mismatch.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// Current protocol version. v4: the handshake ends with a possession proof
+/// (server sends a random nonce, client answers SHA-384 over it and the
+/// session keys) so a listener can tell a client holding the PSK from a
+/// random peer before triggering any side effects (autologon). v3: the HELLO
+/// carries a flags byte (bit 0 = privacy screen, M7); v2: the display
+/// fragment header carries `capture_ts_ms` (§9.1 A/V lip-sync); v1 peers
+/// misparse it, so the handshake rejects any version mismatch.
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Session ticket length.
 pub const TICKET_LENGTH: usize = 48;

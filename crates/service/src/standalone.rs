@@ -19,6 +19,7 @@ use tracing::{info, warn};
 use udscredprov::logic::Credentials;
 
 /// Fixed session parameters resolved from the standalone configuration.
+#[derive(Clone)]
 pub struct StandaloneRuntime {
     /// Shared session key (PSK) for the crypto layer.
     pub key: [u8; service_proto::KEY_LEN],
