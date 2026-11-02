@@ -121,7 +121,7 @@ async fn accept_loop(stop: &AtomicBool, standalone: StandaloneRuntime, slot: Arc
     info!(bind = %standalone.bind, "service listener up (validating; handoff to session agent)");
     while !stop.load(Ordering::Relaxed) {
         let accepted = tokio::select! {
-            () => wait_for_stop(stop) => break,
+            _ = wait_for_stop(stop) => break,
             accepted = listener.accept() => accepted,
         };
         let (socket, peer) = match accepted {
