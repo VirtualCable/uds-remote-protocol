@@ -307,6 +307,11 @@ const KEYFRAME_SAFETY_INTERVAL: Duration = Duration::from_secs(30);
 /// the session slot and a new client can connect.
 const CLIENT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a resize may go without delivering a frame before the console
+/// mode is reverted (§18.37). Secure-desktop transitions hold the
+/// duplication denied for a few seconds, so this must be generous.
+const RESIZE_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+
 struct Legs<T: ReliableTransport> {
     /// UDP send half, shared with the paced display-sender task (§12.6).
     udp: Option<Arc<Mutex<transport::DatagramSink<UdpTransport>>>>,
@@ -1550,6 +1555,9 @@ async fn serve_stream<T: ReliableTransport>(
     let mut audio_buf = Vec::with_capacity(1024);
     let mut frame_id = 0u32;
     let mut frame_stats = FrameStats::new(DISPLAY_QUEUE_DGRAMS, args.stats_csv.as_deref());
+    // Set when a resize was applied and no frame of the new geometry has
+    // arrived yet; drives the poison-mode revert (§18.37).
+    let mut resize_pending: Option<Instant> = None;
     // Seeded in the past so the very first frame goes out as a keyframe even
     // if the encoder's first frame was not one for some reason.
     let mut last_keyframe = Instant::now().checked_sub(KEYFRAME_SAFETY_INTERVAL).unwrap_or_else(Instant::now);
@@ -1561,6 +1569,8 @@ async fn serve_stream<T: ReliableTransport>(
             msg = frame_rx.recv() => {
                 match msg {
                     Some(CaptureMsg::Frame(frame)) => {
+                        // Any frame proves the capture is healthy again.
+                        resize_pending = None;
                         // Geometry change (mid-session resize, §18.37): the
                         // capture recovered from access-lost with a new mode;
                         // rebuild the encoder and re-announce the display.
@@ -1669,17 +1679,40 @@ async fn serve_stream<T: ReliableTransport>(
                 if last_recv.elapsed() >= CLIENT_LIVENESS_TIMEOUT {
                     bail!("client silent for {CLIENT_LIVENESS_TIMEOUT:?}; session dead");
                 }
+                // Poison-mode revert (§18.37): a resize that never delivers
+                // a frame (the display stack invalidates every duplication
+                // instantly) rolls back to the original console mode instead
+                // of leaving the session blind until the storm breaker.
+                if let Some(since) = resize_pending
+                    && since.elapsed() >= RESIZE_FRAME_TIMEOUT
+                {
+                    warn!(
+                        "no frames {RESIZE_FRAME_TIMEOUT:?} after the resize; reverting the console mode"
+                    );
+                    display_mode.restore();
+                    resize_pending = None;
+                }
                 // Mid-session resize (§18.37): re-apply the resolution
                 // policy with the client's new preference. The mode change
                 // invalidates the DXGI duplication (access-lost); capture
-                // recovers and the new geometry triggers an encoder rebuild
-                // + fresh DisplayInfo in the frame branch below.
+                // recovers in its own thread. The encoder is rebuilt and
+                // re-announced right away — waiting for the first frame of
+                // the new geometry would leave the client blind meanwhile.
                 if let Some(request) = ctl.resize_request.take() {
                     let policy = server::display_mode::ResolutionPolicy {
                         fixed: args.fixed_resolution,
                         preferred: request,
                     };
-                    display_mode.apply(&policy);
+                    if display_mode.apply(&policy) {
+                        if let Some((w, h)) = display_mode.applied() {
+                            info!(w, h, "resize applied; rebuilding encoder");
+                            width = w;
+                            height = h;
+                            encoder = build_encoder(args, width, height)?;
+                            announce_display(&mut legs, &mut encoder, width, height).await?;
+                        }
+                        resize_pending = Some(Instant::now());
+                    }
                 }
             }
             msg = scard_rx.recv() => {

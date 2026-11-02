@@ -27,25 +27,42 @@ pub struct ResolutionPolicy {
     pub preferred: (u32, u32),
 }
 
+/// Maximum aspect-ratio deviation accepted between the request and a
+/// candidate mode (relative, 1 %). Client windows have arbitrary sizes
+/// while being dragged; without an aspect match the console must not chase
+/// them into odd modes (a 4K client picked a square 2048x2048, and the
+/// 4:3 2048x1536 poisoned the duplication on a Basic Render Driver stack).
+/// Only near-matching modes — a real fullscreen target — qualify.
+const ASPECT_TOLERANCE: f64 = 0.01;
+
 /// Picks the target mode for `policy` from `modes` (candidate `(w, h)`
 /// pairs, already 32 bpp). Returns `None` when nothing should change.
+///
+/// Policy: a fixed resolution is taken verbatim (the admin's choice; the
+/// mode set simply fails harmlessly when unsupported). A client preference
+/// is approached with the largest supported mode **not exceeding** it whose
+/// aspect ratio matches within [`ASPECT_TOLERANCE`]; without an aspect
+/// match the console keeps its current mode (`None`) — the client scales
+/// locally, so an odd window size is not a reason to touch the console.
 #[must_use]
 pub fn pick_mode(policy: &ResolutionPolicy, modes: &[(u32, u32)]) -> Option<(u32, u32)> {
-    let target = policy.fixed.or(match policy.preferred {
-        (0, 0) => None,
-        p => Some(p),
-    })?;
-    // Closest supported mode not exceeding the target: maximize area among
-    // modes that fit; ties go to the larger width.
+    if let Some(fixed) = policy.fixed {
+        return Some(fixed);
+    }
+    let target = match policy.preferred {
+        (0, 0) => return None,
+        p => p,
+    };
+    let aspect = f64::from(target.0) / f64::from(target.1);
     modes
         .iter()
         .copied()
         .filter(|&(w, h)| w <= target.0 && h <= target.1)
+        .filter(|&(w, h)| {
+            let mode_aspect = f64::from(w) / f64::from(h);
+            ((mode_aspect - aspect) / aspect).abs() <= ASPECT_TOLERANCE
+        })
         .max_by_key(|&(w, h)| (w * h, w))
-        // Nothing fits below the preference: take the smallest available
-        // mode rather than leaving the console as-is at something bigger
-        // the client cannot show without scrolling.
-        .or_else(|| modes.iter().copied().min_by_key(|&(w, h)| w * h))
 }
 
 /// Restores the original display mode on drop (Windows).
@@ -73,6 +90,15 @@ mod stub {
         pub fn apply(&mut self, _policy: &super::ResolutionPolicy) -> bool {
             false
         }
+
+        /// No mode is ever applied by the stub.
+        #[must_use]
+        pub fn applied(&self) -> Option<(u32, u32)> {
+            None
+        }
+
+        /// Nothing to restore.
+        pub fn restore(&mut self) {}
     }
 }
 
@@ -191,10 +217,17 @@ mod win {
             self.applied = Some((w, h));
             true
         }
-    }
 
-    impl Drop for DisplayModeGuard {
-        fn drop(&mut self) {
+        /// The currently applied mode, if any.
+        #[must_use]
+        pub fn applied(&self) -> Option<(u32, u32)> {
+            self.applied
+        }
+
+        /// Restores the original mode immediately (poison-mode revert,
+        /// §18.37: a mode that never delivers a frame). Drop then has
+        /// nothing left to do.
+        pub fn restore(&mut self) {
             let Some(original) = self.original.take() else {
                 return;
             };
@@ -203,6 +236,13 @@ mod win {
             } else {
                 tracing::warn!("failed to restore the console display mode");
             }
+            self.applied = None;
+        }
+    }
+
+    impl Drop for DisplayModeGuard {
+        fn drop(&mut self) {
+            self.restore();
         }
     }
 }
@@ -233,12 +273,24 @@ mod tests {
     }
 
     #[test]
+    fn fixed_is_taken_verbatim() {
+        // The admin's choice is not validated against the mode list; the
+        // mode set fails harmlessly when it is unsupported.
+        let policy = ResolutionPolicy {
+            fixed: Some((1111, 333)),
+            preferred: (0, 0),
+        };
+        assert_eq!(pick_mode(&policy, MODES), Some((1111, 333)));
+    }
+
+    #[test]
     fn preference_is_never_exceeded() {
         let policy = ResolutionPolicy {
             fixed: None,
-            preferred: (1700, 1000),
+            preferred: (1780, 1000),
         };
-        // 1680x1050 exceeds height; the best fitting is 1600x900.
+        // 1920x1080 and 1680x1050 exceed the request; the best 16:9 fit is
+        // 1600x900 (aspect within tolerance).
         assert_eq!(pick_mode(&policy, MODES), Some((1600, 900)));
     }
 
@@ -258,11 +310,31 @@ mod tests {
     }
 
     #[test]
-    fn below_everything_takes_smallest() {
+    fn odd_window_size_means_no_change() {
+        // A window being dragged has an arbitrary aspect (2048x1617 ≈ 1.27):
+        // no mode matches it, so the console is left alone.
         let policy = ResolutionPolicy {
             fixed: None,
-            preferred: (320, 200),
+            preferred: (2048, 1617),
         };
-        assert_eq!(pick_mode(&policy, MODES), Some((640, 480)));
+        assert_eq!(pick_mode(&policy, MODES), None);
+    }
+
+    #[test]
+    fn square_modes_are_not_picked_for_widescreen_clients() {
+        // Regression: maximizing area blindly picked a square 2048x2048 for
+        // a 4K (16:9) client. Aspect matching picks 2560x1440.
+        const WITH_SQUARE: &[(u32, u32)] = &[
+            (640, 480),
+            (1280, 720),
+            (1920, 1080),
+            (2048, 2048),
+            (2560, 1440),
+        ];
+        let policy = ResolutionPolicy {
+            fixed: None,
+            preferred: (3840, 2160),
+        };
+        assert_eq!(pick_mode(&policy, WITH_SQUARE), Some((2560, 1440)));
     }
 }
