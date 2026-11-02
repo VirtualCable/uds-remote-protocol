@@ -1610,6 +1610,10 @@ async fn serve_stream<T: ReliableTransport>(
     // Liveness (§18.39): the handshake itself was client traffic.
     let mut last_recv = Instant::now();
     let mut liveness_tick = tokio::time::interval(Duration::from_secs(1));
+    // Resize requests get their own fast tick (gated on a pending request):
+    // waiting for the 1 s liveness tick added up to a second of dead time
+    // to every mode change for no reason (§18.37).
+    let mut resize_tick = tokio::time::interval(Duration::from_millis(100));
     loop {
         tokio::select! {
             msg = recv_capture(&mut frame_rx) => {
@@ -1788,6 +1792,8 @@ async fn serve_stream<T: ReliableTransport>(
                     start_capture(args, &fps_shared, clock_start, &mut frame_rx, &mut frame_handle);
                     resize_pending = None;
                 }
+            }
+            _ = resize_tick.tick(), if ctl.resize_request.is_some() => {
                 // Mid-session resize (§18.37): re-apply the resolution
                 // policy with the client's new preference. The mode change
                 // invalidates the DXGI duplication — and on the Basic

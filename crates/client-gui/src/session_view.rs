@@ -143,10 +143,10 @@ impl SessionView {
                         if size_changed {
                             self.texture = Some(make_texture(gpu, width, height));
                         }
-                        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(
-                            width.max(1),
-                            height.max(1),
-                        ));
+                        // The window is NEVER resized to the remote geometry:
+                        // the user owns the window size; the session scales
+                        // (§18.37 — a self-resize fed back into DesktopResize
+                        // and ping-ponged the console mode).
                     }
                 }
                 ClientEvent::FrameDirty { display_id, rects } => {

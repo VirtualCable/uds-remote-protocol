@@ -245,18 +245,42 @@ impl ApplicationHandler for App {
                 }
                 // Debounce remote resize requests (§18.37): drags produce a
                 // burst of Resized events; only the settled size goes out.
-                if matches!(self.mode, Mode::Session(..)) && size.width > 0 && size.height > 0 {
+                // And only FULLSCREEN sizes are reported: the server cannot
+                // tell a dragged window from a small monitor (a dragged
+                // 1999x1345 once matched the 960x640 mode within the aspect
+                // tolerance and shrank the console to 16 % of its area), so
+                // windowed resizes scale locally and never touch the console.
+                let fullscreen = window.fullscreen().is_some();
+                if matches!(self.mode, Mode::Session(..))
+                    && fullscreen
+                    && size.width > 0
+                    && size.height > 0
+                {
                     self.pending_resize = Some((size.width, size.height));
                     self.resize_since = Instant::now();
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                // F3 toggles the stats overlay locally; it is never sent to
-                // the remote (neither the press nor the release).
+                // F3 toggles the stats overlay and F11 toggles fullscreen;
+                // both are handled locally and never sent to the remote
+                // (neither the press nor the release).
                 let is_f3 = session_view::physical_code(&event) == Some(winit::keyboard::KeyCode::F3);
+                let is_f11 = session_view::physical_code(&event) == Some(winit::keyboard::KeyCode::F11);
+                if is_f11 && event.state == ElementState::Pressed {
+                    // Borderless fullscreen on the current monitor; the
+                    // Resized events on enter/exit drive the remote resize
+                    // policy (§18.37).
+                    let next = match window.fullscreen() {
+                        Some(_) => None,
+                        None => Some(winit::window::Fullscreen::Borderless(None)),
+                    };
+                    window.set_fullscreen(next);
+                    return;
+                }
                 if event.state != ElementState::Pressed {
                     if let Mode::Session(view, _) = &mut self.mode
                         && !is_f3
+                        && !is_f11
                         && let Some(code) = session_view::physical_code(&event)
                     {
                         view.handle_key(code, false);
@@ -272,7 +296,9 @@ impl ApplicationHandler for App {
                     Mode::Session(view, _) => {
                         if is_f3 {
                             view.toggle_stats();
-                        } else if let Some(code) = session_view::physical_code(&event) {
+                        } else if !is_f11
+                            && let Some(code) = session_view::physical_code(&event)
+                        {
                             view.handle_key(code, true);
                         }
                     }
