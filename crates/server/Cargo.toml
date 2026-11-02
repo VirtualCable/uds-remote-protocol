@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = ["opus"]
-windows-capture = ["dep:windows", "dep:image", "dep:udsdisp-ctl", "dep:udsscard-proto"]
+windows-capture = ["dep:windows", "dep:image", "dep:udsscard-proto"]
 vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
 jpeg = ["codec/codec-jpeg"]
@@ -45,7 +45,6 @@ windows = { workspace = true, optional = true, features = [
     "Win32_Security_Authorization",
 ] }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
-udsdisp-ctl = { path = "../udsdisp-ctl", optional = true }
 udsscard-proto = { path = "../udsscard-proto", optional = true }
 
 [dev-dependencies]

@@ -3,8 +3,6 @@
 #
 #   .\build.ps1                    # default: the standalone client
 #   .\build.ps1 -Package server    # any workspace package
-#   .\build.ps1 -Package udsdisp   # e.g. the display driver (needs WDK env;
-#                                  # drivers are built in the dev VM instead)
 #
 # The image mounts the repo at c:\crate and writes build outputs to
 # <repo>/target-windows/ (bind-mounted over the image's c:\out), so the host

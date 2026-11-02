@@ -521,8 +521,8 @@ fn wide_to_string(buf: &[u16]) -> String {
 
 /// Resolves GDI identity strings for a DXGI output device name
 /// (`\\.\DISPLAYn`): the display adapter's DeviceString and the first
-/// connected monitor's DeviceString. DXGI may report an IddCx output under
-/// a generic adapter ("Microsoft Basic Render Driver"), so these GDI
+/// connected monitor's DeviceString. DXGI may report an output under a
+/// generic adapter ("Microsoft Basic Render Driver"), so these GDI
 /// strings are the reliable identity of the monitor. Returns an empty
 /// string when nothing can be resolved.
 fn gdi_device_string(device_name: &str) -> String {

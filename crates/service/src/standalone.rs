@@ -29,7 +29,7 @@ pub struct StandaloneRuntime {
     /// Video codec preset name for the session agent.
     pub preset: String,
     /// Which desktop output the agent captures (substring selector); `None`
-    /// keeps the service default (the UDS virtual display).
+    /// or empty captures the console's primary display (mirror mode).
     pub output_name: Option<String>,
     /// Auto-logon credentials for the credential provider, if configured.
     pub creds: Option<Credentials>,
@@ -39,19 +39,6 @@ pub struct StandaloneRuntime {
     pub fps_adapt: String,
     /// Per-session telemetry CSV path (empty = disabled).
     pub stats_csv: String,
-}
-
-impl StandaloneRuntime {
-    /// Whether sessions will capture the UDS virtual display and therefore
-    /// need the virtual monitor attached. Console mirroring (`output_name`
-    /// set to the console adapter, e.g. `"QXL"`) must NOT attach it: the
-    /// topology churn destabilizes single-head console drivers for no
-    /// benefit (the virtual display is not the capture target).
-    pub fn needs_virtual_display(&self) -> bool {
-        self.output_name
-            .as_deref()
-            .is_none_or(|name| name.to_lowercase().contains("uds"))
-    }
 }
 
 /// Loads the standalone runtime from the shared config file. Returns `None`

@@ -1,6 +1,6 @@
 [package]
 name = "service"
-description = "UDS Remote Protocol orchestrator service: session lifecycle, IddCx attach, agent spawning"
+description = "UDS Remote Protocol orchestrator service: session lifecycle, agent spawning"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,7 +19,6 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-udsdisp-ctl = { path = "../udsdisp-ctl" }
 udscredprov = { path = "../udscredprov" }
 widestring = "1.2"
 windows = { workspace = true, features = [

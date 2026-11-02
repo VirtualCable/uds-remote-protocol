@@ -11,7 +11,7 @@
 // cannot act on (inline_always, ref_as_ptr), and the Win32/COM call style is
 // idiomatic for this API (implicit borrows as raw pointers, `windows::core::*`
 // wildcards, fixed COM signatures that do not use `self` or take small
-// wrappers by value) — same borrow_as_ptr policy as udsaudio-ctl/udsdisp-ctl.
+// wrappers by value) — same borrow_as_ptr policy as udsaudio-ctl.
 #![allow(
     clippy::inline_always,
     clippy::ref_as_ptr,

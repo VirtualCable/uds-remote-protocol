@@ -3,13 +3,10 @@
 //! All real functionality is Windows-only; on other platforms this crate is
 //! an empty shell so the workspace still builds and lints cleanly.
 
-mod adapter;
 #[cfg(windows)]
 mod agent;
 #[cfg(windows)]
 mod credprov;
-#[cfg(windows)]
-mod display;
 #[cfg(windows)]
 mod install;
 #[cfg(windows)]

@@ -9,8 +9,7 @@
 //! does not hold its mutex is wedged and gets killed).
 //!
 //! If the agent dies — crash, kill, wedged — the caller treats it as a dead
-//! remote session and cleans up everything ephemeral (the IddCx monitor, and
-//! implicitly the privacy overlay, whose windows die with the agent).
+//! remote session and cleans up everything ephemeral.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -446,7 +445,7 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
             key: standalone.key,
             ticket: standalone.ticket,
             bind: standalone.bind.clone(),
-            output_name: standalone.output_name.clone().unwrap_or_else(|| "UDS".to_owned()),
+            output_name: standalone.output_name.clone().unwrap_or_default(),
             preset: standalone.preset.clone(),
             ladder: standalone.ladder.clone(),
             fps_adapt: standalone.fps_adapt.clone(),
@@ -456,7 +455,7 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
             key,
             ticket,
             bind: "0.0.0.0:14433".to_owned(),
-            output_name: "UDS".to_owned(),
+            output_name: String::new(),
             preset: "ladder".to_owned(),
             ladder: String::new(),
             fps_adapt: String::new(),

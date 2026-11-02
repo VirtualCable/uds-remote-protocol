@@ -197,10 +197,9 @@ pub enum OutputSelector {
     /// `--output N` behavior; `0` is usually the primary monitor).
     Index(u32),
     /// First output whose adapter description or output device name
-    /// contains this substring, case-insensitive (e.g. `"UDS Virtual
-    /// Display"` selects the IddCx virtual monitor whichever display index
-    /// the OS gave it). Must not be empty (an empty needle would match the
-    /// first output).
+    /// contains this substring, case-insensitive (e.g. `"QXL"` selects the
+    /// QXL monitor whichever display index the OS gave it). Must not be
+    /// empty (an empty needle would match the first output).
     NameContains(String),
 }
 
@@ -208,16 +207,16 @@ pub enum OutputSelector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputCandidate {
     /// Description of the adapter owning the output (DXGI's
-    /// `DXGI_ADAPTER_DESC1.Description`, e.g. `"UDS Virtual Display"`).
+    /// `DXGI_ADAPTER_DESC1.Description`, e.g. `"Red Hat QXL controller"`).
     pub adapter: String,
     /// The output's device name (e.g. `\\.\DISPLAY1`).
     pub name: String,
     /// The output's GDI device string (`EnumDisplayDevicesW`'s
-    /// `DeviceString`, the monitor description). DXGI can report a virtual
-    /// (IddCx) output under a generic adapter such as "Microsoft Basic
-    /// Render Driver", hiding its own adapter description, so this GDI
-    /// string is the reliable way to identify a specific monitor. Empty
-    /// when the backend cannot resolve it.
+    /// `DeviceString`, the monitor description). DXGI can report an output
+    /// under a generic adapter such as "Microsoft Basic Render Driver",
+    /// hiding its own adapter description, so this GDI string is the
+    /// reliable way to identify a specific monitor. Empty when the backend
+    /// cannot resolve it.
     pub gdi_name: String,
     /// Output index within its adapter.
     pub index_in_adapter: u32,
@@ -435,8 +434,8 @@ mod tests {
     }
 
     fn candidates() -> Vec<OutputCandidate> {
-        // Two adapters: a physical GPU with two outputs, then the IddCx
-        // virtual display with one.
+        // Two adapters: a physical GPU with two outputs, then a second
+        // adapter with one.
         vec![
             OutputCandidate {
                 adapter: "Red Hat QXL controller".to_string(),
@@ -451,9 +450,9 @@ mod tests {
                 index_in_adapter: 1,
             },
             OutputCandidate {
-                adapter: "UDS Virtual Display".to_string(),
+                adapter: "Some Other Adapter".to_string(),
                 name: r"\\.\DISPLAY6".to_string(),
-                gdi_name: "UDS Virtual Display".to_string(),
+                gdi_name: "Some Other Monitor".to_string(),
                 index_in_adapter: 0,
             },
         ]
@@ -470,7 +469,7 @@ mod tests {
     #[test]
     fn name_matches_adapter_description_case_insensitively() {
         let c = candidates();
-        let sel = OutputSelector::NameContains("uds virtual".to_string());
+        let sel = OutputSelector::NameContains("some other".to_string());
         assert_eq!(select_output(&c, &sel), Some(2));
     }
 
@@ -492,8 +491,8 @@ mod tests {
     #[test]
     fn name_matches_gdi_device_string_when_dxgi_hides_the_adapter() {
         // On hosts rendering through the Microsoft Basic Render Driver,
-        // DXGI reports the IddCx output under that generic adapter, so only
-        // the GDI device string still identifies our virtual monitor.
+        // DXGI reports the outputs under that generic adapter, so only the
+        // GDI device string still identifies a specific monitor.
         let c = vec![
             OutputCandidate {
                 adapter: "Microsoft Basic Render Driver".to_string(),
@@ -504,11 +503,11 @@ mod tests {
             OutputCandidate {
                 adapter: "Microsoft Basic Render Driver".to_string(),
                 name: r"\\.\DISPLAY2".to_string(),
-                gdi_name: "UDS Virtual Display".to_string(),
+                gdi_name: "Target Monitor".to_string(),
                 index_in_adapter: 1,
             },
         ];
-        let sel = OutputSelector::NameContains("UDS Virtual Display".to_string());
+        let sel = OutputSelector::NameContains("Target Monitor".to_string());
         assert_eq!(select_output(&c, &sel), Some(1));
     }
 }

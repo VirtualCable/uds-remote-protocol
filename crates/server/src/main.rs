@@ -14,10 +14,9 @@
 //! channel (`DisplayInfo`) before the first frame.
 //!
 //! `--output N` captures the Nth output of the first adapter that has one
-//! (0 = primary, the default); `--output-name SUBSTR` captures the first
-//! output whose adapter description or device name contains SUBSTR
-//! (case-insensitive), e.g. `--output-name "UDS Virtual Display"` for the
-//! IddCx virtual monitor.
+//! (0 = primary, the default — console mirroring); `--output-name SUBSTR`
+//! captures the first output whose adapter description or device name
+//! contains SUBSTR (case-insensitive), e.g. `--output-name "QXL"`.
 //!
 //! Audio (§9) is served by default: one Opus frame (preset named by
 //! `--audio-preset`, a name from `codec::AUDIO_PRESETS`, default
@@ -38,10 +37,10 @@
 //! WAV file (48 kHz mono) and announces audio-in support to the client; the
 //! default `null` keeps audio-in off (no announcement, packets discarded).
 //!
-//! Privacy screen (M7): when the client negotiates `FLAG_PRIVACY_SCREEN`
-//! (testclient `--privacy`), the physical console displays are covered with
-//! a branded lock overlay for the duration of the session (Windows with the
-//! `windows-capture` feature; elsewhere the flag is ignored).
+//! Privacy screen (M7): the client may negotiate `FLAG_PRIVACY_SCREEN`
+//! (testclient `--privacy`). In console-mirror mode the request is logged
+//! and ignored — covering the captured display would show the lock screen
+//! to the remote user (see the archive/iddcx-display branch).
 
 use std::net::SocketAddr;
 use std::process::ExitCode;
@@ -135,11 +134,13 @@ fn parse_args() -> Result<Args> {
             args.key = config.key;
             args.ticket = Some(config.ticket);
             args.bind = config.bind.parse().context("config bind address")?;
-            anyhow::ensure!(
-                !config.output_name.is_empty(),
-                "config output_name must not be empty"
-            );
-            args.output = server::capture::OutputSelector::NameContains(config.output_name);
+            // Empty output_name = console mirroring: capture the primary
+            // display of the console session.
+            args.output = if config.output_name.is_empty() {
+                server::capture::OutputSelector::Index(0)
+            } else {
+                server::capture::OutputSelector::NameContains(config.output_name)
+            };
             args.preset = config.preset;
             args.ladder = config.ladder;
             args.fps_adapt = config.fps_adapt;
@@ -1309,54 +1310,19 @@ async fn serve<T: ReliableTransport>(
         info!("client offers smartcard redirection (§17)");
     }
 
-    // Attach-on-demand (M6): raising the named event asks the service to
-    // attach the IddCx monitor; it detaches after an idle timeout once the
-    // session (and this guard) ends. Then wait for the virtual display to
-    // actually appear before starting capture — but ONLY when this session
-    // will capture the virtual display: console-mirroring sessions make the
-    // service skip the attach entirely, so waiting would just burn the
-    // whole timeout on every connect. Both are best-effort: with no
-    // orchestrating service (dev runs) capture just uses what exists.
+    // Privacy screen (M7): the client asks for it with FLAG_PRIVACY_SCREEN.
+    // In console-mirror mode an overlay would cover the very display we
+    // capture (DXGI delivers the composed desktop), so the remote user would
+    // see the lock screen — the request is logged and ignored. Real privacy
+    // needs a separate capture display (the archived IddCx work lives in the
+    // archive/iddcx-display branch).
     #[cfg(all(windows, feature = "windows-capture"))]
-    let _remote_signal = match server::remote_signal::raise() {
-        Ok(signal) => Some(signal),
-        Err(e) => {
-            warn!("cannot raise the remote-session signal: {e:#}");
-            None
-        }
-    };
-    #[cfg(all(windows, feature = "windows-capture"))]
-    let captures_uds_display = matches!(
-        &args.output,
-        server::capture::OutputSelector::NameContains(name)
-            if name.to_lowercase().contains("uds")
-    );
-    #[cfg(all(windows, feature = "windows-capture"))]
-    if captures_uds_display {
-        server::display_topology::wait_for_uds_display(Duration::from_secs(15));
-    }
-
-    // Privacy screen (M7): the client asks for it with FLAG_PRIVACY_SCREEN;
-    // the guard covers the physical displays until the session ends and is
-    // best-effort (a failure is logged, never fatal to the session).
-    #[cfg(all(windows, feature = "windows-capture"))]
-    let _privacy_guard = if stream
+    if stream
         .peer_hello()
         .is_some_and(|h| h.flags & protocol::FLAG_PRIVACY_SCREEN != 0)
     {
-        match server::privacy::activate() {
-            Ok(guard) => {
-                info!("privacy screen active (client request)");
-                Some(guard)
-            }
-            Err(e) => {
-                warn!("privacy screen unavailable: {e:#}");
-                None
-            }
-        }
-    } else {
-        None
-    };
+        warn!("privacy screen ignored: incompatible with console-mirror capture");
+    }
 
     let mut udp_bind = args.bind;
     udp_bind.set_port(0);
@@ -2178,14 +2144,6 @@ async fn run() -> Result<()> {
     // without a peer agent are unaffected.
     #[cfg(all(windows, feature = "windows-capture"))]
     let _session_mutex = server::session_mutex::acquire()?;
-    // The OS does not always extend the desktop onto a freshly attached
-    // IddCx monitor (VMs on the Basic Render driver don't); DXGI can only
-    // duplicate outputs that are part of the desktop.
-    #[cfg(all(windows, feature = "windows-capture"))]
-    {
-        server::display_topology::log_desktop_topology();
-        server::display_topology::ensure_uds_displays_attached(1920, 1080, 60);
-    }
     let ticket: [u8; protocol::TICKET_LENGTH] = if let Some(t) = args.ticket {
         t
     } else {

@@ -21,7 +21,7 @@ thiserror.workspace = true
 
 # Every Windows-specific dependency is gated to Windows: elsewhere the crate
 # compiles to `logic` only, so the workspace stays buildable and testable on
-# Linux (same pattern as `udsdisp` / `udsaudio-ctl`).
+# Linux (same pattern as `udsaudio-ctl`).
 [target.'cfg(windows)'.dependencies]
 anyhow.workspace = true
 widestring = "1.2"

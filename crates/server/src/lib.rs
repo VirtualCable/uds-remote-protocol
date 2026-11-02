@@ -19,16 +19,11 @@ pub mod capture;
 pub mod clipboard;
 pub use server_config as config;
 #[cfg(all(windows, feature = "windows-capture"))]
-pub mod display_topology;
-#[cfg(all(windows, feature = "windows-capture"))]
 pub mod dxgi;
 pub mod fps;
 pub mod input;
 pub mod mic;
 pub mod pacer;
-pub mod privacy;
-#[cfg(all(windows, feature = "windows-capture"))]
-pub mod remote_signal;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod session_mutex;
 pub mod smartcard;

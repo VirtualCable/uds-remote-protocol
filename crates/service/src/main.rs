@@ -1,9 +1,9 @@
 //! UDS Remote Protocol orchestrator service (session 0).
 //!
 //! Owns everything that must live outside the user session (see
-//! doc/plan/servicio-y-sesion.md): IddCx monitor lifecycle, session-agent
-//! spawning, the named-mutex session watchdog and the named pipes towards
-//! the credential provider and the agent.
+//! doc/plan/servicio-y-sesion.md): session-agent spawning, the named-mutex
+//! session watchdog and the named pipes towards the credential provider and
+//! the agent.
 //!
 //! M0 scope: SCM integration, self-install (`--install` / `--uninstall`),
 //! file logging, start/stop. Later milestones add the orchestration itself.
