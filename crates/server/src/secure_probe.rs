@@ -37,9 +37,13 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::StationsAndDesktops::{
     CloseDesktop, GetUserObjectInformationW, HDESK, OpenInputDesktop, SetThreadDesktop, UOI_NAME,
 };
+use windows::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CreateProcessW, PROCESS_INFORMATION, STARTUPINFOW, WaitForSingleObject,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput,
 };
+use windows::core::{PCWSTR, PWSTR};
 
 /// Poll cadence for the input-desktop watch.
 const POLL: Duration = Duration::from_millis(250);
@@ -49,14 +53,30 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 /// Hidden argv entry point: when `--secure-probe <log-path>` is present, run
 /// the probe synchronously and return its exit code; `None` otherwise.
 /// Checked before any other argument parsing (the probe takes no `--key`).
+///
+/// `--secure-probe-child <log-path>` is the inner mode: the probe re-spawns
+/// itself with `lpDesktop = "winsta0\\Winlogon"` when a secure desktop is
+/// active, to test whether `SendInput` works for a process BORN on the
+/// secure desktop (it does not from `winsta0\\default`, even as SYSTEM).
 pub fn maybe_run_from_argv() -> Option<ExitCode> {
     let args: Vec<String> = std::env::args().collect();
-    let pos = args.iter().position(|a| a == "--secure-probe")?;
+    let (flag, child) = if args.iter().any(|a| a == "--secure-probe-child") {
+        ("--secure-probe-child", true)
+    } else if args.iter().any(|a| a == "--secure-probe") {
+        ("--secure-probe", false)
+    } else {
+        return None;
+    };
+    let pos = args.iter().position(|a| a == flag)?;
     let Some(log_path) = args.get(pos + 1).map(PathBuf::from) else {
-        eprintln!("server: --secure-probe requires a log path");
+        eprintln!("server: {flag} requires a log path");
         return Some(ExitCode::from(1));
     };
-    Some(run(&log_path))
+    Some(if child {
+        run_child(&log_path)
+    } else {
+        run(&log_path)
+    })
 }
 
 /// Appends one timestamped line to the probe log.
@@ -176,6 +196,102 @@ fn exercise(log: &mut std::fs::File, log_path: &Path, hdesk: HDESK) {
         let err = std::io::Error::last_os_error();
         log_line(log, &format!("SendInput blocked: {err}"));
     }
+    // SendInput from a process ANCHORED to winsta0\default is blocked on the
+    // secure desktop even for SYSTEM; test the known alternative: a child
+    // process born directly on winsta0\Winlogon (the VNC helper pattern).
+    spawn_child_on_secure_desktop(log, log_path);
+}
+
+/// Re-spawns this executable in `--secure-probe-child` mode directly on the
+/// secure desktop and waits for it (bounded).
+fn spawn_child_on_secure_desktop(log: &mut std::fs::File, log_path: &Path) {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            log_line(log, &format!("child spawn: current_exe failed: {e}"));
+            return;
+        }
+    };
+    let mut cmdline: Vec<u16> = format!(
+        "\"{}\" --secure-probe-child \"{}\"",
+        exe.display(),
+        log_path.display()
+    )
+    .encode_utf16()
+    .chain(std::iter::once(0))
+    .collect();
+    let mut desktop: Vec<u16> =
+        "winsta0\\Winlogon".encode_utf16().chain(std::iter::once(0)).collect();
+    let startup = STARTUPINFOW {
+        cb: u32::try_from(size_of::<STARTUPINFOW>()).expect("struct fits in u32"),
+        lpDesktop: PWSTR(desktop.as_mut_ptr()),
+        ..Default::default()
+    };
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: `cmdline`/`desktop` are null-terminated, mutable and outlive
+    // the call; `startup`/`info` are correctly sized. The token is inherited
+    // (the probe already runs as SYSTEM in the console session).
+    let created = unsafe {
+        CreateProcessW(
+            PCWSTR::null(),
+            Some(PWSTR(cmdline.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_NO_WINDOW,
+            None,
+            PCWSTR::null(),
+            &raw const startup,
+            &raw mut info,
+        )
+    };
+    match created {
+        Ok(()) => {
+            log_line(log, &format!("child spawned on winsta0\\Winlogon pid={}", info.dwProcessId));
+            // SAFETY: valid process handle; bounded wait.
+            let waited = unsafe { WaitForSingleObject(info.hProcess, 15_000) };
+            log_line(log, &format!("child wait result: {waited:?}"));
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(info.hThread);
+                let _ = windows::Win32::Foundation::CloseHandle(info.hProcess);
+            }
+        }
+        Err(e) => log_line(log, &format!("child spawn failed: {e}")),
+    }
+}
+
+/// Child mode: born on the secure desktop (`lpDesktop = "winsta0\\Winlogon"`
+/// at creation), appends its input-injection result to the probe log.
+fn run_child(log_path: &Path) -> ExitCode {
+    let mut log = match std::fs::OpenOptions::new().append(true).open(log_path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("probe child: cannot open {}: {e}", log_path.display());
+            return ExitCode::from(1);
+        }
+    };
+    log_line(&mut log, "[child] started on the secure desktop");
+    let input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: MOUSEEVENTF_MOVE,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    let sent = unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
+    if sent == 1 {
+        log_line(&mut log, "[child] SendInput ACCEPTED on the secure desktop");
+    } else {
+        let err = std::io::Error::last_os_error();
+        log_line(&mut log, &format!("[child] SendInput blocked too: {err}"));
+    }
+    ExitCode::SUCCESS
 }
 
 /// Captures the calling thread's desktop via GDI into 32-bpp BGRA pixels
