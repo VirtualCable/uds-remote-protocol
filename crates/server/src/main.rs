@@ -1851,7 +1851,20 @@ async fn serve_stream<T: ReliableTransport>(
                     Some(CaptureMsg::Cursor(update)) => {
                         send_cursor_update(&mut legs, &update).await?;
                     }
-                    other => bail!("capture thread ended ({other:?})"),
+                    other => {
+                        // The helper's frames channel closes when the helper
+                        // self-exits on the desktop switching back to Default —
+                        // that EOF usually reaches us BEFORE the watcher's
+                        // `active=false` transition. It is not a fatal capture
+                        // end: park the receiver and let the secure branch
+                        // restart the console capture.
+                        if other.is_none() && ctl.secure_input.is_some() {
+                            info!("secure helper stream ended; awaiting the desktop transition");
+                            frame_rx = None;
+                        } else {
+                            bail!("capture thread ended ({other:?})");
+                        }
+                    }
                 }
             }
             msg = recv_audio(&mut audio_rx) => {
