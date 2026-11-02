@@ -1558,6 +1558,9 @@ async fn serve_stream<T: ReliableTransport>(
     // Set when a resize was applied and no frame of the new geometry has
     // arrived yet; drives the poison-mode revert (§18.37).
     let mut resize_pending: Option<Instant> = None;
+    // Modes that poisoned the capture this session (never delivered a
+    // frame after being applied); excluded from future resizes.
+    let mut bad_modes: Vec<(u32, u32)> = Vec::new();
     // Seeded in the past so the very first frame goes out as a keyframe even
     // if the encoder's first frame was not one for some reason.
     let mut last_keyframe = Instant::now().checked_sub(KEYFRAME_SAFETY_INTERVAL).unwrap_or_else(Instant::now);
@@ -1682,13 +1685,18 @@ async fn serve_stream<T: ReliableTransport>(
                 // Poison-mode revert (§18.37): a resize that never delivers
                 // a frame (the display stack invalidates every duplication
                 // instantly) rolls back to the original console mode instead
-                // of leaving the session blind until the storm breaker.
+                // of leaving the session blind until the storm breaker. The
+                // failed mode is blacklisted so a queued request does not
+                // re-apply it in a loop.
                 if let Some(since) = resize_pending
                     && since.elapsed() >= RESIZE_FRAME_TIMEOUT
                 {
                     warn!(
                         "no frames {RESIZE_FRAME_TIMEOUT:?} after the resize; reverting the console mode"
                     );
+                    if let Some(mode) = display_mode.applied() {
+                        bad_modes.push(mode);
+                    }
                     display_mode.restore();
                     resize_pending = None;
                 }
@@ -1698,20 +1706,36 @@ async fn serve_stream<T: ReliableTransport>(
                 // recovers in its own thread. The encoder is rebuilt and
                 // re-announced right away — waiting for the first frame of
                 // the new geometry would leave the client blind meanwhile.
+                // Mode changes are serialized: while a previous change has
+                // not delivered a frame, new requests wait for later ticks
+                // (a window drag would otherwise stack mode changes on top
+                // of a duplication still in transition).
                 if let Some(request) = ctl.resize_request.take() {
-                    let policy = server::display_mode::ResolutionPolicy {
-                        fixed: args.fixed_resolution,
-                        preferred: request,
-                    };
-                    if display_mode.apply(&policy) {
-                        if let Some((w, h)) = display_mode.applied() {
-                            info!(w, h, "resize applied; rebuilding encoder");
-                            width = w;
-                            height = h;
-                            encoder = build_encoder(args, width, height)?;
-                            announce_display(&mut legs, &mut encoder, width, height).await?;
+                    if resize_pending.is_some() {
+                        ctl.resize_request = Some(request);
+                    } else {
+                        let policy = server::display_mode::ResolutionPolicy {
+                            fixed: args.fixed_resolution,
+                            preferred: request,
+                        };
+                        if display_mode.apply(&policy) {
+                            let mode = display_mode.applied();
+                            if mode.is_some_and(|m| bad_modes.contains(&m)) {
+                                // Known-poisonous mode: roll back at once and
+                                // keep the session on the current geometry.
+                                warn!(?mode, "resize targeted a blacklisted mode; reverting");
+                                display_mode.restore();
+                            } else {
+                                if let Some((w, h)) = mode {
+                                    info!(w, h, "resize applied; rebuilding encoder");
+                                    width = w;
+                                    height = h;
+                                    encoder = build_encoder(args, width, height)?;
+                                    announce_display(&mut legs, &mut encoder, width, height).await?;
+                                }
+                                resize_pending = Some(Instant::now());
+                            }
                         }
-                        resize_pending = Some(Instant::now());
                     }
                 }
             }

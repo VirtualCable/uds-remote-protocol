@@ -236,9 +236,15 @@ impl FrameSource for DxgiSource {
         let result = self.extract(&resource, &info);
         self.read_cursor(&info);
         // SAFETY: `resource` was acquired above and is released exactly once.
-        unsafe { self.duplication.ReleaseFrame() }
-            .ok()
-            .context("ReleaseFrame failed")?;
+        if let Err(e) = unsafe { self.duplication.ReleaseFrame() } {
+            // The duplication died while the frame was held (a mode change
+            // lands exactly here): the extracted frame is still valid, but
+            // the duplication needs a rebuild before the next acquire —
+            // same path as an ACCESS_LOST on acquire. Propagating the error
+            // instead used to kill the capture thread and the whole session.
+            tracing::debug!("ReleaseFrame failed ({e:#}); reinitializing the duplication");
+            self.on_access_lost()?;
+        }
         result.map(Some)
     }
 
