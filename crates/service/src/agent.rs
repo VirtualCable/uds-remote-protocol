@@ -19,10 +19,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::{error, info, warn};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0,
-    WAIT_TIMEOUT,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
+    SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
-use windows::Win32::Security::SECURITY_ATTRIBUTES;
+use windows::Win32::Security::{
+    ACL, ACL_REVISION, AddAccessAllowedAce, CreateWellKnownSid, InitializeAcl,
+    InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, WinWorldSid,
+};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_END, FILE_GENERIC_WRITE, FILE_SHARE_READ, OPEN_ALWAYS,
     SetFilePointerEx, WriteFile,
@@ -35,8 +39,9 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CreateProcessAsUserW, OpenMutexW, PROCESS_INFORMATION, STARTF_USESTDHANDLES,
-    STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CreateMutexW, CreateProcessAsUserW, MUTEX_ALL_ACCESS, OpenMutexW,
+    PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES, STARTUPINFOW,
+    SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 
@@ -197,11 +202,16 @@ impl Agent {
             return false;
         };
         let mutex = OwnedHandle(raw);
-        // SAFETY: the mutex handle is ours and open.
+        // SAFETY: the mutex handle is ours and open. Note the wait ACQUIRES
+        // the mutex when it is free/abandoned: release it immediately so a
+        // respawned agent can take ownership.
         match unsafe { WaitForSingleObject(mutex.0, 0) } {
             WAIT_TIMEOUT => true, // owned by the agent
-            WAIT_OBJECT_0 => {
+            WAIT_OBJECT_0 | WAIT_ABANDONED => {
                 warn!("session mutex is free while the agent is alive");
+                unsafe {
+                    let _ = ReleaseMutex(mutex.0);
+                }
                 false
             }
             other => {
@@ -322,7 +332,94 @@ fn open_agent_log() -> Result<OwnedHandle> {
 /// Service body: keep one agent running in the console session until the SCM
 /// asks us to stop. Errors are logged and retried with backoff; the loop only
 /// ends on stop (M5 revisits the exact recovery policy).
+/// Creates the agent session mutex in the **global** namespace, unowned,
+/// with an Everyone DACL. Creating `Global\` objects requires
+/// `SeCreateGlobalPrivilege` (services have it; standard session users do
+/// not — their `Global\` is silently redirected to the session-local
+/// namespace, which made the watchdog blind and caused a kill/respawn loop
+/// once the agent ran as a standard user). The agent OPENS this mutex and
+/// takes ownership for its lifetime; this handle just keeps the object
+/// alive and unowned between agents.
+fn ensure_session_mutex() -> Option<OwnedHandle> {
+    // DACL: Everyone full access — the mutex carries no data, it is just an
+    // ownership token, and the agent runs as an arbitrary standard user.
+    let mut world_sid = vec![0u8; 68];
+    let mut sid_len = world_sid.len() as u32;
+    let sid_ok = unsafe {
+        CreateWellKnownSid(
+            WinWorldSid,
+            None,
+            Some(PSID(world_sid.as_mut_ptr().cast())),
+            &mut sid_len,
+        )
+    };
+    if sid_ok.is_err() {
+        warn!("cannot build the Everyone SID; session-mutex watchdog disabled");
+        return None;
+    }
+    let mut sec_desc = Box::new(SECURITY_DESCRIPTOR::default());
+    let mut acl_buf = vec![0u8; 1024];
+    let ready = unsafe {
+        InitializeSecurityDescriptor(
+            PSECURITY_DESCRIPTOR(sec_desc.as_mut() as *mut _ as _),
+            windows::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION,
+        )
+        .is_ok()
+            && InitializeAcl(acl_buf.as_mut_ptr().cast::<ACL>(), acl_buf.len() as u32, ACL_REVISION)
+                .is_ok()
+            && AddAccessAllowedAce(
+                acl_buf.as_mut_ptr().cast::<ACL>(),
+                ACL_REVISION,
+                MUTEX_ALL_ACCESS.0,
+                PSID(world_sid.as_mut_ptr().cast()),
+            )
+            .is_ok()
+            && SetSecurityDescriptorDacl(
+                PSECURITY_DESCRIPTOR(sec_desc.as_mut() as *mut _ as _),
+                true,
+                Some(acl_buf.as_mut_ptr().cast::<ACL>()),
+                false,
+            )
+            .is_ok()
+    };
+    if !ready {
+        warn!("cannot build the session-mutex DACL; watchdog disabled");
+        return None;
+    }
+    let attrs = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
+        lpSecurityDescriptor: sec_desc.as_mut() as *mut _ as *mut core::ffi::c_void,
+        bInheritHandle: false,
+    };
+    let mut name: Vec<u16> = SESSION_MUTEX.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `attrs` points to a valid security descriptor; `name` is
+    // null-terminated. Created unowned: the agent takes ownership.
+    let handle = unsafe { CreateMutexW(Some(&raw const attrs), false, PWSTR(name.as_mut_ptr())) };
+    match handle {
+        Ok(h) => {
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                info!("session mutex already existed (leftover); reusing it");
+            } else {
+                info!("global session mutex pre-created for the agent");
+            }
+            // The security buffers must outlive the handle; leak them
+            // (one per service run, a few KB).
+            std::mem::forget(sec_desc);
+            std::mem::forget(acl_buf);
+            std::mem::forget(world_sid);
+            Some(OwnedHandle(h))
+        }
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "cannot pre-create the session mutex; watchdog disabled");
+            None
+        }
+    }
+}
+
 pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::StandaloneRuntime>) {
+    // Pre-create the global session mutex before any agent spawns: only a
+    // privileged process can create Global\ objects (see ensure_session_mutex).
+    let _session_mutex = ensure_session_mutex();
     let mut agent: Option<Agent> = None;
     let mut respawns = 0u32;
     // Key and ticket are generated once per service run; the agent gets them
