@@ -51,7 +51,15 @@ pub fn acquire() -> Result<SessionMutex> {
     // the privilege to create Global\ objects; a standard session user does
     // not) and take ownership of it.
     // SAFETY: `name` is null-terminated and outlives the call.
-    if let Ok(handle) = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, false, PCWSTR(name.as_ptr())) } {
+    let open_result = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, false, PCWSTR(name.as_ptr())) };
+    // Temporary diagnostics: tracing output written before a watchdog kill
+    // is lost with the process, so the probe result also goes to a plain
+    // file (§18.30 debugging).
+    let _ = std::fs::write(
+        r"C:\ProgramData\UdsRp\mutex-probe.txt",
+        format!("{open_result:?}"),
+    );
+    if let Ok(handle) = open_result {
         // SAFETY: `handle` is live and unowned-by-us so far.
         match unsafe { WaitForSingleObject(handle, 0) } {
             WAIT_OBJECT_0 | WAIT_ABANDONED => {
