@@ -102,6 +102,12 @@ pub struct DxgiSource {
     /// Current backoff between storm re-creations; doubles per iteration up
     /// to [`STORM_DELAY_MAX`], reset on a healthy acquire.
     storm_delay: Duration,
+    /// Cooperative shutdown shared with the capture thread's owner: when set,
+    /// reinit retry loops bail out immediately instead of blocking the join
+    /// in `stop_capture` for the whole [`REINIT_BUDGET`] (§18.41: entering a
+    /// secure desktop denies `DuplicateOutput` for good, so the full budget
+    /// would always be burnt with the session loop frozen behind the join).
+    stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl DxgiSource {
@@ -145,7 +151,20 @@ impl DxgiSource {
             cursor_visible: true,
             last_healthy: std::time::Instant::now(),
             storm_delay: STORM_DELAY_MIN,
+            stop: None,
         })
+    }
+
+    /// Arms the cooperative shutdown flag (see the `stop` field).
+    pub fn set_stop(&mut self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.stop = Some(stop);
+    }
+
+    /// True once the owner asked us to shut down.
+    fn stop_requested(&self) -> bool {
+        self.stop
+            .as_ref()
+            .is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Handles `DXGI_ERROR_ACCESS_LOST` from `AcquireNextFrame`.
@@ -169,7 +188,17 @@ impl DxgiSource {
             "the output has invalidated every new desktop duplication for {STORM_BREAKER:?}; \
              the display stack looks poisoned — giving up instead of spinning"
         );
-        std::thread::sleep(self.storm_delay);
+        // Sleep in chunks so a shutdown request is honored promptly even
+        // from inside the storm backoff.
+        let mut remaining = self.storm_delay;
+        while remaining > Duration::ZERO {
+            if self.stop_requested() {
+                anyhow::bail!("capture shutdown requested; abandoning the storm backoff");
+            }
+            let step = remaining.min(Duration::from_millis(100));
+            std::thread::sleep(step);
+            remaining -= step;
+        }
         self.storm_delay = (self.storm_delay * 2).min(STORM_DELAY_MAX);
         self.reinit(true)
     }
@@ -194,6 +223,9 @@ impl DxgiSource {
         let mut attempt = 0u32;
         let dup = loop {
             attempt += 1;
+            if self.stop_requested() {
+                anyhow::bail!("capture shutdown requested; abandoning the duplication reinit");
+            }
             match init_duplication(&self.selector, storm) {
                 Ok(dup) => break dup,
                 Err(e) if std::time::Instant::now() < deadline => {

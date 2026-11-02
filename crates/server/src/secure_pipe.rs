@@ -126,6 +126,7 @@ pub mod win {
     use anyhow::{Context, Result, bail};
     use std::os::windows::io::FromRawHandle;
     use std::time::{Duration, Instant};
+    use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Storage::FileSystem::{
@@ -187,7 +188,13 @@ pub mod win {
             bail!("CreateNamedPipeW({name}): {:?}", windows::core::Error::from_thread());
         }
         // SAFETY: valid pipe handle; blocking mode waits for the client.
-        unsafe { ConnectNamedPipe(handle, None) }.context("ConnectNamedPipe")?;
+        // ERROR_PIPE_CONNECTED means the client already connected between
+        // CreateNamedPipeW and this call — that is success, not a failure.
+        if let Err(e) = unsafe { ConnectNamedPipe(handle, None) }
+            && e.code() != windows::core::HRESULT::from_win32(ERROR_PIPE_CONNECTED.0)
+        {
+            return Err(e).context("ConnectNamedPipe");
+        }
         // SAFETY: we own the handle; File takes ownership.
         Ok(unsafe { std::fs::File::from_raw_handle(handle.0 as _) })
     }

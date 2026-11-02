@@ -50,7 +50,7 @@
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -509,12 +509,21 @@ fn spawn_capture(
     args: &Args,
     fps_shared: Arc<AtomicU32>,
     clock_start: Instant,
-) -> (mpsc::Receiver<CaptureMsg>, std::thread::JoinHandle<()>) {
+) -> (
+    mpsc::Receiver<CaptureMsg>,
+    std::thread::JoinHandle<()>,
+    Arc<AtomicBool>,
+) {
     let kind = args.source.clone();
     let (width, height, output) = (args.width, args.height, args.output.clone());
     let (tx, rx) = mpsc::channel(2);
+    // Cooperative shutdown for the source's internal retry loops (DXGI
+    // reinit can block for the whole reinit budget otherwise, and
+    // `stop_capture`'s join would freeze the session loop behind it).
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = Arc::clone(&stop);
     let handle = std::thread::spawn(move || {
-        let mut source = match Source::new(&kind, &output, width, height) {
+        let mut source = match Source::new(&kind, &output, width, height, &stop_thread) {
             Ok(s) => s,
             Err(e) => {
                 let _ = tx.blocking_send(CaptureMsg::Ready(Err(e)));
@@ -566,19 +575,26 @@ fn spawn_capture(
             }
         }
     });
-    (rx, handle)
+    (rx, handle, stop)
 }
 
-/// Stops the capture thread: dropping the receiver closes the channel (the
-/// thread exits on its next liveness check or failed send), then the join
-/// waits for the DXGI duplication to be fully released. Must run BEFORE any
-/// console mode change (§18.37): a mode applied with a live duplication
+/// Stops the capture thread: the stop flag breaks any internal retry loop
+/// (a DXGI reinit can otherwise block for the whole reinit budget — with a
+/// secure desktop owning the console it ALWAYS would, §18.41 — freezing the
+/// session loop behind the join), dropping the receiver closes the channel
+/// (the thread exits on its next liveness check or failed send), then the
+/// join waits for the DXGI duplication to be fully released. Must run BEFORE
+/// any console mode change (§18.37): a mode applied with a live duplication
 /// poisons capture for the rest of the process on the Basic Render Driver
 /// stack — every new duplication then fails with access-lost forever.
 fn stop_capture(
     rx_slot: &mut Option<mpsc::Receiver<CaptureMsg>>,
     handle_slot: &mut Option<std::thread::JoinHandle<()>>,
+    stop_slot: &mut Option<Arc<AtomicBool>>,
 ) {
+    if let Some(stop) = stop_slot.take() {
+        stop.store(true, Ordering::Relaxed);
+    }
     rx_slot.take();
     if let Some(handle) = handle_slot.take()
         && handle.join().is_err()
@@ -594,10 +610,12 @@ fn start_capture(
     clock_start: Instant,
     rx_slot: &mut Option<mpsc::Receiver<CaptureMsg>>,
     handle_slot: &mut Option<std::thread::JoinHandle<()>>,
+    stop_slot: &mut Option<Arc<AtomicBool>>,
 ) {
-    let (rx, handle) = spawn_capture(args, Arc::clone(fps_shared), clock_start);
+    let (rx, handle, stop) = spawn_capture(args, Arc::clone(fps_shared), clock_start);
     *rx_slot = Some(rx);
     *handle_slot = Some(handle);
+    *stop_slot = Some(stop);
 }
 
 /// Receives the next capture message; pends forever while the capture
@@ -1594,7 +1612,15 @@ async fn serve_stream<T: ReliableTransport>(
     let fps_shared = Arc::new(AtomicU32::new(args.fps.max(1)));
     let mut frame_rx: Option<mpsc::Receiver<CaptureMsg>> = None;
     let mut frame_handle: Option<std::thread::JoinHandle<()>> = None;
-    start_capture(args, &fps_shared, clock_start, &mut frame_rx, &mut frame_handle);
+    let mut capture_stop: Option<Arc<AtomicBool>> = None;
+    start_capture(
+        args,
+        &fps_shared,
+        clock_start,
+        &mut frame_rx,
+        &mut frame_handle,
+        &mut capture_stop,
+    );
     let ready = match recv_capture(&mut frame_rx).await {
         Some(CaptureMsg::Ready(r)) => r?,
         other => bail!("capture thread ended before reporting readiness ({other:?})"),
@@ -1771,7 +1797,7 @@ async fn serve_stream<T: ReliableTransport>(
                                 warn!("capture failed to start after the mode change: {e:#}");
                                 if let Some(mode) = display_mode.applied() {
                                     bad_modes.push(mode);
-                                    stop_capture(&mut frame_rx, &mut frame_handle);
+                                    stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
                                     display_mode.restore();
                                     start_capture(
                                         args,
@@ -1779,6 +1805,7 @@ async fn serve_stream<T: ReliableTransport>(
                                         clock_start,
                                         &mut frame_rx,
                                         &mut frame_handle,
+                                        &mut capture_stop,
                                     );
                                     resize_pending = Some(Instant::now());
                                 } else {
@@ -1915,9 +1942,16 @@ async fn serve_stream<T: ReliableTransport>(
                     if let Some(mode) = display_mode.applied() {
                         bad_modes.push(mode);
                     }
-                    stop_capture(&mut frame_rx, &mut frame_handle);
+                    stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
                     display_mode.restore();
-                    start_capture(args, &fps_shared, clock_start, &mut frame_rx, &mut frame_handle);
+                    start_capture(
+                        args,
+                        &fps_shared,
+                        clock_start,
+                        &mut frame_rx,
+                        &mut frame_handle,
+                        &mut capture_stop,
+                    );
                     resize_pending = None;
                 }
             }
@@ -1957,7 +1991,7 @@ async fn serve_stream<T: ReliableTransport>(
                                 warn!(?target, "resize targeted a blacklisted mode; ignored");
                             }
                             Some(_) => {
-                                stop_capture(&mut frame_rx, &mut frame_handle);
+                                stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
                                 if display_mode.apply(&policy) {
                                     resize_pending = Some(Instant::now());
                                 }
@@ -1967,6 +2001,7 @@ async fn serve_stream<T: ReliableTransport>(
                                     clock_start,
                                     &mut frame_rx,
                                     &mut frame_handle,
+                                    &mut capture_stop,
                                 );
                             }
                         }
@@ -1982,7 +2017,7 @@ async fn serve_stream<T: ReliableTransport>(
                 if active && secure_state.is_none() {
                     info!("secure desktop active; switching capture/input to the helper");
                     legs.send_control(&ControlMessage::SecureDesktop { active: true }.encode()?).await?;
-                    stop_capture(&mut frame_rx, &mut frame_handle);
+                    stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
                     let session_id = server::secure_pipe::own_session_id().unwrap_or(0);
                     let (rx, state) = spawn_secure_pipes(session_id, clock_start);
                     frame_rx = Some(rx);
@@ -1992,8 +2027,15 @@ async fn serve_stream<T: ReliableTransport>(
                     info!("secure desktop released; resuming console capture");
                     ctl.secure_input = None;
                     secure_state = None;
-                    stop_capture(&mut frame_rx, &mut frame_handle);
-                    start_capture(args, &fps_shared, clock_start, &mut frame_rx, &mut frame_handle);
+                    stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
+                    start_capture(
+                        args,
+                        &fps_shared,
+                        clock_start,
+                        &mut frame_rx,
+                        &mut frame_handle,
+                        &mut capture_stop,
+                    );
                     legs.send_control(&ControlMessage::SecureDesktop { active: false }.encode()?).await?;
                 }
             }
@@ -2487,15 +2529,18 @@ impl Source {
         selector: &server::capture::OutputSelector,
         width: u32,
         height: u32,
+        stop: &Arc<AtomicBool>,
     ) -> Result<Self> {
         let _ = selector; // used only by the Windows DXGI arm
+        let _ = stop; // used only by the Windows DXGI arm
         match kind {
             "synthetic" => Ok(Self::Synthetic(SyntheticSource::new(width, height))),
             #[cfg(all(windows, feature = "windows-capture"))]
-            "dxgi" => Ok(Self::Dxgi {
-                source: Box::new(server::dxgi::DxgiSource::new(selector)?),
-                last: None,
-            }),
+            "dxgi" => {
+                let mut source = Box::new(server::dxgi::DxgiSource::new(selector)?);
+                source.set_stop(Arc::clone(stop));
+                Ok(Self::Dxgi { source, last: None })
+            }
             other => bail!(
                 "unknown or unavailable source: {other} (dxgi requires Windows + windows-capture feature)"
             ),
