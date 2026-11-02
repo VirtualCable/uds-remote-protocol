@@ -39,9 +39,9 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CreateMutexW, CreateProcessAsUserW, MUTEX_ACCESS_RIGHTS,
-    MUTEX_MODIFY_STATE, OpenMutexW, PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES,
-    STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CreateMutexW, CreateProcessAsUserW, MUTEX_MODIFY_STATE, OpenMutexW,
+    PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES, STARTUPINFOW,
+    SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 
@@ -193,16 +193,12 @@ impl Agent {
             return true;
         }
         let name = HSTRING::from(SESSION_MUTEX);
-        // SAFETY: `name` is null-terminated and outlives the call. MODIFY_STATE
-        // is requested too because the wait below can ACQUIRE the mutex (when
-        // free or abandoned) and we then have to release it.
-        let handle = unsafe {
-            OpenMutexW(
-                MUTEX_ACCESS_RIGHTS(MUTEX_MODIFY_STATE.0 | SYNCHRONIZATION_SYNCHRONIZE.0),
-                false,
-                &name,
-            )
-        };
+    // SAFETY: `name` is null-terminated and outlives the call. MODIFY_STATE
+    // is requested too because the wait below can ACQUIRE the mutex (when
+    // free or abandoned) and we then have to release it.
+    let handle = unsafe {
+        OpenMutexW(MUTEX_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE, false, &name)
+    };
         let Ok(raw) = handle else {
             // No mutex at all past the grace period: the agent never got as
             // far as creating it — wedged.

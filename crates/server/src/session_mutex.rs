@@ -23,8 +23,8 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::System::Threading::{
-    CreateMutexW, MUTEX_ACCESS_RIGHTS, MUTEX_MODIFY_STATE, OpenMutexW, ReleaseMutex,
-    SYNCHRONIZATION_SYNCHRONIZE, WaitForSingleObject,
+    CreateMutexW, MUTEX_MODIFY_STATE, OpenMutexW, ReleaseMutex, SYNCHRONIZATION_SYNCHRONIZE,
+    WaitForSingleObject,
 };
 use windows::core::{PCWSTR, PWSTR};
 
@@ -56,7 +56,7 @@ pub fn acquire() -> Result<SessionMutex> {
     // SAFETY: `name` is null-terminated and outlives the call.
     if let Ok(handle) = unsafe {
         OpenMutexW(
-            MUTEX_ACCESS_RIGHTS(MUTEX_MODIFY_STATE.0 | SYNCHRONIZATION_SYNCHRONIZE.0),
+            MUTEX_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE,
             false,
             PCWSTR(name.as_ptr()),
         )
