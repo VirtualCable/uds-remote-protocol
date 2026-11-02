@@ -35,6 +35,12 @@ use crate::mic::{MicClient, MicMode};
 /// per this interval (riesgos §2.1).
 const KEYFRAME_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Dead-server detection (§18.39): with no inbound traffic at all for this
+/// long (probes are answered once per second on every leg), the session is
+/// declared dead. The server applies the symmetric rule (5 s) to client
+/// traffic.
+const SERVER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(7);
+
 /// How long a partial frame may sit untouched before it is counted as lost.
 /// Fragments of one frame leave the server back-to-back, so 250 ms covers
 /// even heavy reordering; the sweep runs on the presentation tick.
@@ -162,30 +168,49 @@ impl Session {
         core.stats.set_udp(leg.is_some());
         match leg {
             Some(leg) => self.udp_loop(leg, stream, clock_start, &mut core).await,
-            None => self.tcp_loop(stream, &mut core).await,
+            None => self.tcp_loop(stream, clock_start, &mut core).await,
         }
     }
 
     /// Reliable-stream-only session (§4.1 fallback): control, display,
-    /// audio and input all share the encrypted stream.
+    /// audio and input all share the encrypted stream. Probes keep running
+    /// here too (1/s, §12.1): they are the session keepalive — the server
+    /// kills the session after ~5 s without client traffic (§18.39).
     async fn tcp_loop(
         &mut self,
         mut stream: EncryptedStream<Box<dyn ReliableTransport>>,
+        clock_start: Instant,
         core: &mut Core,
     ) -> Result<()> {
         // Sized for the largest stream record (~64 KiB): cursor shapes (§10)
         // can be a few KiB; datagrams on this buffer stay MTU-sized anyway.
         let mut buf = vec![0u8; 65_536];
+        let clock = || micros_since(clock_start);
+        let mut probe_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut liveness_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut last_recv = Instant::now();
         let mut present_tick = tokio::time::interval(PRESENT_TICK);
         let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 res = stream.recv_into(&mut buf) => {
                     let (ch, n) = res?;
+                    last_recv = Instant::now();
                     if !core.handle_packet(ch, &buf[..n])? {
                         return Ok(());
                     }
                     Self::flush_out(&mut stream, core).await?;
+                }
+                _ = probe_tick.tick() => {
+                    // Keepalive + RTT sampling on the fallback leg (§18.39).
+                    stream
+                        .send(channel::CONTROL, &protocol::Probe { t1: clock() }.encode())
+                        .await?;
+                }
+                _ = liveness_tick.tick() => {
+                    if last_recv.elapsed() >= SERVER_LIVENESS_TIMEOUT {
+                        anyhow::bail!("server silent for {SERVER_LIVENESS_TIMEOUT:?}; session dead");
+                    }
                 }
                 msg = core.mic.recv() => {
                     if let Some(payload) = msg {
@@ -265,10 +290,13 @@ impl Session {
         let mut prev_received = 0u64;
         let mut present_tick = tokio::time::interval(PRESENT_TICK);
         let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut liveness_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut last_recv = Instant::now();
         loop {
             tokio::select! {
                 res = leg.dgram.recv_into(&mut buf) => {
                     let (ch, n) = res?;
+                    last_recv = Instant::now();
                     if ch == channel::CONTROL
                         && let Ok(ack) = protocol::ProbeAck::decode(&buf[..n])
                     {
@@ -292,6 +320,7 @@ impl Session {
                     // Reliable S→C traffic while the UDP leg is up: cursor
                     // messages (§10) and any control announcements.
                     let (ch, n) = res?;
+                    last_recv = Instant::now();
                     if !core.handle_packet(ch, &sbuf[..n])? {
                         return Ok(());
                     }
@@ -301,6 +330,11 @@ impl Session {
                     leg.dgram
                         .send(channel::CONTROL, &protocol::Probe { t1: clock() }.encode())
                         .await?;
+                }
+                _ = liveness_tick.tick() => {
+                    if last_recv.elapsed() >= SERVER_LIVENESS_TIMEOUT {
+                        anyhow::bail!("server silent for {SERVER_LIVENESS_TIMEOUT:?}; session dead");
+                    }
                 }
                 _ = report_tick.tick() => {
                     // Jitter over min-filtered samples: the raw per-ack

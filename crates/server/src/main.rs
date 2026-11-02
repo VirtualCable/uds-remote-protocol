@@ -268,6 +268,13 @@ const KEYFRAME_QUEUE_WAIT: Duration = Duration::from_millis(25);
 /// recovery time even if the whole request path fails.
 const KEYFRAME_SAFETY_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Dead-client detection (§18.39): the client probes at least once per
+/// second on every leg; no inbound traffic at all for this long means the
+/// network is gone (a crashed peer can keep its TCP socket open for hours
+/// at the kernel default keepalive). The agent exits so the service frees
+/// the session slot and a new client can connect.
+const CLIENT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(5);
+
 struct Legs<T: ReliableTransport> {
     /// UDP send half, shared with the paced display-sender task (§12.6).
     udp: Option<Arc<Mutex<transport::DatagramSink<UdpTransport>>>>,
@@ -1499,6 +1506,9 @@ async fn serve_stream<T: ReliableTransport>(
     // Seeded in the past so the very first frame goes out as a keyframe even
     // if the encoder's first frame was not one for some reason.
     let mut last_keyframe = Instant::now().checked_sub(KEYFRAME_SAFETY_INTERVAL).unwrap_or_else(Instant::now);
+    // Liveness (§18.39): the handshake itself was client traffic.
+    let mut last_recv = Instant::now();
+    let mut liveness_tick = tokio::time::interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             msg = frame_rx.recv() => {
@@ -1551,6 +1561,7 @@ async fn serve_stream<T: ReliableTransport>(
                 // Continuous probing (§12.1): answer latency probes for the
                 // whole session, not only during UDP detection.
                 let (ch, n) = res?;
+                last_recv = Instant::now();
                 if ch == channel::CONTROL
                     && let Ok(probe) = Probe::decode(&udp_buf[..n])
                 {
@@ -1563,7 +1574,16 @@ async fn serve_stream<T: ReliableTransport>(
             }
             res = legs.stream.recv_into(&mut ctrl_buf) => {
                 let (ch, n) = res?;
-                if ch == channel::AUDIO_IN {
+                last_recv = Instant::now();
+                // Probes also arrive on the stream leg (TCP fallback
+                // keepalive, §18.39): answer them here too.
+                if ch == channel::CONTROL
+                    && let Ok(probe) = Probe::decode(&ctrl_buf[..n])
+                {
+                    let now = micros_since(clock_start);
+                    let ack = ProbeAck { t1: probe.t1, t2: now, t3: now };
+                    legs.send_control(&ack.encode()).await?;
+                } else if ch == channel::AUDIO_IN {
                     forward_mic(&mut mic_tx, &ctrl_buf[..n]);
                 } else if ch == channel::CLIPBOARD {
                     handle_clipboard_packet(&mut legs, &mut clip_session, clipboard.as_ref(), &ctrl_buf[..n]).await;
@@ -1582,6 +1602,11 @@ async fn serve_stream<T: ReliableTransport>(
                             warn!("storage chunk send failed: {e}");
                         }
                     }
+                }
+            }
+            _ = liveness_tick.tick() => {
+                if last_recv.elapsed() >= CLIENT_LIVENESS_TIMEOUT {
+                    bail!("client silent for {CLIENT_LIVENESS_TIMEOUT:?}; session dead");
                 }
             }
             msg = scard_rx.recv() => {
