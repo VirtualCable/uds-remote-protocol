@@ -56,9 +56,6 @@ const REINIT_RETRY_DELAY: Duration = Duration::from_millis(250);
 /// fast, not hang the connect.
 const INITIAL_CREATE_BUDGET: Duration = Duration::from_secs(3);
 
-/// Grace window after a healthy acquire during which an `ACCESS_LOST` is
-/// treated as an ordinary topology change (reinit immediately, no backoff).
-const STORM_GRACE: Duration = Duration::from_secs(5);
 /// First delay between storm re-creations (see [`STORM_BREAKER`]).
 const STORM_DELAY_MIN: Duration = Duration::from_millis(100);
 /// Max delay between storm re-creations.
@@ -169,20 +166,17 @@ impl DxgiSource {
 
     /// Handles `DXGI_ERROR_ACCESS_LOST` from `AcquireNextFrame`.
     ///
-    /// An `ACCESS_LOST` right after healthy traffic is an ordinary topology
-    /// change: reinit at once. One that arrives when the previous reinit
-    /// never delivered anything means the output invalidates every new
-    /// duplication instantly — a poisoned display stack. That storm is
-    /// throttled with exponential backoff (each re-creation costs a DXGI
-    /// factory, a D3D11 device and a duplication, and ~500 of those per
-    /// second once exhausted a VM's display stack into a watchdog reset)
-    /// and broken off entirely after [`STORM_BREAKER`].
+    /// Every re-creation is throttled with exponential backoff — even the
+    /// first one right after healthy traffic. Each reinit costs a DXGI
+    /// factory, a D3D11 device and a duplication; an output that keeps
+    /// invalidating them (desktop switch still in flight after a secure
+    /// desktop is released, §18.41) would otherwise spin at ~500
+    /// re-creations per second and exhaust the VM's
+    /// display stack into a state where every future duplication fails
+    /// forever (seen live: returning from a UAC prompt blinded the session
+    /// permanently). Broken off entirely after [`STORM_BREAKER`].
     fn on_access_lost(&mut self) -> anyhow::Result<()> {
         let since_healthy = self.last_healthy.elapsed();
-        if since_healthy <= STORM_GRACE {
-            self.storm_delay = STORM_DELAY_MIN;
-            return self.reinit(false);
-        }
         anyhow::ensure!(
             since_healthy < STORM_BREAKER,
             "the output has invalidated every new desktop duplication for {STORM_BREAKER:?}; \
@@ -282,6 +276,7 @@ impl FrameSource for DxgiSource {
             if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
                 // A clean timeout also proves the duplication is alive.
                 self.last_healthy = std::time::Instant::now();
+                self.storm_delay = STORM_DELAY_MIN;
                 return Ok(None);
             }
             if e.code() == DXGI_ERROR_ACCESS_LOST {
@@ -291,6 +286,7 @@ impl FrameSource for DxgiSource {
         }
         result.context("AcquireNextFrame failed")?;
         self.last_healthy = std::time::Instant::now();
+        self.storm_delay = STORM_DELAY_MIN;
         let resource = resource.context("AcquireNextFrame returned no resource")?;
 
         // Every acquired frame MUST be released, even on error paths.
