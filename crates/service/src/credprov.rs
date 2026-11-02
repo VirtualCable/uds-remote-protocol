@@ -96,7 +96,10 @@ fn pipe_loop(stop: &AtomicBool, creds_slot: std::sync::Arc<std::sync::Mutex<Opti
 }
 
 /// One pipe instance: wait for the provider, exchange frames, return when it
-/// disconnects or `stop` is set.
+/// disconnects or `stop` is set. The arm flag is re-checked on every poll
+/// timeout: auto-unlock (§18.41) arms AFTER the provider connected (it is
+/// LogonUI, already running at the lock screen), so pushing only at connect
+/// time would miss it.
 fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
     let mut pipe = Pipe::create()?;
     if !pipe.wait_connected(stop)? {
@@ -104,10 +107,12 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
     }
     info!("credential provider connected");
 
+    let mut pushed = false;
     let armed = std::path::Path::new(ARM_PATH).exists();
     if let Some(creds) = creds.filter(|_| armed) {
         pipe.send_request(&Request::SetCredentials(creds.clone()))?;
         info!(user = %creds.username, "credentials pushed to the provider (armed)");
+        pushed = true;
     } else if creds.is_some() {
         info!("credentials available but auto-logon not armed; not pushing");
     }
@@ -143,13 +148,25 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
                 if std::fs::remove_file(ARM_PATH).is_ok() {
                     info!("auto-logon arm flag consumed");
                 }
+                pushed = false;
                 if !success {
                     pipe.send_request(&Request::ClearCredentials)?;
                     info!("provider credentials cleared after failed logon");
                 }
             }
             Some(Response::Pong) => info!("provider Pong"),
-            None => {} // poll timeout: re-check the stop flag
+            None => {
+                // Poll timeout: a late arm (auto-unlock, §18.41) pushes the
+                // credentials to the already-connected provider.
+                if !pushed
+                    && std::path::Path::new(ARM_PATH).exists()
+                    && let Some(creds) = creds
+                {
+                    pipe.send_request(&Request::SetCredentials(creds.clone()))?;
+                    info!(user = %creds.username, "credentials pushed to the provider (late arm)");
+                    pushed = true;
+                }
+            }
         }
     }
 }

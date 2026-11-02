@@ -685,6 +685,58 @@ fn secure_event_set(event: &OwnedHandle) -> bool {
     (unsafe { WaitForSingleObject(event.0, 0) }) == WAIT_OBJECT_0
 }
 
+/// True when the console session shows the lock screen (WTS SessionFlags:
+/// 0 = locked, 1 = unlocked). Distinguishes a lock from a mere UAC prompt —
+/// both own the Winlogon secure desktop (§18.41).
+fn console_session_locked(session_id: u32) -> bool {
+    use windows::Win32::System::RemoteDesktop::{
+        WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
+    };
+    let mut buf = windows::core::PWSTR::null();
+    let mut bytes = 0u32;
+    // SAFETY: valid out-params; on success the buffer is freed below.
+    let queried = unsafe {
+        WTSQuerySessionInformationW(None, session_id, WTSSessionInfoEx, &raw mut buf, &raw mut bytes)
+    };
+    if queried.is_err() || buf.is_null() {
+        return false;
+    }
+    // SAFETY: on success the buffer holds a WTSINFOEXW; Level 1 carries the
+    // LEVEL1 union arm with the lock flag.
+    let locked = unsafe {
+        let info = buf.0 as *const WTSINFOEXW;
+        let locked = (*info).Level == 1 && (*info).Data.WTSInfoExLevel1.SessionFlags == 0;
+        WTSFreeMemory(buf.0.cast());
+        locked
+    };
+    locked
+}
+
+/// Re-arms the credential provider for auto-unlock when the console session
+/// is locked and we hold its credentials (§18.41) — same one-shot arm flag
+/// as the autologon path (`credprov.rs`). Without credentials the user types
+/// the password over the secure-desktop helper instead.
+fn maybe_arm_auto_unlock(
+    creds_slot: &std::sync::Arc<std::sync::Mutex<Option<udscredprov::logic::Credentials>>>,
+) {
+    let session_id = unsafe { WTSGetActiveConsoleSessionId() };
+    if session_id == 0xFFFF_FFFF || !console_session_locked(session_id) {
+        return;
+    }
+    let have_creds = creds_slot.lock().expect("creds slot poisoned").is_some()
+        || std::path::Path::new(crate::credprov::CREDS_PATH).exists();
+    if !have_creds {
+        info!("console locked but no session credentials held; manual unlock required");
+        return;
+    }
+    match std::fs::write(crate::credprov::ARM_PATH, "") {
+        Ok(()) => {
+            info!(session_id, "console locked; credential provider re-armed for auto-unlock");
+        }
+        Err(err) => warn!(error = %format!("{err:#}"), "cannot arm auto-unlock"),
+    }
+}
+
 /// Supervises the secure-desktop helper against the event (§18.41): spawns
 /// it when the event is set and no helper runs, kills it when the event is
 /// clear. The helper also self-exits when the desktop returns to Default;
@@ -936,14 +988,25 @@ fn watch_with_listener(
     creds_slot: std::sync::Arc<std::sync::Mutex<Option<udscredprov::logic::Credentials>>>,
 ) {
     let slot = std::sync::Arc::new(crate::listener::AgentSlot::default());
-    crate::listener::spawn(stop, runtime, std::sync::Arc::clone(&slot), creds_slot);
+    crate::listener::spawn(stop, runtime, std::sync::Arc::clone(&slot), std::sync::Arc::clone(&creds_slot));
     let secure_event = ensure_secure_event();
     let mut helper: Option<(u32, OwnedHandle)> = None;
+    let mut unlock_armed = false;
     while !stop.load(Ordering::Relaxed) {
         slot.clear_if_dead();
         slot.kill_if_unhealthy();
         if let Some(event) = &secure_event {
+            let secure = secure_event_set(event);
             supervise_secure_helper(event, &mut helper);
+            // Auto-unlock (§18.41): on the rising edge of a LOCKED console
+            // (a UAC prompt is not a lock), re-arm the credential provider
+            // so the session unlocks by itself while we hold its creds.
+            if secure && !unlock_armed {
+                unlock_armed = true;
+                maybe_arm_auto_unlock(&creds_slot);
+            } else if !secure {
+                unlock_armed = false;
+            }
         }
         // Lab trigger (§18.41): one secure-desktop probe per flag file.
         if std::path::Path::new(PROBE_FLAG).exists() {
