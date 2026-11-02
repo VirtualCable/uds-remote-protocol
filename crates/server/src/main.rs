@@ -2388,6 +2388,12 @@ impl Source {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Secure-desktop probe (§18.41): hidden lab mode, synchronous, no
+    // `--key` needed — runs before any config parsing.
+    #[cfg(all(windows, feature = "windows-capture"))]
+    if let Some(code) = server::secure_probe::maybe_run_from_argv() {
+        return code;
+    }
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

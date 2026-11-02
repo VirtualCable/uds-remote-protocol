@@ -27,9 +27,11 @@ use windows::Win32::Foundation::{
     SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::{
-    ACL, ACL_REVISION, AddAccessAllowedAce, CreateWellKnownSid, InitializeAcl,
-    InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-    SECURITY_DESCRIPTOR, SetSecurityDescriptorDacl, WinWorldSid,
+    ACL, ACL_REVISION, AddAccessAllowedAce, CreateWellKnownSid, DuplicateTokenEx,
+    InitializeAcl, InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SecurityImpersonation, SetSecurityDescriptorDacl, SetTokenInformation,
+    TOKEN_ACCESS_MASK, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY,
+    TokenPrimary, TokenSessionId, WinWorldSid,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_END, FILE_GENERIC_WRITE, FILE_SHARE_READ, OPEN_ALWAYS,
@@ -43,9 +45,9 @@ use windows::Win32::System::JobObjects::{
 };
 use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CreateMutexW, CreateProcessAsUserW, MUTEX_MODIFY_STATE, OpenMutexW,
-    PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES, STARTUPINFOW,
-    SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CreateMutexW, CreateProcessAsUserW, GetCurrentProcess, MUTEX_MODIFY_STATE,
+    OpenMutexW, OpenProcessToken, PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES,
+    STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 
@@ -341,6 +343,107 @@ fn agent_exe_path() -> Result<PathBuf> {
     Ok(exe.with_file_name("server.exe"))
 }
 
+/// Lab trigger for the secure-desktop probe (§18.41, M9): when this file
+/// exists, the watch loop spawns one probe instance and removes the flag.
+pub(crate) const PROBE_FLAG: &str = r"C:\ProgramData\UdsRp\probe-secure.flag";
+
+/// Spawns the secure-desktop probe (`server.exe --secure-probe`) as **SYSTEM
+/// inside the console session** (the helper pattern of §18.41): a SYSTEM
+/// token placed on the session's input desktop can GDI-capture and
+/// `SendInput` the secure desktop, which a per-user agent cannot.
+///
+/// The token is a duplicate of the service's own SYSTEM token with its
+/// session id retargeted (`SetTokenInformation(TokenSessionId)`) — NOT
+/// `WTSQueryUserToken`, which yields the session user's token (no rights on
+/// the secure desktop, and the wrong identity for the future helper).
+///
+/// Fire-and-forget lab tooling: the probe exits by itself and logs to its
+/// own file, so the process handle is dropped (the probe outlives it fine).
+/// Returns `Ok(None)` when there is no interactive console session.
+pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
+    let session_id = unsafe { WTSGetActiveConsoleSessionId() };
+    if session_id == 0xFFFF_FFFF {
+        return Ok(None);
+    }
+    // SAFETY: GetCurrentProcess returns a pseudo-handle (always valid).
+    let mut token_handle = HANDLE::default();
+    unsafe {
+        OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_ACCESS_MASK(TOKEN_DUPLICATE.0 | TOKEN_QUERY.0),
+            &raw mut token_handle,
+        )
+    }
+    .context("OpenProcessToken(self)")?;
+    let own_token = OwnedHandle(token_handle);
+
+    let mut dup_handle = HANDLE::default();
+    let dup_access = TOKEN_ACCESS_MASK(
+        TOKEN_ASSIGN_PRIMARY.0 | TOKEN_DUPLICATE.0 | TOKEN_QUERY.0 | TOKEN_ADJUST_SESSIONID.0,
+    );
+    // SAFETY: `own_token` is open with DUPLICATE; the out pointer is valid.
+    unsafe {
+        DuplicateTokenEx(
+            own_token.0,
+            dup_access,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &raw mut dup_handle,
+        )
+    }
+    .context("DuplicateTokenEx(self)")?;
+    let probe_token = OwnedHandle(dup_handle);
+    // SAFETY: `probe_token` has ADJUST_SESSIONID; `session_id` outlives the
+    // call. Requires SeTcbPrivilege — the service runs as SYSTEM.
+    unsafe {
+        SetTokenInformation(
+            probe_token.0,
+            TokenSessionId,
+            (&raw const session_id).cast(),
+            u32::try_from(size_of::<u32>()).expect("u32 fits"),
+        )
+    }
+    .context("SetTokenInformation(TokenSessionId)")?;
+
+    let exe = agent_exe_path()?;
+    let log_path = format!(r"{}\probe.log", crate::logging::STATE_DIR);
+    let mut cmdline: Vec<u16> = format!("\"{}\" --secure-probe \"{log_path}\"", exe.display())
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut desktop: Vec<u16> =
+        "winsta0\\default".encode_utf16().chain(std::iter::once(0)).collect();
+    let startup = STARTUPINFOW {
+        cb: u32::try_from(size_of::<STARTUPINFOW>()).expect("struct fits in u32"),
+        lpDesktop: PWSTR(desktop.as_mut_ptr()),
+        ..Default::default()
+    };
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: `probe_token` is a primary SYSTEM token for `session_id`;
+    // `cmdline`/`desktop` are null-terminated, mutable and outlive the call.
+    unsafe {
+        CreateProcessAsUserW(
+            Some(probe_token.0),
+            PCWSTR::null(),
+            Some(PWSTR(cmdline.as_mut_ptr())),
+            None,
+            None,
+            false,
+            CREATE_NO_WINDOW,
+            None,
+            PCWSTR::null(),
+            &raw const startup,
+            &raw mut info,
+        )
+    }
+    .with_context(|| format!("CreateProcessAsUserW (probe) on session {session_id}"))?;
+    let _thread = OwnedHandle(info.hThread);
+    let pid = info.dwProcessId;
+    drop(OwnedHandle(info.hProcess));
+    Ok(Some(pid))
+}
+
 /// Opens (creating and appending to) the agent log file and makes the handle
 /// inheritable so the spawned agent can use it as stdout/stderr.
 fn open_agent_log() -> Result<OwnedHandle> {
@@ -584,6 +687,17 @@ fn watch_with_listener(
     while !stop.load(Ordering::Relaxed) {
         slot.clear_if_dead();
         slot.kill_if_unhealthy();
+        // Lab trigger (§18.41): one secure-desktop probe per flag file.
+        if std::path::Path::new(PROBE_FLAG).exists() {
+            let _ = std::fs::remove_file(PROBE_FLAG);
+            match spawn_probe_in_console() {
+                Ok(Some(pid)) => info!(pid, "secure-desktop probe spawned"),
+                Ok(None) => info!("secure-desktop probe requested but there is no console session"),
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "cannot spawn the secure-desktop probe");
+                }
+            }
+        }
         std::thread::sleep(Duration::from_millis(500));
     }
     slot.kill();
