@@ -50,7 +50,7 @@ pub fn reconstruct_tcp(blob: &[u8]) -> Result<TcpStream> {
             AF_INET.0 as i32,
             SOCK_STREAM.0,
             IPPROTO_TCP.0,
-            &info,
+            Some(&info),
             0,
             WSA_FLAG_OVERLAPPED,
         )
@@ -60,7 +60,7 @@ pub fn reconstruct_tcp(blob: &[u8]) -> Result<TcpStream> {
     // Into std then tokio. The std TcpStream takes ownership of the socket.
     use std::os::windows::io::FromRawSocket;
     // SAFETY: `socket` is a live, connected socket owned by this process.
-    let std_stream = unsafe { std::net::TcpStream::from_raw_socket(socket.0 as usize) };
+    let std_stream = unsafe { std::net::TcpStream::from_raw_socket(socket.0 as u64) };
     std_stream.set_nonblocking(true).context("set_nonblocking")?;
     TcpStream::from_std(std_stream).context("tokio TcpStream from std")
 }
