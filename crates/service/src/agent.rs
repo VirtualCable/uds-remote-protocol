@@ -358,21 +358,22 @@ pub fn watch_loop(stop: &AtomicBool, standalone: Option<&crate::standalone::Stan
         },
     };
 
-    // Unattended auto-logon (see sas.rs): while no interactive session
-    // exists AND we hold credentials the credential provider can log on
-    // with, nudge LogonUI with a synthetic SAS — without CAD satisfied it
-    // never enumerates providers, so the auto-logon would wait for a human
-    // pressing Ctrl+Alt+Del forever (a machine that boots unattended, e.g.
-    // after a watchdog reset, must come back on its own).
+    // Unattended auto-logon (see sas.rs), gated by the one-shot arm flag
+    // (§18.30): only while a logon is armed do we nudge LogonUI with a
+    // synthetic SAS — without CAD satisfied it never enumerates providers,
+    // so an armed auto-logon would wait for a human pressing Ctrl+Alt+Del
+    // forever. Without the flag the machine must boot to a plain logon
+    // screen and stay there.
     let has_logon_creds = standalone.is_some_and(|s| s.creds.is_some())
         || std::path::Path::new(crate::credprov::CREDS_PATH).exists();
     let mut last_sas: Option<Instant> = None;
     let nudge_towards_logon = |last_sas: &mut Option<Instant>| {
         if has_logon_creds
+            && std::path::Path::new(crate::credprov::ARM_PATH).exists()
             && last_sas.is_none_or(|t| t.elapsed() >= SAS_COOLDOWN)
         {
             match crate::sas::send_sas() {
-                Ok(()) => info!("no interactive session; synthetic SAS sent to trigger the auto-logon"),
+                Ok(()) => info!("armed with no interactive session; synthetic SAS sent"),
                 Err(err) => warn!(error = %format!("{err:#}"), "cannot send the synthetic SAS"),
             }
             *last_sas = Some(Instant::now());
