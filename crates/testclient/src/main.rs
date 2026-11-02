@@ -51,6 +51,9 @@ struct Args {
     /// Privacy screen (M7): `--privacy` asks the server to hide the
     /// physical console behind the branded lock overlay.
     privacy: bool,
+    /// Preferred resolution sent in the HELLO (§18.37), `--resolution WxH`;
+    /// `(0, 0)` means no preference.
+    pref_resolution: (u16, u16),
     /// Clipboard sync (M8); disabled with `--no-clipboard`.
     clipboard: bool,
     /// Lab aid: `--selftest-clipboard TEXT` announces TEXT as the local
@@ -132,6 +135,7 @@ fn parse_args() -> Result<Args> {
         frame_dump: None,
         mic: MicMode::Off,
         privacy: false,
+        pref_resolution: (0, 0),
         clipboard: true,
         selftest_clipboard: None,
         upload: None,
@@ -178,6 +182,13 @@ fn parse_args() -> Result<Args> {
         let value = it.next().context(format!("missing value for {arg}"))?;
         match arg.as_str() {
             "--addr" => args.addr = value.parse().context("bad --addr")?,
+            "--resolution" => {
+                let (w, h) = value.split_once(['x', 'X']).context("bad --resolution (WxH)")?;
+                args.pref_resolution = (
+                    w.trim().parse().context("bad --resolution width")?,
+                    h.trim().parse().context("bad --resolution height")?,
+                );
+            }
             "--key" => {
                 args.key = protocol::hex::decode(&value)?;
                 key_seen = true;
@@ -727,7 +738,7 @@ async fn run() -> Result<()> {
         mic: args.mic,
         privacy_screen: args.privacy,
         smartcard: args.smartcard,
-        pref_resolution: (0, 0),
+        pref_resolution: args.pref_resolution,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);
     let (session, commands, displays) = Session::new(config, events_tx);
