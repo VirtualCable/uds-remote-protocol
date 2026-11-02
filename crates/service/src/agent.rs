@@ -27,11 +27,12 @@ use windows::Win32::Foundation::{
     SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::{
-    ACL, ACL_REVISION, AddAccessAllowedAce, CreateWellKnownSid, DuplicateTokenEx,
-    InitializeAcl, InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-    SECURITY_DESCRIPTOR, SecurityImpersonation, SetSecurityDescriptorDacl, SetTokenInformation,
-    TOKEN_ACCESS_MASK, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_QUERY,
-    TokenPrimary, TokenSessionId, WinWorldSid,
+    ACL, ACL_REVISION, AddAccessAllowedAce, AdjustTokenPrivileges, CreateWellKnownSid,
+    DuplicateTokenEx, InitializeAcl, InitializeSecurityDescriptor, LookupPrivilegeValueW,
+    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_PRIVILEGE_ENABLED,
+    SE_TCB_NAME, SecurityImpersonation, SetSecurityDescriptorDacl, SetTokenInformation,
+    TOKEN_ACCESS_MASK, TOKEN_ADJUST_PRIVILEGES, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenPrimary, TokenSessionId, WinWorldSid,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_END, FILE_GENERIC_WRITE, FILE_SHARE_READ, OPEN_ALWAYS,
@@ -379,7 +380,11 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
 
     let mut dup_handle = HANDLE::default();
     let dup_access = TOKEN_ACCESS_MASK(
-        TOKEN_ASSIGN_PRIMARY.0 | TOKEN_DUPLICATE.0 | TOKEN_QUERY.0 | TOKEN_ADJUST_SESSIONID.0,
+        TOKEN_ASSIGN_PRIMARY.0
+            | TOKEN_DUPLICATE.0
+            | TOKEN_QUERY.0
+            | TOKEN_ADJUST_SESSIONID.0
+            | TOKEN_ADJUST_PRIVILEGES.0,
     );
     // SAFETY: `own_token` is open with DUPLICATE; the out pointer is valid.
     unsafe {
@@ -394,8 +399,27 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
     }
     .context("DuplicateTokenEx(self)")?;
     let probe_token = OwnedHandle(dup_handle);
+    // SeTcbPrivilege is present in a SYSTEM token but DISABLED by default;
+    // SetTokenInformation(TokenSessionId) checks for the *enabled* privilege.
+    let mut luid = windows::Win32::Foundation::LUID::default();
+    unsafe { LookupPrivilegeValueW(None, SE_TCB_NAME, &raw mut luid) }
+        .context("LookupPrivilegeValue(SeTcbPrivilege)")?;
+    let privileges = TOKEN_PRIVILEGES {
+        PrivilegeCount: 1,
+        Privileges: [windows::Win32::Security::LUID_AND_ATTRIBUTES {
+            Luid: luid,
+            Attributes: SE_PRIVILEGE_ENABLED,
+        }],
+    };
+    // SAFETY: `probe_token` has ADJUST_PRIVILEGES; `privileges` outlives the
+    // call. Note: AdjustTokenPrivileges reports success even when nothing
+    // changed; the SetTokenInformation below is the real check.
+    unsafe {
+        AdjustTokenPrivileges(probe_token.0, false, Some(&raw const privileges), 0, None, None)
+    }
+    .context("AdjustTokenPrivileges(SeTcbPrivilege)")?;
     // SAFETY: `probe_token` has ADJUST_SESSIONID; `session_id` outlives the
-    // call. Requires SeTcbPrivilege — the service runs as SYSTEM.
+    // call. Requires SeTcbPrivilege — enabled just above.
     unsafe {
         SetTokenInformation(
             probe_token.0,
