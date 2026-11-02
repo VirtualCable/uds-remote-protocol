@@ -39,6 +39,7 @@ pub mod secure_helper;
 pub mod secure_pipe;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod secure_probe;
+pub(crate) mod secure_sanitize;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod secure_watch;
 pub mod smartcard;

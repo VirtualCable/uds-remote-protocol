@@ -155,6 +155,7 @@ pub fn maybe_run_from_argv() -> Option<ExitCode> {
 #[cfg(all(windows, feature = "windows-capture"))]
 fn run_helper(session_id: u32) -> Result<()> {
     use crate::input::SendInputInjector;
+    use crate::secure_sanitize::Sanitizer;
     let mut frames = secure_pipe::win::connect_pipe(
         &secure_pipe::frames_pipe_name(session_id),
         CONNECT_TIMEOUT,
@@ -178,7 +179,7 @@ fn run_helper(session_id: u32) -> Result<()> {
                 match secure_pipe::read_msg(&mut input_pipe) {
                     Ok(Some((secure_pipe::TAG_INPUT, payload))) => {
                         match protocol::InputMessage::decode(&payload) {
-                            Ok(msg) => sanitizer.dispatch(&msg),
+                            Ok(msg) => sanitizer.dispatch(msg),
                             Err(e) => warn!("secure helper: bad input message: {e}"),
                         }
                     }
@@ -206,63 +207,4 @@ fn run_helper(session_id: u32) -> Result<()> {
         std::thread::sleep(FRAME_INTERVAL);
     }
     Ok(())
-}
-
-/// Input allowlist for the secure desktop (riesgos r2 §3.3): Windows keys
-/// and accessibility sequences are blocked before injection — the helper is
-/// the enforcement point (the client is untrusted).
-#[cfg(all(windows, feature = "windows-capture"))]
-struct Sanitizer<I> {
-    inner: I,
-    /// Consecutive Shift-only presses (StickyKeys needs 5).
-    shift_streak: u8,
-    /// Modifier state for the Alt+Shift+PrtScr (high contrast) rule.
-    alt_down: bool,
-    shift_down: bool,
-}
-
-#[cfg(all(windows, feature = "windows-capture"))]
-impl<I: crate::input::InputInjector> Sanitizer<I> {
-    fn new(inner: I) -> Self {
-        Self { inner, alt_down: false, shift_down: false, shift_streak: 0 }
-    }
-
-    fn dispatch(&mut self, msg: &protocol::InputMessage) {
-        if let protocol::InputMessage::Key { down, scancode, extended } = *msg {
-            if !self.key_allowed(down, scancode, extended) {
-                return;
-            }
-        }
-        crate::input::dispatch(&mut self.inner, msg);
-    }
-
-    /// Set 1 scancode policy. Returns false for blocked keys.
-    fn key_allowed(&mut self, down: bool, scancode: u16, extended: bool) -> bool {
-        // Windows keys and the menu key: never (logon accessibility surface).
-        if extended && matches!(scancode, 0x5B | 0x5C | 0x5D) {
-            return false;
-        }
-        match (scancode, extended) {
-            // Track modifier state (used by the high-contrast rule below).
-            (0x38, _) => self.alt_down = down,
-            (0x2A | 0x36, false) => {
-                self.shift_down = down;
-                // StickyKeys: five Shift-only presses in a row toggle it.
-                if down {
-                    self.shift_streak += 1;
-                    if self.shift_streak >= 5 {
-                        self.shift_streak = 0;
-                        return false;
-                    }
-                }
-            }
-            // PrintScreen (0x37 extended, or 0x54 = Alt+PrtScr) with Alt and
-            // Shift held toggles high contrast on the logon desktop.
-            (0x37 | 0x54, _) if down && self.alt_down && self.shift_down => return false,
-            // Any non-shift key breaks the StickyKeys streak.
-            _ if down => self.shift_streak = 0,
-            _ => {}
-        }
-        true
-    }
 }
