@@ -61,7 +61,7 @@ const MAX_RESPAWNS: u32 = 5;
 const SAS_COOLDOWN: Duration = Duration::from_secs(15);
 
 /// RAII wrapper for a Win32 handle.
-struct OwnedHandle(HANDLE);
+pub(crate) struct OwnedHandle(HANDLE);
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
@@ -105,7 +105,7 @@ impl Agent {
     /// the command line stays free of secrets, which any process in the
     /// session could otherwise read (M3). Credentials are also logged so the
     /// lab client can connect.
-    pub fn spawn_in_console_session(config: &service_proto::AgentConfig) -> Result<Option<Self>> {
+    pub(crate) fn spawn_in_console_session(config: &service_proto::AgentConfig) -> Result<Option<Self>> {
         let Some((agent, pipe_write)) = Self::spawn_process_in_console()? else {
             return Ok(None);
         };
@@ -120,7 +120,7 @@ impl Agent {
     /// write end of its config pipe, WITHOUT writing the config. The caller
     /// can then use `agent.pid` (e.g. `WSADuplicateSocketW` into it) and must
     /// finish with [`Agent::write_config`].
-    pub fn spawn_process_in_console() -> Result<Option<(Self, OwnedHandle)>> {
+    pub(crate) fn spawn_process_in_console() -> Result<Option<(Self, OwnedHandle)>> {
         let session_id = unsafe { WTSGetActiveConsoleSessionId() };
         if session_id == 0xFFFF_FFFF {
             return Ok(None);
@@ -204,12 +204,12 @@ impl Agent {
 
     /// Second half of the handoff spawn: sends the config frame (with the
     /// handoff block already filled in) down the agent's stdin pipe.
-    pub fn write_config(pipe_write: OwnedHandle, config: &service_proto::AgentConfig) -> Result<()> {
+    pub(crate) fn write_config(pipe_write: OwnedHandle, config: &service_proto::AgentConfig) -> Result<()> {
         write_all_and_close(&pipe_write, &service_proto::encode_agent_config(config))
     }
 
     /// Whether the agent process is still alive.
-    pub fn is_alive(&self) -> bool {
+    pub(crate) fn is_alive(&self) -> bool {
         // SAFETY: the process handle is ours and open.
         let wait = unsafe { WaitForSingleObject(self.process.0, 0) };
         wait != WAIT_OBJECT_0
@@ -218,7 +218,7 @@ impl Agent {
     /// Whether the agent still holds the session mutex (secondary liveness).
     /// Always `true` during the post-spawn grace period and on watchdog
     /// errors (never kill on our own failure to check).
-    pub fn mutex_healthy(&self) -> bool {
+    pub(crate) fn mutex_healthy(&self) -> bool {
         if self.spawned_at.elapsed() < MUTEX_GRACE {
             return true;
         }
@@ -256,7 +256,7 @@ impl Agent {
     }
 
     /// Forcefully terminates a wedged agent.
-    pub fn kill(&self) {
+    pub(crate) fn kill(&self) {
         // SAFETY: the process handle is ours and open.
         unsafe {
             let _ = TerminateProcess(self.process.0, 1);
@@ -455,7 +455,7 @@ fn ensure_session_mutex() -> Option<OwnedHandle> {
     }
 }
 
-pub fn watch_loop(stop: &'static AtomicBool, standalone: Option<&crate::standalone::StandaloneRuntime>) {
+pub(crate) fn watch_loop(stop: &'static AtomicBool, standalone: Option<&crate::standalone::StandaloneRuntime>) {
     // Pre-create the global session mutex before any agent spawns: only a
     // privileged process can create Global\ objects (see ensure_session_mutex).
     let _session_mutex = ensure_session_mutex();
