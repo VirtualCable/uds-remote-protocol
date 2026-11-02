@@ -610,6 +610,119 @@ async fn recv_capture(rx: &mut Option<mpsc::Receiver<CaptureMsg>>) -> Option<Cap
     }
 }
 
+/// Receives the next secure-desktop transition; pends forever when no
+/// watcher is running (non-Windows builds, non-DXGI sources), so it can sit
+/// in a `select!` branch.
+async fn recv_secure(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<bool>>) -> bool {
+    match rx {
+        Some(r) => match r.recv().await {
+            Some(active) => active,
+            None => std::future::pending().await,
+        },
+        None => std::future::pending().await,
+    }
+}
+
+/// Agent-side secure-mode state (§18.41): the helper-pipe threads and the
+/// input writer shared with the input dispatcher.
+struct SecureState {
+    /// Input pipe writer (agent → helper); `None` until the helper connects.
+    input: std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>,
+}
+
+/// Spawns the two secure-mode pipe threads (frames acceptor + input
+/// acceptor) and returns the capture receiver that feeds the session loop.
+/// Only reachable on Windows DXGI builds; the portable stub is never used
+/// (the secure branch pends forever without a watcher).
+#[cfg_attr(
+    not(all(windows, feature = "windows-capture")),
+    expect(unused_variables, reason = "stub: the secure branch never fires")
+)]
+fn spawn_secure_pipes(
+    session_id: u32,
+    clock_start: Instant,
+) -> (mpsc::Receiver<CaptureMsg>, SecureState) {
+    let (tx, rx) = mpsc::channel(2);
+    #[cfg(all(windows, feature = "windows-capture"))]
+    {
+        std::thread::Builder::new()
+            .name("secure-frames".into())
+            .spawn(move || secure_frames_main(session_id, tx, clock_start))
+            .map_err(|e| warn!("secure frames thread: {e}"))
+            .ok();
+    }
+    let input = std::sync::Arc::new(std::sync::Mutex::new(None));
+    #[cfg(all(windows, feature = "windows-capture"))]
+    {
+        let slot = std::sync::Arc::clone(&input);
+        std::thread::Builder::new()
+            .name("secure-input".into())
+            .spawn(move || {
+                match server::secure_pipe::win::accept_pipe(
+                    &server::secure_pipe::input_pipe_name(session_id),
+                    false,
+                ) {
+                    Ok(f) => *slot.lock().expect("input pipe slot") = Some(f),
+                    Err(e) => warn!("secure input pipe: {e:#}"),
+                }
+            })
+            .map_err(|e| warn!("secure input thread: {e}"))
+            .ok();
+    }
+    (rx, SecureState { input })
+}
+
+/// Frames pipe acceptor loop: one helper connection, then frame messages
+/// until EOF (helper exits when the secure desktop goes away).
+#[cfg(all(windows, feature = "windows-capture"))]
+fn secure_frames_main(session_id: u32, tx: mpsc::Sender<CaptureMsg>, clock_start: Instant) {
+    let mut frames = match server::secure_pipe::win::accept_pipe(
+        &server::secure_pipe::frames_pipe_name(session_id),
+        true,
+    ) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("secure frames pipe: {e:#}");
+            return;
+        }
+    };
+    let mut ready_sent = false;
+    loop {
+        if tx.is_closed() {
+            return; // session over
+        }
+        match server::secure_pipe::read_msg(&mut frames) {
+            Ok(Some((server::secure_pipe::TAG_FRAME, payload))) => {
+                let Ok((w, h, pixels)) = server::secure_pipe::decode_frame(&payload) else {
+                    warn!("secure helper sent a malformed frame");
+                    continue;
+                };
+                if !ready_sent {
+                    if tx
+                        .blocking_send(CaptureMsg::Ready(Ok(ReadyInfo { width: w, height: h })))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    ready_sent = true;
+                }
+                let frame = OwnedFrame {
+                    width: w,
+                    height: h,
+                    stride: w as usize * 4,
+                    capture_ts_ms: millis_since(clock_start),
+                    data: pixels.to_vec(),
+                };
+                if tx.blocking_send(CaptureMsg::Frame(frame)).is_err() {
+                    return; // session over
+                }
+            }
+            Ok(Some((tag, _))) => warn!(tag, "secure frames pipe: unexpected tag"),
+            Ok(None) | Err(_) => return, // helper gone
+        }
+    }
+}
+
 fn micros_since(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
@@ -1588,6 +1701,7 @@ async fn serve_stream<T: ReliableTransport>(
         },
         last_metrics: None,
         resize_request: None,
+        secure_input: None,
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -1614,6 +1728,20 @@ async fn serve_stream<T: ReliableTransport>(
     // waiting for the 1 s liveness tick added up to a second of dead time
     // to every mode change for no reason (§18.37).
     let mut resize_tick = tokio::time::interval(Duration::from_millis(100));
+    // Secure desktop watch (§18.41): while UAC/Winlogon/lock owns the
+    // console, DXGI capture is denied and SendInput cannot reach it, so
+    // capture+input switch to the service-spawned helper over pipes. Only
+    // real desktop capture needs this; the synthetic source never does.
+    #[cfg(all(windows, feature = "windows-capture"))]
+    let (_secure_watch, mut secure_rx) = if args.source == "dxgi" {
+        let (watch, rx) = server::secure_watch::SecureWatch::spawn();
+        (Some(watch), Some(rx))
+    } else {
+        (None, None)
+    };
+    #[cfg(not(all(windows, feature = "windows-capture")))]
+    let mut secure_rx: Option<tokio::sync::mpsc::UnboundedReceiver<bool>> = None;
+    let mut secure_state: Option<SecureState> = None;
     loop {
         tokio::select! {
             msg = recv_capture(&mut frame_rx) => {
@@ -1810,7 +1938,11 @@ async fn serve_stream<T: ReliableTransport>(
                 // (a window drag would otherwise stack mode changes on top
                 // of a duplication still in transition).
                 if let Some(request) = ctl.resize_request.take() {
-                    if resize_pending.is_some() {
+                    // Mode changes are impossible while a secure desktop owns
+                    // the console (§18.41): drop the request.
+                    if ctl.secure_input.is_some() {
+                        warn!(?request, "resize ignored while a secure desktop is active");
+                    } else if resize_pending.is_some() {
                         ctl.resize_request = Some(request);
                     } else {
                         let policy = server::display_mode::ResolutionPolicy {
@@ -1839,6 +1971,30 @@ async fn serve_stream<T: ReliableTransport>(
                             }
                         }
                     }
+                }
+            }
+            active = recv_secure(&mut secure_rx) => {
+                // Secure-desktop transition (§18.41). Entering: stop the DXGI
+                // capture (it is denied anyway) and switch frame_rx to the
+                // helper pipes; the helper's first frame sends Ready, which
+                // rebuilds the encoder and re-announces the display. Leaving:
+                // back to a fresh console capture (same Ready path).
+                if active && secure_state.is_none() {
+                    info!("secure desktop active; switching capture/input to the helper");
+                    legs.send_control(&ControlMessage::SecureDesktop { active: true }.encode()?).await?;
+                    stop_capture(&mut frame_rx, &mut frame_handle);
+                    let session_id = server::secure_pipe::own_session_id().unwrap_or(0);
+                    let (rx, state) = spawn_secure_pipes(session_id, clock_start);
+                    frame_rx = Some(rx);
+                    ctl.secure_input = Some(std::sync::Arc::clone(&state.input));
+                    secure_state = Some(state);
+                } else if !active && secure_state.is_some() {
+                    info!("secure desktop released; resuming console capture");
+                    ctl.secure_input = None;
+                    secure_state = None;
+                    stop_capture(&mut frame_rx, &mut frame_handle);
+                    start_capture(args, &fps_shared, clock_start, &mut frame_rx, &mut frame_handle);
+                    legs.send_control(&ControlMessage::SecureDesktop { active: false }.encode()?).await?;
                 }
             }
             msg = scard_rx.recv() => {
@@ -2027,6 +2183,10 @@ struct ControlState {
     /// Pending mid-session desktop resize requested by the client
     /// (`DesktopResize`, §18.37); applied by the liveness tick.
     resize_request: Option<(u32, u32)>,
+    /// Secure-desktop helper input pipe (§18.41): while `Some`, input is
+    /// forwarded to the helper on the Winlogon desktop instead of the local
+    /// injector (the inner `Option` is `None` until the helper connects).
+    secure_input: Option<std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>>,
 }
 
 impl ControlState {
@@ -2071,6 +2231,18 @@ fn handle_stream_packet(
     buf: &[u8],
 ) {
     if ch == channel::INPUT {
+        // Secure mode (§18.41): forward the raw wire message to the helper
+        // on the Winlogon desktop; it sanitizes and injects there.
+        if let Some(pipe) = &ctl.secure_input {
+            let mut slot = pipe.lock().expect("secure input pipe");
+            if let Some(f) = slot.as_mut()
+                && let Err(e) = server::secure_pipe::write_msg(f, server::secure_pipe::TAG_INPUT, buf)
+            {
+                warn!("secure input pipe write failed; dropping helper input: {e}");
+                *slot = None;
+            }
+            return;
+        }
         // Input channel (§10): fixed wire format, injected via SendInput on
         // Windows (logged elsewhere).
         match protocol::InputMessage::decode(buf) {
@@ -2392,6 +2564,12 @@ async fn main() -> ExitCode {
     // `--key` needed — runs before any config parsing.
     #[cfg(all(windows, feature = "windows-capture"))]
     if let Some(code) = server::secure_probe::maybe_run_from_argv() {
+        return code;
+    }
+    // Secure-desktop helper (§18.41): spawned by the service as SYSTEM on
+    // the Winlogon desktop while a secure desktop owns the console.
+    #[cfg(all(windows, feature = "windows-capture"))]
+    if let Some(code) = server::secure_helper::maybe_run_from_argv() {
         return code;
     }
     match run().await {

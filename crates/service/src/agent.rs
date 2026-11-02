@@ -52,10 +52,10 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CreateMutexW, CreateProcessAsUserW, GetCurrentProcess, MUTEX_MODIFY_STATE,
-    OpenMutexW, OpenProcess, OpenProcessToken, PROCESS_INFORMATION, PROCESS_QUERY_INFORMATION,
-    ReleaseMutex, STARTF_USESTDHANDLES, STARTUPINFOW,
-    SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CreateEventW, CreateMutexW, CreateProcessAsUserW, EVENT_MODIFY_STATE,
+    GetCurrentProcess, MUTEX_MODIFY_STATE, OpenMutexW, OpenProcess, OpenProcessToken,
+    PROCESS_INFORMATION, PROCESS_QUERY_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES,
+    STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 
@@ -63,6 +63,11 @@ use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 /// single-instance guard). `Global\` so session 0 and the user session see
 /// the same object.
 pub const SESSION_MUTEX: &str = r"Global\UDSRP-Session";
+
+/// Named event (manual-reset, global namespace) the session agent sets while
+/// a secure desktop owns the console (§18.41). The watch loop spawns the
+/// secure helper while set and kills it when cleared.
+pub(crate) const SECURE_EVENT: &str = r"Global\UDSRP-SecureDesktop";
 
 /// Grace period after spawning before the mutex must be observable.
 const MUTEX_GRACE: Duration = Duration::from_secs(15);
@@ -355,20 +360,39 @@ fn agent_exe_path() -> Result<PathBuf> {
 /// exists, the watch loop spawns one probe instance and removes the flag.
 pub(crate) const PROBE_FLAG: &str = r"C:\ProgramData\UdsRp\probe-secure.flag";
 
-/// Spawns the secure-desktop probe (`server.exe --secure-probe`) as **SYSTEM
-/// inside the console session** (the helper pattern of §18.41): a SYSTEM
-/// token placed on the session's input desktop can GDI-capture and
-/// `SendInput` the secure desktop, which a per-user agent cannot.
-///
-/// The token is a duplicate of the service's own SYSTEM token with its
-/// session id retargeted (`SetTokenInformation(TokenSessionId)`) — NOT
-/// `WTSQueryUserToken`, which yields the session user's token (no rights on
-/// the secure desktop, and the wrong identity for the future helper).
-///
-/// Fire-and-forget lab tooling: the probe exits by itself and logs to its
-/// own file, so the process handle is dropped (the probe outlives it fine).
-/// Returns `Ok(None)` when there is no interactive console session.
+/// Spawns the secure-desktop probe (`server.exe --secure-probe`) as SYSTEM
+/// inside the console session (lab tool, §18.41). Fire-and-forget: the
+/// probe exits by itself and logs to its own file, so the process handle is
+/// dropped. Returns `Ok(None)` when there is no interactive console session.
 pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
+    let log_path = format!(r"{}\probe.log", crate::logging::STATE_DIR);
+    let spawned = spawn_system_in_console(
+        &format!("--secure-probe \"{log_path}\""),
+        "winsta0\\default",
+    )?;
+    Ok(spawned.map(|(pid, _process)| pid))
+}
+
+/// Spawns the secure-desktop helper (`server.exe --secure-helper`) as SYSTEM
+/// **born on the Winlogon desktop** (lab-validated: only a process born on
+/// the secure desktop can `SendInput` into it). The caller keeps the process
+/// handle for liveness/kill. Returns `Ok(None)` with no console session.
+pub(crate) fn spawn_secure_helper(session_id: u32) -> Result<Option<(u32, OwnedHandle)>> {
+    spawn_system_in_console(&format!("--secure-helper {session_id}"), "winsta0\\Winlogon")
+}
+
+/// Shared SYSTEM-in-session spawn (§18.41): the token is a duplicate of the
+/// service's own SYSTEM token with its session id retargeted
+/// (`SetTokenInformation(TokenSessionId)`), falling back to the token of
+/// `winlogon.exe` of the target session when the retarget is denied
+/// (observed in the lab; the PsExec/VNC recipe). NOT `WTSQueryUserToken`:
+/// that yields the session user's token (no rights on the secure desktop,
+/// and the wrong identity for the helper).
+///
+/// `args` is appended to the quoted server.exe path; `desktop` is the
+/// STARTUPINFO desktop (`winsta0\default` for capture-only lab tools,
+/// `winsta0\Winlogon` for the secure helper).
+fn spawn_system_in_console(args: &str, desktop: &str) -> Result<Option<(u32, OwnedHandle)>> {
     let session_id = unsafe { WTSGetActiveConsoleSessionId() };
     if session_id == 0xFFFF_FFFF {
         return Ok(None);
@@ -434,9 +458,8 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
     // SAFETY: `probe_token` has ADJUST_SESSIONID; `session_id` outlives the
     // call; the caller's SeTcbPrivilege is enabled above. When the retarget
     // is denied anyway (observed in the lab), fall back to duplicating the
-    // token of a SYSTEM process already running in the target session (the
-    // PsExec/VNC recipe).
-    let probe_token = match unsafe {
+    // token of a SYSTEM process already running in the target session.
+    let helper_token = match unsafe {
         SetTokenInformation(
             probe_token.0,
             TokenSessionId,
@@ -453,24 +476,22 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
     };
 
     let exe = agent_exe_path()?;
-    let log_path = format!(r"{}\probe.log", crate::logging::STATE_DIR);
-    let mut cmdline: Vec<u16> = format!("\"{}\" --secure-probe \"{log_path}\"", exe.display())
+    let mut cmdline: Vec<u16> = format!("\"{}\" {args}", exe.display())
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let mut desktop: Vec<u16> =
-        "winsta0\\default".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut desktop: Vec<u16> = desktop.encode_utf16().chain(std::iter::once(0)).collect();
     let startup = STARTUPINFOW {
         cb: u32::try_from(size_of::<STARTUPINFOW>()).expect("struct fits in u32"),
         lpDesktop: PWSTR(desktop.as_mut_ptr()),
         ..Default::default()
     };
     let mut info = PROCESS_INFORMATION::default();
-    // SAFETY: `probe_token` is a primary SYSTEM token for `session_id`;
+    // SAFETY: `helper_token` is a primary SYSTEM token for `session_id`;
     // `cmdline`/`desktop` are null-terminated, mutable and outlive the call.
     unsafe {
         CreateProcessAsUserW(
-            Some(probe_token.0),
+            Some(helper_token.0),
             PCWSTR::null(),
             Some(PWSTR(cmdline.as_mut_ptr())),
             None,
@@ -483,11 +504,9 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
             &raw mut info,
         )
     }
-    .with_context(|| format!("CreateProcessAsUserW (probe) on session {session_id}"))?;
+    .with_context(|| format!("CreateProcessAsUserW ({args}) on session {session_id}"))?;
     let _thread = OwnedHandle(info.hThread);
-    let pid = info.dwProcessId;
-    drop(OwnedHandle(info.hProcess));
-    Ok(Some(pid))
+    Ok(Some((info.dwProcessId, OwnedHandle(info.hProcess))))
 }
 
 /// Fallback token source for the secure-desktop probe/helper (§18.41):
@@ -587,6 +606,122 @@ fn open_agent_log() -> Result<OwnedHandle> {
             .context("making the agent log handle inheritable")?;
     }
     Ok(OwnedHandle(handle))
+}
+
+/// Creates the global secure-desktop event (manual-reset, initially clear)
+/// with an Everyone DACL granting only set/reset/wait rights
+/// (`EVENT_MODIFY_STATE | SYNCHRONIZE`) — same reasoning as the session
+/// mutex DACL above. Returns `None` (supervision disabled) on any failure.
+fn ensure_secure_event() -> Option<OwnedHandle> {
+    let mut world_sid = vec![0u8; 68];
+    let mut sid_len = world_sid.len() as u32;
+    let sid_ok = unsafe {
+        CreateWellKnownSid(
+            WinWorldSid,
+            None,
+            Some(PSID(world_sid.as_mut_ptr().cast())),
+            &mut sid_len,
+        )
+    };
+    if sid_ok.is_err() {
+        warn!("cannot build the Everyone SID; secure-helper supervision disabled");
+        return None;
+    }
+    let mut sec_desc = Box::new(SECURITY_DESCRIPTOR::default());
+    let mut acl_buf = vec![0u8; 1024];
+    let ready = unsafe {
+        InitializeSecurityDescriptor(
+            PSECURITY_DESCRIPTOR(sec_desc.as_mut() as *mut _ as _),
+            windows::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION,
+        )
+        .is_ok()
+            && InitializeAcl(acl_buf.as_mut_ptr().cast::<ACL>(), acl_buf.len() as u32, ACL_REVISION)
+                .is_ok()
+            && AddAccessAllowedAce(
+                acl_buf.as_mut_ptr().cast::<ACL>(),
+                ACL_REVISION,
+                EVENT_MODIFY_STATE.0 | SYNCHRONIZATION_SYNCHRONIZE.0,
+                PSID(world_sid.as_mut_ptr().cast()),
+            )
+            .is_ok()
+            && SetSecurityDescriptorDacl(
+                PSECURITY_DESCRIPTOR(sec_desc.as_mut() as *mut _ as _),
+                true,
+                Some(acl_buf.as_mut_ptr().cast::<ACL>()),
+                false,
+            )
+            .is_ok()
+    };
+    if !ready {
+        warn!("cannot build the secure-event DACL; supervision disabled");
+        return None;
+    }
+    let attrs = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(0),
+        lpSecurityDescriptor: sec_desc.as_mut() as *mut _ as *mut core::ffi::c_void,
+        bInheritHandle: BOOL(0),
+    };
+    let name: Vec<u16> = SECURE_EVENT.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `attrs` points to a valid security descriptor; `name` is
+    // null-terminated. Manual-reset, initially clear.
+    match unsafe { CreateEventW(Some(&raw const attrs), true, false, PCWSTR(name.as_ptr())) } {
+        Ok(h) => {
+            std::mem::forget(sec_desc);
+            std::mem::forget(acl_buf);
+            std::mem::forget(world_sid);
+            Some(OwnedHandle(h))
+        }
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "cannot create the secure-desktop event; supervision disabled");
+            None
+        }
+    }
+}
+
+/// Whether the secure-desktop event is currently set (manual-reset: the wait
+/// does not consume the state).
+fn secure_event_set(event: &OwnedHandle) -> bool {
+    // SAFETY: the event handle is ours and open; a zero timeout never blocks.
+    (unsafe { WaitForSingleObject(event.0, 0) }) == WAIT_OBJECT_0
+}
+
+/// Supervises the secure-desktop helper against the event (§18.41): spawns
+/// it when the event is set and no helper runs, kills it when the event is
+/// clear. The helper also self-exits when the desktop returns to Default;
+/// this is the belt-and-braces path.
+fn supervise_secure_helper(event: &OwnedHandle, helper: &mut Option<(u32, OwnedHandle)>) {
+    // Drop finished helpers first (they exit by themselves on Default).
+    if let Some((_, process)) = helper {
+        // SAFETY: the process handle is ours and open.
+        if unsafe { WaitForSingleObject(process.0, 0) } == WAIT_OBJECT_0 {
+            *helper = None;
+        }
+    }
+    match (helper.is_some(), secure_event_set(event)) {
+        (false, true) => {
+            let session_id = unsafe { WTSGetActiveConsoleSessionId() };
+            match spawn_secure_helper(session_id) {
+                Ok(Some((pid, process))) => {
+                    info!(pid, session_id, "secure-desktop helper spawned");
+                    *helper = Some((pid, process));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "cannot spawn the secure-desktop helper");
+                }
+            }
+        }
+        (true, false) => {
+            if let Some((pid, process)) = helper.take() {
+                info!(pid, "secure desktop left; stopping the helper");
+                // SAFETY: the process handle is ours and open.
+                unsafe {
+                    let _ = TerminateProcess(process.0, 0);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Service body: keep one agent running in the console session until the SCM
@@ -802,9 +937,14 @@ fn watch_with_listener(
 ) {
     let slot = std::sync::Arc::new(crate::listener::AgentSlot::default());
     crate::listener::spawn(stop, runtime, std::sync::Arc::clone(&slot), creds_slot);
+    let secure_event = ensure_secure_event();
+    let mut helper: Option<(u32, OwnedHandle)> = None;
     while !stop.load(Ordering::Relaxed) {
         slot.clear_if_dead();
         slot.kill_if_unhealthy();
+        if let Some(event) = &secure_event {
+            supervise_secure_helper(event, &mut helper);
+        }
         // Lab trigger (§18.41): one secure-desktop probe per flag file.
         if std::path::Path::new(PROBE_FLAG).exists() {
             let _ = std::fs::remove_file(PROBE_FLAG);
@@ -817,6 +957,13 @@ fn watch_with_listener(
             }
         }
         std::thread::sleep(Duration::from_millis(500));
+    }
+    // Never leave a secure helper behind on service stop.
+    if let Some((_, process)) = helper.take() {
+        // SAFETY: the process handle is ours and open.
+        unsafe {
+            let _ = TerminateProcess(process.0, 0);
+        }
     }
     slot.kill();
 }

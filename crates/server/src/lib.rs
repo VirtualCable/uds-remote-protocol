@@ -35,7 +35,12 @@ pub mod pacer;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod session_mutex;
 #[cfg(all(windows, feature = "windows-capture"))]
+pub mod secure_helper;
+pub mod secure_pipe;
+#[cfg(all(windows, feature = "windows-capture"))]
 pub mod secure_probe;
+#[cfg(all(windows, feature = "windows-capture"))]
+pub mod secure_watch;
 pub mod smartcard;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod smartcard_pipe;

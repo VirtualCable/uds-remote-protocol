@@ -155,6 +155,16 @@ pub enum ControlMessage {
         /// Preferred height in pixels.
         height: u32,
     },
+    /// Secure-desktop transition, server → client (§18.41, M9): the console
+    /// switched to/from a secure desktop (UAC consent, WinLogon, lock
+    /// screen). While active, frames come from the low-rate GDI helper path
+    /// and the client should show a "secure desktop — reduced mode" notice.
+    /// Appended at the end so existing postcard variant indices do not
+    /// shift.
+    SecureDesktop {
+        /// True while a secure desktop owns the console.
+        active: bool,
+    },
 }
 
 impl ControlMessage {
