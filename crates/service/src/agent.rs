@@ -210,6 +210,27 @@ impl Agent {
                 None
             }
         };
+        // §18.42: spawn the SYSTEM input injector on the Default desktop and
+        // add it to the SAME job, so it dies with the agent (kill-on-close).
+        // Best effort: without it, input falls back to the agent's local
+        // medium-IL SendInput (elevated windows unreachable, UIPI).
+        if let Some(job_handle) = &job {
+            match spawn_system_in_console(
+                &format!("--input-injector {session_id}"),
+                "winsta0\\default",
+            ) {
+                Ok(Some((pid, process))) => {
+                    if let Err(err) = assign_process_to_job(job_handle.0, process.0) {
+                        warn!(error = %format!("{err:#}"), "cannot add the input injector to the agent job");
+                    }
+                    info!(pid, session_id, "SYSTEM input injector spawned");
+                }
+                Ok(None) => warn!("no console session for the input injector"),
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "cannot spawn the input injector")
+                }
+            }
+        }
         Ok(Some((
             Self {
                 process: OwnedHandle(info.hProcess),
@@ -304,9 +325,16 @@ fn assign_kill_on_close_job(process: HANDLE) -> Result<OwnedHandle> {
                 .expect("struct fits in u32"),
         )
         .context("SetInformationJobObject(KILL_ON_JOB_CLOSE)")?;
-        AssignProcessToJobObject(job, process).context("AssignProcessToJobObject")?;
     }
+    assign_process_to_job(job, process)?;
     Ok(OwnedHandle(job))
+}
+
+/// Adds a process to an existing job object.
+fn assign_process_to_job(job: HANDLE, process: HANDLE) -> Result<()> {
+    // SAFETY: both handles are valid and outlive the call.
+    unsafe { AssignProcessToJobObject(job, process) }.context("AssignProcessToJobObject")?;
+    Ok(())
 }
 
 /// Creates an anonymous pipe whose read end is inheritable (for a child's

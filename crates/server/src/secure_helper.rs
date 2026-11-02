@@ -26,6 +26,10 @@ use crate::secure_pipe;
 const FRAME_INTERVAL: Duration = Duration::from_millis(100);
 /// How long the helper waits for the agent's pipe server at startup.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the input injector waits: the service spawns it together with
+/// the agent, which still has to parse its config and reach its session
+/// loop before the pipe server exists.
+const INJECTOR_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// True while the console input desktop is a secure one (Winlogon,
 /// Screen-saver). From a USER token `OpenInputDesktop` on the secure desktop
@@ -132,22 +136,69 @@ pub fn gdi_capture_frame() -> Result<(u32, u32, Vec<u8>)> {
 }
 
 /// Hidden argv entry point: `--secure-helper <session-id>` runs the helper
-/// synchronously and returns its exit code; `None` otherwise.
+/// synchronously and returns its exit code; `None` otherwise. Also handles
+/// `--input-injector <session-id>` (§18.42): the small SYSTEM process on the
+/// Default desktop that injects input the medium-integrity agent cannot
+/// (elevated windows — UIPI blocks medium-IL SendInput to high-IL windows
+/// and the focus gets trapped, lab-confirmed).
 #[cfg(all(windows, feature = "windows-capture"))]
 pub fn maybe_run_from_argv() -> Option<ExitCode> {
     let args: Vec<String> = std::env::args().collect();
-    let pos = args.iter().position(|a| a == "--secure-helper")?;
-    let Some(session_id) = args.get(pos + 1).and_then(|v| v.parse::<u32>().ok()) else {
-        eprintln!("server: --secure-helper requires a numeric session id");
-        return Some(ExitCode::from(1));
-    };
-    Some(match run_helper(session_id) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            eprintln!("secure helper: {e:#}");
-            ExitCode::FAILURE
+    if let Some(pos) = args.iter().position(|a| a == "--secure-helper") {
+        let Some(session_id) = args.get(pos + 1).and_then(|v| v.parse::<u32>().ok()) else {
+            eprintln!("server: --secure-helper requires a numeric session id");
+            return Some(ExitCode::from(1));
+        };
+        return Some(match run_helper(session_id) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("secure helper: {e:#}");
+                ExitCode::FAILURE
+            }
+        });
+    }
+    if let Some(pos) = args.iter().position(|a| a == "--input-injector") {
+        let Some(session_id) = args.get(pos + 1).and_then(|v| v.parse::<u32>().ok()) else {
+            eprintln!("server: --input-injector requires a numeric session id");
+            return Some(ExitCode::from(1));
+        };
+        return Some(match run_injector(session_id) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("input injector: {e:#}");
+                ExitCode::FAILURE
+            }
+        });
+    }
+    None
+}
+
+/// Input-injector body (§18.42): read raw wire input messages from the
+/// injector pipe and dispatch them untouched — NO sanitizer here (this is
+/// the user's own desktop; Win keys and accessibility combos must work).
+/// Runs until the pipe breaks (agent/session gone).
+#[cfg(all(windows, feature = "windows-capture"))]
+fn run_injector(session_id: u32) -> Result<()> {
+    use crate::input::SendInputInjector;
+    let mut pipe = secure_pipe::win::connect_pipe(
+        &secure_pipe::injector_pipe_name(session_id),
+        INJECTOR_CONNECT_TIMEOUT,
+        false,
+    )
+    .context("connecting the injector pipe")?;
+    let mut injector = SendInputInjector::new();
+    loop {
+        match secure_pipe::read_msg(&mut pipe) {
+            Ok(Some((secure_pipe::TAG_INPUT, payload))) => {
+                match protocol::InputMessage::decode(&payload) {
+                    Ok(msg) => crate::input::dispatch(&mut injector, &msg),
+                    Err(e) => warn!("input injector: bad input message: {e}"),
+                }
+            }
+            Ok(Some((tag, _))) => warn!(tag, "input injector: unexpected pipe tag"),
+            Ok(None) | Err(_) => return Ok(()), // agent gone: exit
         }
-    })
+    }
 }
 
 /// Helper body: connect both pipes, pump sanitized input on a thread, and

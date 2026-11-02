@@ -648,6 +648,45 @@ struct SecureState {
     input: std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>,
 }
 
+/// Shared slot for the SYSTEM input injector's pipe (§18.42): `Some(file)`
+/// once the service-spawned injector connects; input is forwarded there
+/// instead of being injected locally (medium IL cannot reach elevated
+/// windows; SYSTEM can).
+type InjectorSlot = std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>;
+
+/// Spawns the injector-pipe acceptor thread (§18.42): the pipe server waits
+/// for the SYSTEM injector; until it connects the slot stays `None` and
+/// input falls back to the local (user-token) injector. Portable stub
+/// outside Windows: the slot simply never fills.
+#[cfg_attr(
+    not(all(windows, feature = "windows-capture")),
+    expect(unused_variables, reason = "stub: the injector exists only on Windows")
+)]
+fn spawn_injector_pipe(session_id: u32) -> InjectorSlot {
+    let slot: InjectorSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+    #[cfg(all(windows, feature = "windows-capture"))]
+    {
+        let target = std::sync::Arc::clone(&slot);
+        std::thread::Builder::new()
+            .name("injector-input".into())
+            .spawn(move || {
+                match server::secure_pipe::win::accept_pipe(
+                    &server::secure_pipe::injector_pipe_name(session_id),
+                    false,
+                ) {
+                    Ok(f) => {
+                        info!("SYSTEM input injector connected");
+                        *target.lock().expect("injector pipe slot") = Some(f);
+                    }
+                    Err(e) => warn!("injector pipe: {e:#}"),
+                }
+            })
+            .map_err(|e| warn!("injector pipe thread: {e}"))
+            .ok();
+    }
+    slot
+}
+
 /// Spawns the two secure-mode pipe threads (frames acceptor + input
 /// acceptor) and returns the capture receiver that feeds the session loop.
 /// Only reachable on Windows DXGI builds; the portable stub is never used
@@ -1728,6 +1767,11 @@ async fn serve_stream<T: ReliableTransport>(
         last_metrics: None,
         resize_request: None,
         secure_input: None,
+        // §18.42: the pipe acceptor waits for the service-spawned SYSTEM
+        // injector; in manual/dev runs nobody connects and input stays local.
+        injector_input: Some(spawn_injector_pipe(
+            server::secure_pipe::own_session_id().unwrap_or(0),
+        )),
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -2215,6 +2259,10 @@ struct ControlState {
     last_keyframe_req: Option<Instant>,
     /// Platform input injector (SendInput on Windows, log elsewhere).
     injector: Box<dyn server::input::InputInjector>,
+    /// SYSTEM injector pipe (§18.42): when filled, normal input is forwarded
+    /// to the SYSTEM injector process instead of `injector` so elevated
+    /// windows receive it (UIPI focus trap, lab-confirmed).
+    injector_input: Option<InjectorSlot>,
     /// Negotiated video bitrate ceiling for quality targets.
     video_ceiling_kbps: u32,
     /// Negotiated audio bitrate ceiling for quality targets (the active
@@ -2297,6 +2345,21 @@ fn handle_stream_packet(
                 *slot = None;
             }
             return;
+        }
+        // SYSTEM injector mode (§18.42): forward the raw wire message to
+        // the injector on the Default desktop (reaches elevated windows).
+        if let Some(pipe) = &ctl.injector_input {
+            let mut slot = pipe.lock().expect("injector input pipe");
+            if slot.is_some() {
+                if let Some(f) = slot.as_mut()
+                    && let Err(e) =
+                        server::secure_pipe::write_msg(f, server::secure_pipe::TAG_INPUT, buf)
+                {
+                    warn!("injector pipe write failed; falling back to local input: {e}");
+                    *slot = None;
+                }
+                return;
+            }
         }
         // Input channel (§10): fixed wire format, injected via SendInput on
         // Windows (logged elsewhere).

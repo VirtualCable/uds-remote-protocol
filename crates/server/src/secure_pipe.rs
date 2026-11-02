@@ -45,6 +45,15 @@ pub fn input_pipe_name(session_id: u32) -> String {
     format!(r"\\.\pipe\UDSRP-SecureInput-{session_id}")
 }
 
+/// Injector pipe name (agent → input injector, §18.42) for a console
+/// session id. The injector is a small SYSTEM process on the **Default**
+/// desktop that injects what the medium-integrity agent cannot reach
+/// (elevated windows, UIPI focus trap).
+#[must_use]
+pub fn injector_pipe_name(session_id: u32) -> String {
+    format!(r"\\.\pipe\UDSRP-Input-{session_id}")
+}
+
 /// This process's session id (pipe name component).
 #[cfg(windows)]
 pub fn own_session_id() -> Result<u32> {
