@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::{error, info, warn};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT,
-    SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, HANDLE_FLAGS,
+    HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::{
     ACL, ACL_REVISION, AddAccessAllowedAce, AdjustTokenPrivileges, CreateWellKnownSid,
@@ -44,11 +44,18 @@ use windows::Win32::System::JobObjects::{
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject,
 };
-use windows::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
+use windows::Win32::System::RemoteDesktop::{
+    ProcessIdToSessionId, WTSGetActiveConsoleSessionId, WTSQueryUserToken,
+};
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+    TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateMutexW, CreateProcessAsUserW, GetCurrentProcess, MUTEX_MODIFY_STATE,
-    OpenMutexW, OpenProcessToken, PROCESS_INFORMATION, ReleaseMutex, STARTF_USESTDHANDLES,
-    STARTUPINFOW, SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
+    OpenMutexW, OpenProcess, OpenProcessToken, PROCESS_INFORMATION, PROCESS_QUERY_INFORMATION,
+    ReleaseMutex, STARTF_USESTDHANDLES, STARTUPINFOW,
+    SYNCHRONIZATION_SYNCHRONIZE, TerminateProcess, WaitForSingleObject,
 };
 use windows::core::{BOOL, HSTRING, PCWSTR, PWSTR};
 
@@ -394,12 +401,15 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
         }],
     };
     // SAFETY: `own_token` has ADJUST_PRIVILEGES; `privileges` outlives the
-    // call. AdjustTokenPrivileges reports success even when nothing changed;
-    // the SetTokenInformation below is the real check.
+    // call. AdjustTokenPrivileges reports success even when a privilege was
+    // not present in the token (ERROR_NOT_ALL_ASSIGNED) — check for it.
     unsafe {
         AdjustTokenPrivileges(own_token.0, false, Some(&raw const privileges), 0, None, None)
     }
     .context("AdjustTokenPrivileges(SeTcbPrivilege)")?;
+    if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED {
+        warn!("SeTcbPrivilege is not present in the service token");
+    }
 
     let mut dup_handle = HANDLE::default();
     let dup_access = TOKEN_ACCESS_MASK(
@@ -422,16 +432,25 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
     .context("DuplicateTokenEx(self)")?;
     let probe_token = OwnedHandle(dup_handle);
     // SAFETY: `probe_token` has ADJUST_SESSIONID; `session_id` outlives the
-    // call; the caller's SeTcbPrivilege is enabled above.
-    unsafe {
+    // call; the caller's SeTcbPrivilege is enabled above. When the retarget
+    // is denied anyway (observed in the lab), fall back to duplicating the
+    // token of a SYSTEM process already running in the target session (the
+    // PsExec/VNC recipe).
+    let probe_token = match unsafe {
         SetTokenInformation(
             probe_token.0,
             TokenSessionId,
             (&raw const session_id).cast(),
             u32::try_from(size_of::<u32>()).expect("u32 fits"),
         )
-    }
-    .context("SetTokenInformation(TokenSessionId)")?;
+    } {
+        Ok(()) => probe_token,
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "TokenSessionId retarget denied; borrowing a session SYSTEM token");
+            drop(probe_token);
+            system_session_token(session_id)?
+        }
+    };
 
     let exe = agent_exe_path()?;
     let log_path = format!(r"{}\probe.log", crate::logging::STATE_DIR);
@@ -469,6 +488,78 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
     let pid = info.dwProcessId;
     drop(OwnedHandle(info.hProcess));
     Ok(Some(pid))
+}
+
+/// Fallback token source for the secure-desktop probe/helper (§18.41):
+/// duplicates the token of a SYSTEM process already running in `session_id`
+/// (winlogon.exe), avoiding `SetTokenInformation(TokenSessionId)` entirely.
+/// That token already carries the target session id.
+fn system_session_token(session_id: u32) -> Result<OwnedHandle> {
+    // SAFETY: plain snapshot of the process list.
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+        .context("CreateToolhelp32Snapshot")?;
+    let snapshot = OwnedHandle(snapshot);
+    let mut entry = PROCESSENTRY32W {
+        dwSize: u32::try_from(size_of::<PROCESSENTRY32W>()).expect("struct fits in u32"),
+        ..Default::default()
+    };
+    // SAFETY: `entry` is correctly sized and ours; iterating the snapshot is
+    // read-only.
+    unsafe { Process32FirstW(snapshot.0, &raw mut entry) }.context("Process32FirstW")?;
+    let mut pid = None;
+    loop {
+        let name_len = entry
+            .szExeFile
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(entry.szExeFile.len());
+        let name = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
+        if name.eq_ignore_ascii_case("winlogon.exe") {
+            let mut proc_session = 0u32;
+            // SAFETY: valid out pointer.
+            if unsafe { ProcessIdToSessionId(entry.th32ProcessID, &raw mut proc_session) }.is_ok()
+                && proc_session == session_id
+            {
+                pid = Some(entry.th32ProcessID);
+                break;
+            }
+        }
+        if unsafe { Process32NextW(snapshot.0, &raw mut entry) }.is_err() {
+            break;
+        }
+    }
+    let pid = pid.with_context(|| format!("no winlogon.exe found in session {session_id}"))?;
+    // SAFETY: opening a live process by id for token query.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) }
+        .with_context(|| format!("OpenProcess(winlogon pid={pid})"))?;
+    let process = OwnedHandle(process);
+    let mut token_handle = HANDLE::default();
+    // SAFETY: `process` is open with QUERY_INFORMATION; the out pointer is
+    // valid.
+    unsafe {
+        OpenProcessToken(
+            process.0,
+            TOKEN_ACCESS_MASK(TOKEN_DUPLICATE.0 | TOKEN_QUERY.0),
+            &raw mut token_handle,
+        )
+    }
+    .context("OpenProcessToken(winlogon)")?;
+    let session_token = OwnedHandle(token_handle);
+    let mut dup_handle = HANDLE::default();
+    // SAFETY: `session_token` is open with DUPLICATE; the out pointer is
+    // valid.
+    unsafe {
+        DuplicateTokenEx(
+            session_token.0,
+            TOKEN_ACCESS_MASK(TOKEN_ASSIGN_PRIMARY.0 | TOKEN_DUPLICATE.0 | TOKEN_QUERY.0),
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &raw mut dup_handle,
+        )
+    }
+    .context("DuplicateTokenEx(winlogon)")?;
+    Ok(OwnedHandle(dup_handle))
 }
 
 /// Opens (creating and appending to) the agent log file and makes the handle
