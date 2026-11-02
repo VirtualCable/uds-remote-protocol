@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Dumps pre-Opus loopback PCM (48 kHz stereo s16le) to a file, reusing the
 //! server's own WASAPI source, to isolate where the session-start white
 //! noise enters the audio pipeline.

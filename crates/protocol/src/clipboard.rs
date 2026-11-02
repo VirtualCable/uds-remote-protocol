@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Clipboard messages, bidirectional (M8). Lazy pull model, a simplified
 //! cliprdr: the side whose clipboard changed announces the available
 //! formats with [`ClipboardMessage::Offer`]; the peer pulls the one it wants

@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Token-bucket pacer for the UDP display leg (§12.6).
 //!
 //! Without pacing, one encoded frame is blasted at CPU speed: hundreds of

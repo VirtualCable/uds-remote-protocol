@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Cursor messages, server → client (design doc §10): the client paints
 //! the cursor locally (like RDP), so the server only sends the *shape* and
 //! *visibility*, never the position — the position is fixed client-side and

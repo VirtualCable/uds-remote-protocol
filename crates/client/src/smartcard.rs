@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Smartcard request dispatcher (§17): executes `SmartcardMessage`
 //! requests arriving on `channel::SMARTCARD` against a
 //! [`SmartcardIntegration`] backend and produces the replies.

@@ -13,6 +13,16 @@
 - **License: BSD 3-Clause** (same as uds client). Every crate declares
   `license = "BSD-3-Clause"` via the workspace; keep the `LICENSE` file at
   the repo root in sync.
+- **Source file header (mandatory in every source file, present and
+  future)**: `.rs` files start with these four lines (adapt the comment
+  prefix for other file types, e.g. `#` for shell/PowerShell/Dockerfile):
+
+  ```
+  // BSD 3-Clause License
+  // Copyright (c) 2026, Virtual Cable S.L.
+  // All rights reserved.
+  // Authors: Adolfo Gómez, dkmaster at dkmon dot com
+  ```
 
 ## MCP Tools: code-review-graph
 

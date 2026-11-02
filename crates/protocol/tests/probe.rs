@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Latency probe message tests (design doc §12.1): 2-step NTP-style scheme
 //! with optional response. RTT = (t4 - t1) - (t3 - t2), no synchronized
 //! clocks needed.

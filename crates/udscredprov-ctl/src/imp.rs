@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Windows implementation of udscredprov-ctl. See `main.rs` for the command
 //! list. Plays the named-pipe **server** role that the `uds-rp` service owns
 //! in production, so the credential provider DLL loaded by LogonUI (which

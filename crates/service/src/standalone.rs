@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Connection-mode wiring for the orchestrator service.
 //!
 //! When the shared server configuration file (`uds-rp-server.toml`, same

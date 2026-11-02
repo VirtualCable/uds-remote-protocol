@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Smartcard redirection messages (M8, phase 1: physical card relay).
 //!
 //! The operation flow mirrors the MS-RDPESC cycle (EstablishContext →

@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Events delivered from the protocol session to the consumer (§15.3).
 //!
 //! The consumer injects a [`flume::Sender<ClientEvent>`] when building the

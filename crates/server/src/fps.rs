@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Adaptive capture fps (§12.7): the encoder's own cost is the signal.
 //!
 //! The quality controller (§12) reacts to the *network*; it cannot see a

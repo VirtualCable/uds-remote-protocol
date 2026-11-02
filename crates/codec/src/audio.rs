@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Audio codec traits and presets (design doc §9).
 //!
 //! Mirror of the video abstraction (§8): the protocol negotiates a codec via

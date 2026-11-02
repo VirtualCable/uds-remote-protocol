@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Lists every active MMDevice audio endpoint (render and capture) with its
 //! friendly name, endpoint ID and state, to locate the driver-provided
 //! loopback capture endpoint of the UDS virtual audio device.

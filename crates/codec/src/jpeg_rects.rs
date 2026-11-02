@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! JPEG-over-dirty-rects codec (feature `codec-jpeg`, design doc §8.5).
 //!
 //! The base regime of the codec ladder: each frame is encoded as a batch of

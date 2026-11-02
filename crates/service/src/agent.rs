@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Session-agent spawning and watchdog.
 //!
 //! The service (session 0, SYSTEM) cannot capture or inject input itself —

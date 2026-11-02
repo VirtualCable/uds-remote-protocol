@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Frame fragmentation/reassembly tests (design doc §6.2): a video frame may
 //! exceed the MTU, so it is split into self-contained datagrams with header
 //! `|display_id 1B|frame_id 3B|frag_idx 2B|frag_count 2B|capture_ts 4B|`.

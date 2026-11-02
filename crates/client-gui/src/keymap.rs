@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! winit `KeyCode` → Set 1 scancode + extended flag mapping, ported from
 //! uds-client's `gui::keymap` (same BSD-3-Clause, Virtual Cable S.L.).
 //!

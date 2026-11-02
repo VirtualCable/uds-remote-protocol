@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! VP8 (libvpx) encoder/decoder tests — feature `codec-vp8`.
 //! Run with: `cargo test -p codec --features codec-vp8`.
 

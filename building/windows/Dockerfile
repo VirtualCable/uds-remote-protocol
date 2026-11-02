@@ -1,3 +1,8 @@
+# BSD 3-Clause License
+# Copyright (c) 2026, Virtual Cable S.L.
+# All rights reserved.
+# Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 # UDS Remote Protocol — Windows builder image.
 # Windows Server Core with the full native toolchain the workspace needs:
 # VS Build Tools (MSVC linker), cmake+ninja (opus/turbojpeg C builds),

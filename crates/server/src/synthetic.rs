@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Synthetic moving test pattern (development frames before real capture).
 //!
 //! Generates a BGRA gradient with a moving vertical bar, so both static

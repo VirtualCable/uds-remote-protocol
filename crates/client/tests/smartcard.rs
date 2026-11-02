@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! End-to-end smartcard dispatcher test (§17): requests are encoded,
 //! decoded (the wire loop) and executed by a real `SmartcardService`
 //! against the scripted `DummyBackend`, asserting reply tags and the

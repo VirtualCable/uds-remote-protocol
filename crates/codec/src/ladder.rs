@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Codec ladder state machine (design doc §8.5).
 //!
 //! Decides when to switch between the base regime (rects-JPEG, low CPU,

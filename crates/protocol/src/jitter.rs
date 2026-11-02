@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Audio jitter buffer (design doc §9.1).
 //!
 //! UDP datagrams arrive out of order and with losses; this buffer reorders

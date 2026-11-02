@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Named codec presets (design doc §8.4).
 //!
 //! A codec without its parameters is only half the story (VP9 with libvpx

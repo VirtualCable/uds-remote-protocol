@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Session recovery over a direct connection (§4.3): after a TCP drop the
 //! client reconnects with `Command::Recover` and both ends resume from the
 //! last known sequence numbers — nonce reuse is never allowed.

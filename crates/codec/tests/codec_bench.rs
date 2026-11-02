@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! VP8 vs VP9 benchmark (design doc §8: CPU cost vs compression ratio).
 //!
 //! Ignored by default — run on demand, in release, with:

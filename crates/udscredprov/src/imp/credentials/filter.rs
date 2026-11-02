@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! The provider filter (`ICredentialProviderFilter`). While we hold a
 //! pipe-delivered auto-logon credential, we filter every other provider out
 //! so LogonUI cannot fall back to a different tile mid-attempt; otherwise we

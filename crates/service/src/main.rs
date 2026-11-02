@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! UDS Remote Protocol orchestrator service (session 0).
 //!
 //! Owns everything that must live outside the user session (see

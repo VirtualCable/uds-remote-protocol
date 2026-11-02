@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! AltGr (RAlt) pairing for Windows targets (client-side input).
 //!
 //! On Windows, AltGr is `Ctrl+Alt`: the OS emits a fake LCtrl key-down just

@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! The provider COM object (`ICredentialProvider` +
 //! `ICredentialProviderSetUserArray`): owns the credential tile and the
 //! LogonUI event manager. The pipe client is process-global (see

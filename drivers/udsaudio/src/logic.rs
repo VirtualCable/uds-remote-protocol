@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Pure, host-testable driver logic: KS GUID constants, PCM formats, pin /
 //! connection tables for the four PortCls filters, format validation and the
 //! simulated DMA position clock. No kernel APIs in here: this module must

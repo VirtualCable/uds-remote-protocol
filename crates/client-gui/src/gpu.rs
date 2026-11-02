@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Shared wgpu context: surface/device/queue, the fullscreen BGRA texture
 //! pipeline used by the session view, and the text brush (wgpu_text, same
 //! setup as uds-client's `wgpu_render`).

@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Host-independent logic for the UDS Credential Provider: the wire protocol
 //! spoken over the local named pipe between the `uds-rp` service (pipe
 //! server, runs as SYSTEM in session 0) and the credential provider DLL

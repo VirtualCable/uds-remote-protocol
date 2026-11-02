@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Minimal `DbgPrint` wrapper for kernel debug output (visible with
 //! Sysinternals DebugView on the target). Logging is best-effort and must
 //! never fail: no allocation, no panics.

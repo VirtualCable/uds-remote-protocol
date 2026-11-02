@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Video codec traits and common types (design doc §8).
 //!
 //! The protocol negotiates a codec via capabilities; the core only sees

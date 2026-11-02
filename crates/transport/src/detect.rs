@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! UDP leg detection (§4.2): after the TCP handshake, the server offers a
 //! UDP endpoint and the client probes it. Lossy channels only move to UDP
 //! when a valid `ProbeAck` comes back; otherwise everything stays on TCP.

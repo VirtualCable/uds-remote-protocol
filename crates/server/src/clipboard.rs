@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Clipboard bridge with the OS (M8): reports local clipboard changes and
 //! applies remote ones. The session core stays portable — the Windows
 //! backend (message-only window + `AddClipboardFormatListener`) lives behind

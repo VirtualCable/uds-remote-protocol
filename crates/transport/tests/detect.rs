@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! UDP detection end-to-end tests (§4.2): after the TCP handshake the server
 //! offers a UDP leg (`UdpOffer`), the client probes it, and lossy channels
 //! only move to UDP if a valid `ProbeAck` comes back.

@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Socket handoff (§18.32): rebuilds in this process a TCP socket that the
 //! orchestrator service accepted, validated and duplicated with
 //! `WSADuplicateSocketW`, so the session agent continues the connection the

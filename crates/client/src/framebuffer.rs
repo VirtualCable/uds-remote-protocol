@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Shared decoded framebuffers, one per display (§15.3).
 //!
 //! Decoded frames are written here under a `RwLock` and the consumer copies

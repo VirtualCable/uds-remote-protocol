@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Datagram encryption tests (design doc §6.2): wire format
 //! `|token 16B|seq 8B BE|channel_id encrypted|payload|tag 16B|`, AAD = token‖seq,
 //! sliding-window anti-replay and loss estimation from sequence gaps.

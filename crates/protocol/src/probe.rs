@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Latency probe messages (design doc §12.1): 2-step NTP-style exchange.
 //!
 //! 1. `A → B`: [`Probe`] `{ t1 }` (A's local monotonic timestamp).

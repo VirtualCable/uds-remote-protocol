@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Headless end-to-end test of the client session API (§15.3): an
 //! in-process mini server (real handshake, UDP leg, encrypted channels)
 //! drives a [`Session`], and the test consumes the event channel, the

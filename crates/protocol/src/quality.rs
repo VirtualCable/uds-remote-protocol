@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Quality controller (design doc §12.5): maps link-quality signals onto a
 //! fixed ladder of quality levels.
 //!

@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Reference standalone client for the UDS remote protocol.
 //!
 //! Usage: `uds-rp-client [--addr host:port] [--ticket STR] [--key HEX]

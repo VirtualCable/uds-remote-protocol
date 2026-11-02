@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Datagram encryption (UDP): self-contained packets, loss- and
 //! reorder-tolerant (design doc §6.2).
 //!

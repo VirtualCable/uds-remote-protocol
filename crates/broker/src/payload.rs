@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! The ticket payload schema (protocol of ours, version 1).
 //!
 //! The payload travels in `remotes[0].extra` of the broker's ticket

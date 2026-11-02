@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Rects-vs-full-frame benchmark (design doc §8.5): with the real desktop
 //! (DXGI, Windows) or the synthetic pattern elsewhere, encode each frame via
 //! full-frame VP9 vs per-rect JPEG (libjpeg-turbo) / WebP (libwebp), measuring

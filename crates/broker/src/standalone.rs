@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Standalone provider: the TOML config is the source of truth. The fixed
 //! human ticket is validated by constant-time compare; the grant carries
 //! the configured key, credentials and channel switches.

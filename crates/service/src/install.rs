@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Self-installation: `udsrp-service --install` / `--uninstall`.
 //!
 //! Registers (or removes) the service in the SCM with auto-start and the M5

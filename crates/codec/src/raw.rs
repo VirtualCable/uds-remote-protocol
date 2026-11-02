@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! `RawCodec`: uncompressed BGRA passthrough. Reference implementation of
 //! the video traits, used by channel-level E2E tests (it needs no external
 //! libraries and every frame is independent).

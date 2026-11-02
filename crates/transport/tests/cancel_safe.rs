@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Regression test: `EncryptedStream::recv_into` must be cancellation-safe.
 //!
 //! A `tokio::select!` that drops the receive future mid-record used to

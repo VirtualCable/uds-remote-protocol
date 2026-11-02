@@ -1,3 +1,8 @@
+# BSD 3-Clause License
+# Copyright (c) 2026, Virtual Cable S.L.
+# All rights reserved.
+# Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 # Builds the Windows binaries of the workspace inside the uds-rp-builder
 # container. Run from building/windows/:
 #

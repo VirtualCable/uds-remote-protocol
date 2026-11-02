@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! # vpx-sys
 //!
 //! Internal FFI bindings to libvpx (VP8/VP9 encoder + decoder).

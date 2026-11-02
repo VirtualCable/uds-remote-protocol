@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Adapter wiring: `DriverEntry` glue, `AddDevice`, `StartDevice` and the
 //! subdevice installation sequence (sysvad `InstallSubdevice` pattern:
 //! `PcNewPort` -> create miniport -> `IPort::Init` -> `PcRegisterSubdevice`).

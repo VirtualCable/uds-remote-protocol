@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! VP9 (libvpx) encoder/decoder tests — feature `codec-vp9`.
 //!
 //! Roundtrip over a synthetic BGRA frame: encode → decode → geometry and

@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Connect dialog: server address, ticket and shared key. Keyboard-driven
 //! (Tab/Shift-Tab to change field, Enter to connect, Esc to quit) — the
 //! reference client keeps the dialog minimal on purpose.

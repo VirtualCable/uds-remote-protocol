@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Microphone capture pipeline (design doc §9.2), the mirror image of the
 //! audio-out playback pipeline in `audio.rs`:
 //!

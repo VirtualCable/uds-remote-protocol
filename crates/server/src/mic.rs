@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Microphone receive pipeline (design doc §9.2): the client captures its
 //! mic, encodes Opus and sends one frame per datagram on channel `AUDIO_IN`;
 //! here the datagrams flow through the same jitter buffer used on the client

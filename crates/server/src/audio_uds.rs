@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! UDS driver loopback source (Windows only): reads the session mix straight
 //! from the udsaudio driver's render→loopback ring through the
 //! `\\.\UDSAudioCtl` control device, bypassing the WASAPI loopback path.

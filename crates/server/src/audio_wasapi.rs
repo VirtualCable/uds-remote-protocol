@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! WASAPI loopback capture source (Windows only, design doc §9).
 //!
 //! Captures what the default render endpoint is playing (system audio) via

@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Build script for the udsaudio kernel driver.
 //!
 //! Two jobs (Windows builds only — on other hosts this script is a no-op so

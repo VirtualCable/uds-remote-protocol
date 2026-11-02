@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Client session: connection, decoding and the event/command pumps (§15.3).
 //!
 //! A [`Session`] owns the whole protocol side of a connection — handshake,

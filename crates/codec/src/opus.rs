@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Opus audio codec (RFC 6716) via the `opus` crate, which bundles libopus
 //! and builds it with `cc` — no system library needed (design doc §9).
 //!

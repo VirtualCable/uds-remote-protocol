@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Windows implementation of udsaudio-ctl. See `main.rs` for the command
 //! list. Everything here is Windows-only; COM objects never cross threads
 //! (each WASAPI function inits its own apartment).

@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# BSD 3-Clause License
+# Copyright (c) 2026, Virtual Cable S.L.
+# All rights reserved.
+# Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 # Regenerates the committed libvpx bindings in crates/vpx-sys/src/
 # (requires bindgen CLI + libclang; Linux dev box).
 # Not needed for normal builds: the bindings are committed.

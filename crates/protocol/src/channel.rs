@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Channel identifiers and ranges (design doc §5, riesgos.md r2 §4.2).
 
 /// Logical channel identifier.

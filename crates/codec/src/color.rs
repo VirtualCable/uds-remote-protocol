@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! BGRA → I420 color conversion (BT.601 limited range, 2x2 box-subsampled
 //! chroma — the same layout libyuv's `ARGBToI420` produces, so a future
 //! SIMD libyuv swap behind a feature is drop-in).

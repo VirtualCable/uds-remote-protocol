@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Generated PortCls bindings (bindgen over portcls.h, see build.rs).
 //!
 //! `wdk-sys` has no audio subset, so these are our own. Raw FFI: everything

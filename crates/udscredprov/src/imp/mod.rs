@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Windows implementation of the UDS Credential Provider (auto-logon).
 //!
 //! Mirrors the interface structure of the reference provider in the

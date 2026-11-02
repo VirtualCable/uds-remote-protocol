@@ -1,6 +1,7 @@
 // BSD 3-Clause License
 // Copyright (c) 2026, Virtual Cable S.L.
 // All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 //! IPC protocol between the UDS virtual smart card reader driver
 //! (`udsscard`, UMDF) and its userland counterpart (the UDS-RP service, or

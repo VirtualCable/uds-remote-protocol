@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Integration tests of the `transport` crate: encrypted E2E echo over direct
 //! TCP on loopback, with a real Hello handshake.
 

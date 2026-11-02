@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Commands delivered from the consumer to the protocol session (§15.3).
 //!
 //! The session returns a [`CommandSender`] on construction and drains it

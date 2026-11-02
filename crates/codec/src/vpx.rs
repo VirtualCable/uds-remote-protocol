@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! VP9/VP8 video codecs over libvpx (feature `codec-vp9` / `codec-vp8`).
 //!
 //! Realtime, low-latency configuration for interactive desktop: no lag in

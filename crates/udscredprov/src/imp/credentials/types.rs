@@ -1,3 +1,8 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
 //! Field descriptors and the pipe-delivered credential container.
 //! Mirrors `credentials/types.rs` of the reference provider, with the
 //! credential itself holding a real username/domain/password (delivered over
