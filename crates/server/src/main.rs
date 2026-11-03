@@ -571,11 +571,26 @@ fn spawn_capture(
                     // properly); otherwise the failure is real — die.
                     #[cfg(all(windows, feature = "windows-capture"))]
                     if secure_grace_wait(&stop_thread) {
-                        info!("capture lost to a secure desktop; idling until the transition ({e:#})");
+                        info!("capture lost to a secure desktop; waiting out the transition ({e:#})");
+                        // The secure window can be SHORTER than the watcher
+                        // poll (the auto-unlock chain raises and drops the
+                        // credential UI in ~250 ms, §18.52), so the session
+                        // loop may never see the transition and never restart
+                        // us: poll the secure state ourselves and resume once
+                        // it clears. When the session loop DOES see it, it
+                        // owns the restart and stops this thread via the stop
+                        // flag (the helper covers the secure desktop then).
                         while !stop_thread.load(Ordering::Relaxed) && !tx.is_closed() {
+                            if !server::secure_helper::secure_desktop_active() {
+                                break;
+                            }
                             std::thread::sleep(Duration::from_millis(50));
                         }
-                        return;
+                        if stop_thread.load(Ordering::Relaxed) || tx.is_closed() {
+                            return;
+                        }
+                        info!("secure window passed; resuming capture");
+                        continue;
                     }
                     warn!("capture failed: {e:#}");
                     return;
