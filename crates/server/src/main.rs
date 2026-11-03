@@ -627,15 +627,19 @@ fn spawn_capture(
 
 /// Grace window after a capture failure (§18.52): polls for a secure
 /// desktop owning the console — the usual reason DXGI dies mid-session —
-/// for up to two seconds, honouring the stop flag. `true` means the failure
-/// is the secure-desktop transition, not a real capture error.
+/// for up to two seconds, honouring the stop flag. The lock curtain is NOT
+/// a secure desktop (§18.52.3) but invalidates the duplication all the
+/// same, so the WTS lock state also grants the grace. `true` means the
+/// failure is a console transition, not a real capture error.
 #[cfg(all(windows, feature = "windows-capture"))]
 fn secure_grace_wait(stop: &Arc<AtomicBool>) -> bool {
     for _ in 0..40 {
         if stop.load(Ordering::Relaxed) {
             return false;
         }
-        if server::secure_helper::secure_desktop_active() {
+        if server::secure_helper::secure_desktop_active()
+            || server::secure_helper::console_locked()
+        {
             return true;
         }
         std::thread::sleep(Duration::from_millis(50));
