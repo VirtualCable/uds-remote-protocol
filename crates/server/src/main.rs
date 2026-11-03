@@ -1912,6 +1912,14 @@ async fn serve_stream<T: ReliableTransport>(
     // waiting for the 1 s liveness tick added up to a second of dead time
     // to every mode change for no reason (§18.37).
     let mut resize_tick = tokio::time::interval(Duration::from_millis(100));
+    // Deferred console-capture restart after a secure-desktop release
+    // (§18.52.4): the release event can fire while the console is still
+    // locked or mid-transition (the credential UI drops BEFORE winlogon
+    // finishes the unlock), and recreating a duplication there poisons the
+    // display stack. The restart waits for 1 s of continuous stability.
+    let mut capture_restart_pending = false;
+    let mut capture_restart_clear: Option<Instant> = None;
+    let mut stability_tick = tokio::time::interval(Duration::from_millis(100));
     loop {
         tokio::select! {
             msg = recv_capture(&mut frame_rx) => {
@@ -2173,6 +2181,7 @@ async fn serve_stream<T: ReliableTransport>(
                 // back to a fresh console capture (same Ready path).
                 if active && secure_state.is_none() {
                     info!("secure desktop active; switching capture/input to the helper");
+                    capture_restart_pending = false;
                     legs.send_control(&ControlMessage::SecureDesktop { active: true }.encode()?).await?;
                     stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
                     let session_id = server::secure_pipe::own_session_id().unwrap_or(0);
@@ -2181,19 +2190,47 @@ async fn serve_stream<T: ReliableTransport>(
                     ctl.secure_input = Some(std::sync::Arc::clone(&state.input));
                     secure_state = Some(state);
                 } else if !active && secure_state.is_some() {
-                    info!("secure desktop released; resuming console capture");
                     ctl.secure_input = None;
                     secure_state = None;
                     stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
-                    start_capture(
-                        args,
-                        &fps_shared,
-                        clock_start,
-                        &mut frame_rx,
-                        &mut frame_handle,
-                        &mut capture_stop,
-                    );
-                    legs.send_control(&ControlMessage::SecureDesktop { active: false }.encode()?).await?;
+                    // The release event can fire while the console is still
+                    // locked (the credential UI drops BEFORE winlogon finishes
+                    // the unlock, §18.52.4): defer the capture restart to the
+                    // stability tick instead of rebuilding the duplication
+                    // mid-transition.
+                    info!("secure desktop released; capture restart deferred until the desktop is stable");
+                    capture_restart_pending = true;
+                    capture_restart_clear = None;
+                }
+            }
+            _ = stability_tick.tick() => {
+                // Deferred capture restart (§18.52.4): fire it only after 1 s
+                // with no secure desktop and no console lock.
+                if capture_restart_pending {
+                    #[cfg(all(windows, feature = "windows-capture"))]
+                    let unstable = server::secure_helper::secure_desktop_active()
+                        || server::secure_helper::console_locked();
+                    #[cfg(not(all(windows, feature = "windows-capture")))]
+                    let unstable = false;
+                    if unstable {
+                        capture_restart_clear = None;
+                    } else {
+                        let since = capture_restart_clear.get_or_insert_with(Instant::now);
+                        if since.elapsed() >= Duration::from_secs(1) {
+                            capture_restart_pending = false;
+                            capture_restart_clear = None;
+                            info!("desktop stable again; resuming console capture");
+                            start_capture(
+                                args,
+                                &fps_shared,
+                                clock_start,
+                                &mut frame_rx,
+                                &mut frame_handle,
+                                &mut capture_stop,
+                            );
+                            legs.send_control(&ControlMessage::SecureDesktop { active: false }.encode()?).await?;
+                        }
+                    }
                 }
             }
             msg = scard_rx.recv() => {
