@@ -51,6 +51,16 @@ if ($svc.ImagePath -ne "$bin\udsrp-service.exe") {
 Stop-Service UdsRpService -Force
 Copy-Item C:\Users\dkmaster\udsrp-service.exe $bin -Force
 Copy-Item C:\Users\dkmaster\uds-rp-server-agent.exe $bin\server.exe -Force
+# The agent binds its UDP detection socket on an ephemeral port, so the
+# firewall must allow the binary itself, not just port 14433 (lesson of
+# 2026-11-03: moving the exe path silently broke UDP until the rule was
+# re-pointed).
+$fw = Get-NetFirewallRule -DisplayName 'udsrp-server-exe' -ErrorAction SilentlyContinue
+if ($fw) {
+    Set-NetFirewallRule -DisplayName 'udsrp-server-exe' -Program "$bin\server.exe"
+} else {
+    New-NetFirewallRule -DisplayName 'udsrp-server-exe' -Direction Inbound -Action Allow -Program "$bin\server.exe" | Out-Null
+}
 Start-Service UdsRpService
 Start-Sleep 2
 (Get-Service UdsRpService).Status
