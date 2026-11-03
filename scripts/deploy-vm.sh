@@ -36,7 +36,7 @@ if (Test-Path '$EXPORT_DIR') {
 New-Item -ItemType Directory -Force '$EXPORT_DIR' | Out-Null
 tar -xf C:\Users\builder\udsrp-master.tar -C '$EXPORT_DIR'
 New-Item -ItemType Directory -Force '$EXPORT_DIR\target-windows' | Out-Null
-docker run --rm -v ${EXPORT_DIR}:c:\crate -v ${EXPORT_DIR}\target-windows:c:\out -w /crate $IMAGE cargo build --release -p service -p server --features '$FEATURES'
+docker run --rm -v ${EXPORT_DIR}:c:\crate -v ${EXPORT_DIR}\target-windows:c:\out -w /crate $IMAGE cargo build --release -p service -p server -p udscredprov --features '$FEATURES'
 if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
 EOF
 
@@ -51,6 +51,26 @@ if ($svc.ImagePath -ne "$bin\udsrp-service.exe") {
 Stop-Service UdsRpService -Force
 Copy-Item C:\Users\dkmaster\udsrp-service.exe $bin -Force
 Copy-Item C:\Users\dkmaster\uds-rp-server-agent.exe $bin\server.exe -Force
+Copy-Item C:\Users\dkmaster\udscredprov.dll $bin -Force
+# The credential provider COM registration must point at the deployed DLL.
+# (Lesson of 2026-11-03: the registration was left pointing at the old
+# in-tree debug build; when that tree was cleaned, LogonUI silently stopped
+# loading the provider and auto-unlock died with no error anywhere.)
+$clsid = '{effe8c95-8e24-4d7f-bc4a-2c377479cf32}'
+$dllPath = "$bin\udscredprov.dll"
+$clsidKey = "HKLM:\SOFTWARE\Classes\CLSID\$clsid"
+New-Item -Force $clsidKey | Out-Null
+Set-ItemProperty $clsidKey -Name '(default)' -Value 'UDSRemoteProtocolCredentialProvider'
+$inproc = "$clsidKey\InprocServer32"
+New-Item -Force $inproc | Out-Null
+Set-ItemProperty $inproc -Name '(default)' -Value $dllPath
+Set-ItemProperty $inproc -Name 'ThreadingModel' -Value 'Apartment'
+$cpKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\$clsid"
+New-Item -Force $cpKey | Out-Null
+Set-ItemProperty $cpKey -Name '(default)' -Value 'UDSRemoteProtocolCredentialProvider'
+$fltKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Provider Filters\$clsid"
+New-Item -Force $fltKey | Out-Null
+Set-ItemProperty $fltKey -Name '(default)' -Value 'UDSRemoteProtocolCredentialProvider'
 # The agent binds its UDP detection socket on an ephemeral port, so the
 # firewall must allow the binary itself, not just port 14433 (lesson of
 # 2026-11-03: moving the exe path silently broke UDP until the rule was
@@ -75,9 +95,10 @@ ssh "$BUILDER" 'powershell -ExecutionPolicy Bypass -File C:\Users\builder\udsrp-
 echo "== 2/4 fetch binaries"
 scp -q "$BUILDER:C:/Users/builder/udsrp-export/target-windows/release/udsrp-service.exe" /tmp/udsrp-service.exe
 scp -q "$BUILDER:C:/Users/builder/udsrp-export/target-windows/release/server.exe" /tmp/uds-rp-server-agent.exe
+scp -q "$BUILDER:C:/Users/builder/udsrp-export/target-windows/release/udscredprov.dll" /tmp/udscredprov.dll
 
 echo "== 3/4 upload to $VM_HOST"
-scp -q /tmp/udsrp-service.exe /tmp/uds-rp-server-agent.exe "$VM_HOST:C:/Users/dkmaster/"
+scp -q /tmp/udsrp-service.exe /tmp/uds-rp-server-agent.exe /tmp/udscredprov.dll "$VM_HOST:C:/Users/dkmaster/"
 
 echo "== 4/4 swap binaries + restart"
 scp -q "$VM_PS1" "$VM_HOST:C:/Users/dkmaster/udsrp-install.ps1"
