@@ -64,9 +64,22 @@ fn watch_loop(tx: tokio::sync::mpsc::UnboundedSender<bool>, stop: Arc<AtomicBool
     let mut active = secure_desktop_active();
     let _ = tx.send(active);
     mirror_event(&event, active);
+    let mut ticks = 0u32;
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(POLL);
+        // Diagnosis (§18.52): a lock transition was missed while the capture
+        // thread kept seeing the secure desktop — find out whether the probe
+        // call blocks (and for how long) or quietly reports `false`.
+        let started = std::time::Instant::now();
         let now = secure_desktop_active();
+        let elapsed = started.elapsed();
+        if elapsed > Duration::from_millis(100) {
+            warn!(?elapsed, "secure-desktop probe call blocked");
+        }
+        ticks += 1;
+        if ticks % 40 == 0 {
+            info!(active, "secure-watch heartbeat");
+        }
         if now != active {
             info!(active = now, "secure-desktop transition");
             active = now;
