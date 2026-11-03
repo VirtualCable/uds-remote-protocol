@@ -221,7 +221,7 @@ impl DxgiSource {
         // duplication recreated inside it poisons the display stack
         // (§18.52.4). Spend the factory/device/duplication only once the
         // desktop has been continuously stable for a second.
-        info!("access lost; waiting for the desktop to stay stable for 1s before reinit");
+        tracing::debug!("access lost; waiting for the desktop to stay stable for 1s before reinit");
         let mut clear_since: Option<std::time::Instant> = None;
         loop {
             if self.stop_requested() {
@@ -239,7 +239,7 @@ impl DxgiSource {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        info!("desktop stable; proceeding with the storm reinit");
+        tracing::debug!("desktop stable; proceeding with the storm reinit");
         // Sleep in chunks so a shutdown request is honored promptly even
         // from inside the storm backoff.
         let mut remaining = self.storm_delay;
@@ -262,13 +262,15 @@ impl DxgiSource {
     /// secure desktop transition): `ACCESS_DENIED`/`E_ACCESSDENIED` or a
     /// transiently missing output. Dying on the first failure would kill
     /// the session on every topology change, so the reinit is retried with
-    /// backoff for up to [`REINIT_BUDGET`] before giving up. While the
-    /// lock-cycle wedge is being chased (§18.52.4) every attempt logs at
-    /// info, storm mode included; drop back to debug once stable.
+    /// backoff for up to [`REINIT_BUDGET`] before giving up. In `storm`
+    /// mode (caller already throttles) logging drops to `debug` to avoid
+    /// spamming per iteration.
     fn reinit(&mut self, storm: bool) -> anyhow::Result<()> {
-        // Lab diagnostics (§18.52.4): the storm path logs at info while we
-        // chase the lock-cycle wedge; drop to debug once stable.
-        info!(selector = ?self.selector, "DXGI access lost, reinitializing (storm={storm})");
+        if storm {
+            tracing::debug!(selector = ?self.selector, "DXGI access lost, reinitializing (storm)");
+        } else {
+            info!(selector = ?self.selector, "DXGI access lost, reinitializing");
+        }
         // Drop the old (invalidated) COM objects BEFORE creating the new
         // ones, duplication first: a duplication created while an invalidated
         // one is still alive in this process is invalidated instantly on the
@@ -297,10 +299,9 @@ impl DxgiSource {
                             "secure desktop active; the secure transition owns the restart",
                         ));
                     }
-                    // Lab diagnostics (§18.52.4): log every failed attempt
-                    // while chasing the lock-cycle wedge; back to attempt==1
-                    // once stable.
-                    info!(attempt, error = %format!("{e:#}"), "reinit not possible yet; retrying");
+                    if attempt == 1 {
+                        info!(error = %format!("{e:#}"), "reinit not possible yet; retrying");
+                    }
                     std::thread::sleep(REINIT_RETRY_DELAY);
                 }
                 Err(e) => {
@@ -837,9 +838,7 @@ fn init_duplication(selector: &OutputSelector, quiet: bool) -> anyhow::Result<Du
         dup_desc.ModeDesc.Format
     );
     if quiet {
-        // Lab diagnostics (§18.52.4): at info while the lock-cycle wedge is
-        // being chased; back to debug once stable.
-        info!(
+        tracing::debug!(
             adapter = %chosen.candidate.adapter,
             output = %chosen.candidate.name,
             "DXGI duplication ready (storm)"
