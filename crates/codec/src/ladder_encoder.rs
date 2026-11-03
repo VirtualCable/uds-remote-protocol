@@ -67,11 +67,11 @@ const BW_EMA_ALPHA: f64 = 0.2;
 /// ladder: `BW_UP_RATIO` × `vp9_kbps` → `up_threshold_pct`, linear.
 fn bw_pressure_pct(jpeg_bps_ema: Option<f64>, vp9_kbps: u32, up_threshold_pct: f64) -> f64 {
     let Some(bps) = jpeg_bps_ema else { return 0.0 };
-    let vp9_bps = f64::from(vp9_kbps) * 1000.0;
-    if vp9_bps <= 0.0 {
+    let vp9_rate_bps = f64::from(vp9_kbps) * 1000.0;
+    if vp9_rate_bps <= 0.0 {
         return 0.0;
     }
-    bps / (vp9_bps * BW_UP_RATIO) * up_threshold_pct
+    bps / (vp9_rate_bps * BW_UP_RATIO) * up_threshold_pct
 }
 
 impl LadderEncoder {

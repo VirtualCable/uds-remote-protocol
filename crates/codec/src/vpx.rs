@@ -19,6 +19,9 @@
 // idiomatic here; the values (ABI versions, flags, deadlines) are small
 // constants.
 #![allow(clippy::borrow_as_ptr, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+// Rate control scales the configured bitrate by a measured-fps factor; the
+// float→int casts involved are rounded and clamped to provably safe ranges.
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 // `c_long` is i64 on Linux but i32 on Windows: flag/deadline casts are
 // lossless on one target and sign-changing on the other by C ABI design.
 #![allow(clippy::cast_lossless)]
@@ -80,6 +83,36 @@ struct VpxEncoder {
     // Reusable scratch for the packed I420 image (no alloc per frame).
     img_buf: Vec<u8>,
     out: Vec<u8>,
+    /// Logical target bitrate requested by the caller (kbps).
+    target_kbps: u32,
+    /// EMA of the real encode rate (frames/s), seeded at the timebase fps.
+    fps_ema: f64,
+    /// Wall clock of the previous encode call (feeds `fps_ema`).
+    last_encode: Option<std::time::Instant>,
+    /// Scaled bitrate currently programmed into libvpx (kbps).
+    applied_kbps: u32,
+}
+
+/// Timebase fps configured in libvpx (`g_timebase.den`). The rate controller
+/// derives its per-frame budget as `rc_target_bitrate / TIMEBASE_FPS`, so
+/// when the real capture rate is lower the configured bitrate must be scaled
+/// up by `TIMEBASE_FPS / real_fps` or the stream undershoots the target
+/// (§18.48: at 30 fps timebase and 8 real fps, VP9 emitted ~¼ of target).
+const TIMEBASE_FPS: f64 = 30.0;
+
+/// EMA smoothing for the measured encode rate.
+const FPS_EMA_ALPHA: f64 = 0.1;
+
+/// Re-program the rate controller when the scaled bitrate drifts more than
+/// this factor from the applied one (avoids `enc_config_set` per frame).
+const RATE_REAPPLY_DRIFT: f64 = 0.15;
+
+/// Scales the logical target bitrate by `TIMEBASE_FPS / fps` so the
+/// per-frame budget of the rate controller matches the real capture rate
+/// (see `TIMEBASE_FPS`). Pure helper, unit-tested.
+fn scaled_kbps_for(target_kbps: u32, fps_ema: f64) -> u32 {
+    let scale = TIMEBASE_FPS / fps_ema.clamp(1.0, TIMEBASE_FPS * 2.0);
+    (f64::from(target_kbps) * scale).round().clamp(1.0, 100_000.0) as u32
 }
 
 impl VpxEncoder {
@@ -182,6 +215,10 @@ impl VpxEncoder {
                 codec,
                 img_buf: Vec::new(),
                 out: Vec::new(),
+                target_kbps: kbps,
+                fps_ema: TIMEBASE_FPS,
+                last_encode: None,
+                applied_kbps: kbps,
             })
         }
     }
@@ -212,7 +249,55 @@ impl VpxEncoder {
         }
     }
 
+    /// Bitrate scaled for the measured encode rate, clamped to a sane range
+    /// (the scale factor is bounded because `fps_ema` stays in 1..=60).
+    fn scaled_kbps(&self) -> u32 {
+        scaled_kbps_for(self.target_kbps, self.fps_ema)
+    }
+
+    /// Programs the scaled bitrate into libvpx when it changed.
+    fn apply_rate(&mut self) -> Result<()> {
+        let kbps = self.scaled_kbps();
+        if kbps == self.applied_kbps {
+            return Ok(());
+        }
+        self.cfg.rc_target_bitrate = kbps;
+        // SAFETY: ctx and cfg are consistent (cfg is the live config).
+        unsafe {
+            let e = sys::vpx_codec_enc_config_set(&mut self.ctx, &self.cfg);
+            if e != sys::vpx_codec_err_t_VPX_CODEC_OK {
+                return Err(ctx_err(&self.ctx, "vpx_codec_enc_config_set"));
+            }
+        }
+        self.applied_kbps = kbps;
+        Ok(())
+    }
+
+    /// Updates the real-encode-rate EMA and re-applies the scaled bitrate
+    /// when it drifted enough (cheap check per frame, `enc_config_set` only
+    /// on real changes).
+    fn track_rate(&mut self) -> Result<()> {
+        let now = std::time::Instant::now();
+        if let Some(last) = self.last_encode {
+            let dt = now.saturating_duration_since(last).as_secs_f64();
+            // Gaps above 2 s mean the stream was idle (or the ladder was on
+            // its other leg), not that the rate collapsed: skip the sample.
+            if dt > 0.0 && dt < 2.0 {
+                let sample = (1.0 / dt).clamp(1.0, 60.0);
+                self.fps_ema += FPS_EMA_ALPHA * (sample - self.fps_ema);
+            }
+        }
+        self.last_encode = Some(now);
+        let applied = f64::from(self.applied_kbps);
+        let desired = f64::from(self.scaled_kbps());
+        if (desired - applied).abs() > applied * RATE_REAPPLY_DRIFT {
+            self.apply_rate()?;
+        }
+        Ok(())
+    }
+
     fn encode_impl(&mut self, frame: &VideoFrame<'_>) -> Result<EncodedPacket> {
+        self.track_rate()?;
         let i420 = bgra_to_i420(frame)?;
         let img = self.wrap_image(&i420);
         let flags = if self.force_key {
@@ -283,15 +368,9 @@ impl VideoEncoder for VpxEncoder {
     }
 
     fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
-        self.cfg.rc_target_bitrate = kbps;
-        // SAFETY: ctx and cfg are consistent (cfg is the live config).
-        unsafe {
-            let e = sys::vpx_codec_enc_config_set(&mut self.ctx, &self.cfg);
-            if e != sys::vpx_codec_err_t_VPX_CODEC_OK {
-                return Err(ctx_err(&self.ctx, "vpx_codec_enc_config_set"));
-            }
-        }
-        Ok(())
+        self.target_kbps = kbps;
+        self.applied_kbps = 0; // force re-programming with the current scale
+        self.apply_rate()
     }
 
     fn codec_type(&self) -> VideoCodecType {
@@ -538,5 +617,37 @@ impl VideoDecoder for Vp8Decoder {
 
     fn codec_type(&self) -> VideoCodecType {
         self.0.codec_type()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TIMEBASE_FPS, scaled_kbps_for};
+
+    #[test]
+    fn scaled_kbps_matches_target_at_timebase_fps() {
+        assert_eq!(scaled_kbps_for(2000, TIMEBASE_FPS), 2000);
+    }
+
+    #[test]
+    fn scaled_kbps_grows_when_real_fps_drops() {
+        // The lab VM case: 8 real fps under a 30 fps timebase.
+        assert_eq!(scaled_kbps_for(2000, 8.0), 7500);
+        assert_eq!(scaled_kbps_for(500, 15.0), 1000);
+    }
+
+    #[test]
+    fn scaled_kbps_shrinks_above_timebase_fps() {
+        // Above-timebase rates scale down so the per-frame budget stays on
+        // target (fps_ema is capped at 60 → scale floor 0.5).
+        assert_eq!(scaled_kbps_for(2000, 60.0), 1000);
+        assert_eq!(scaled_kbps_for(2000, 45.0), 1333);
+    }
+
+    #[test]
+    fn scaled_kbps_is_bounded_at_zero_fps() {
+        // fps_ema clamps at 1: the scale caps at TIMEBASE_FPS ×.
+        assert_eq!(scaled_kbps_for(2000, 0.5), 60_000);
+        assert_eq!(scaled_kbps_for(10_000, 1.0), 100_000); // absolute cap
     }
 }
