@@ -82,15 +82,18 @@ pub struct LadderPolicy {
 impl LadderPolicy {
     /// "balanced" defaults from the §8.4 measurements, hardened after the
     /// first interactive runs: a minimize/restore burst (~0.3-0.5 s of hot
-    /// EMA) must never switch the regime. The up threshold sits near the
-    /// CPU-saver crossing (~25-30 % area) rather than the bandwidth one,
-    /// the holds double, the dwell doubles, and the slower EMA
-    /// (`ema_alpha` 0.05) absorbs single-frame spikes completely. All of it
-    /// stays configurable per session (`[standalone.ladder]`, `--ladder`).
+    /// EMA) must never switch the regime. The holds double, the dwell
+    /// doubles, and the slower EMA (`ema_alpha` 0.05) absorbs single-frame
+    /// spikes completely — bursts are filtered by time, not by the
+    /// threshold. The up threshold sits low (13 %): windowed video covers
+    /// ~15-25 % of the screen and must reach the video regime; the second
+    /// up-trigger (JPEG bandwidth pressure, see `LadderEncoder`) covers the
+    /// cases the area metric misses. All of it stays configurable per
+    /// session (`[standalone.ladder]`, `--ladder`).
     #[must_use]
     pub fn balanced() -> Self {
         Self {
-            up_threshold_pct: 18.0,
+            up_threshold_pct: 13.0,
             down_threshold_pct: 9.0,
             hold_up: Duration::from_secs(2),
             hold_down: Duration::from_secs(8),
@@ -141,6 +144,12 @@ impl Ladder {
     #[must_use]
     pub fn level(&self) -> Level {
         self.level
+    }
+
+    /// Policy in use (live reference for derived metrics).
+    #[must_use]
+    pub fn policy(&self) -> &LadderPolicy {
+        &self.policy
     }
 
     /// Current dynamic dwell (grows under oscillation, decays when stable).

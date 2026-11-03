@@ -45,6 +45,33 @@ pub struct LadderEncoder {
     pending_change: Option<VideoCodecType>,
     /// Force a full frame on the next encode (keyframe request or switch).
     force_full: bool,
+    /// VP9 target bitrate, reference for the bandwidth up-trigger.
+    vp9_kbps: u32,
+    /// EMA of the JPEG egress bit rate while in `Level::Low` (bits/s).
+    jpeg_bps_ema: Option<f64>,
+    /// Timestamp of the previous Low-level encode (for the bit-rate EMA).
+    last_low_encode: Option<Instant>,
+}
+
+/// JPEG egress above `BW_UP_RATIO` × the VP9 target maps to the ladder's up
+/// threshold (2× is the point where the video regime is plainly cheaper).
+/// The ratio is fixed for now; the area policy knobs stay configurable.
+const BW_UP_RATIO: f64 = 2.0;
+
+/// Smoothing for the JPEG bit-rate EMA. Reacts faster than the area EMA
+/// (0.05): the sample is already a rate over a frame interval, and traffic
+/// bursts are what this trigger exists to catch.
+const BW_EMA_ALPHA: f64 = 0.2;
+
+/// Maps the JPEG bit-rate EMA to an area-equivalent percentage for the
+/// ladder: `BW_UP_RATIO` × `vp9_kbps` → `up_threshold_pct`, linear.
+fn bw_pressure_pct(jpeg_bps_ema: Option<f64>, vp9_kbps: u32, up_threshold_pct: f64) -> f64 {
+    let Some(bps) = jpeg_bps_ema else { return 0.0 };
+    let vp9_bps = f64::from(vp9_kbps) * 1000.0;
+    if vp9_bps <= 0.0 {
+        return 0.0;
+    }
+    bps / (vp9_bps * BW_UP_RATIO) * up_threshold_pct
 }
 
 impl LadderEncoder {
@@ -90,6 +117,9 @@ impl LadderEncoder {
             prev: None,
             pending_change: None,
             force_full: false,
+            vp9_kbps,
+            jpeg_bps_ema: None,
+            last_low_encode: None,
         })
     }
 
@@ -156,7 +186,22 @@ impl VideoEncoder for LadderEncoder {
         let area_pct = 100.0 * dirty.iter().map(rects::Rect::area).sum::<i64>() as f64
             / (f64::from(self.width) * f64::from(self.height));
 
-        if let Some(switch) = self.ladder.update(Instant::now(), area_pct) {
+        // The ladder sees the worst of two pressures: changed area and JPEG
+        // bandwidth. A small window playing video changes little area but
+        // costs far more than the VP9 regime — the bandwidth term (only
+        // meaningful in Low, where egress is area-proportional) covers it.
+        // In High the down path stays area-only (hysteresis band).
+        let sample = if self.ladder.level() == Level::Low {
+            area_pct.max(bw_pressure_pct(
+                self.jpeg_bps_ema,
+                self.vp9_kbps,
+                self.ladder.policy().up_threshold_pct,
+            ))
+        } else {
+            area_pct
+        };
+
+        if let Some(switch) = self.ladder.update(Instant::now(), sample) {
             self.begin_level(switch.to);
             // The just-computed diff predates the switch; the new codec's
             // first frame is a full frame (keyframe).
@@ -175,6 +220,19 @@ impl VideoEncoder for LadderEncoder {
             // its rate control and reference chain must stay alive.
             Level::High => self.vp9.encode(frame)?,
         };
+        if self.ladder.level() == Level::Low {
+            let now = Instant::now();
+            if let Some(prev_t) = self.last_low_encode.replace(now) {
+                let dt = now.duration_since(prev_t).as_secs_f64();
+                if dt > 0.0 {
+                    let bps = packet.data.len() as f64 * 8.0 / dt;
+                    self.jpeg_bps_ema = Some(match self.jpeg_bps_ema {
+                        None => bps,
+                        Some(ema) => ema + BW_EMA_ALPHA * (bps - ema),
+                    });
+                }
+            }
+        }
         self.prev = Some(frame.data.to_vec());
         Ok(packet)
     }
@@ -212,6 +270,20 @@ mod tests {
     use super::*;
     use crate::{VideoDecoder, vpx::Vp9Decoder};
     use std::time::Duration;
+
+    #[test]
+    fn bw_pressure_maps_ratio_to_threshold() {
+        // No estimate yet, or a degenerate VP9 target: no pressure.
+        assert_eq!(bw_pressure_pct(None, 2000, 13.0), 0.0);
+        assert_eq!(bw_pressure_pct(Some(1e6), 0, 13.0), 0.0);
+        // Exactly BW_UP_RATIO × VP9 target → exactly the up threshold.
+        let at_ratio = 2.0 * 2_000_000.0;
+        let pct = bw_pressure_pct(Some(at_ratio), 2000, 13.0);
+        assert!((pct - 13.0).abs() < 1e-9);
+        // Linear: half the ratio → half the threshold.
+        let half = bw_pressure_pct(Some(at_ratio / 2.0), 2000, 13.0);
+        assert!((half - 6.5).abs() < 1e-9);
+    }
 
     fn policy() -> LadderPolicy {
         LadderPolicy {
