@@ -76,9 +76,14 @@ pub struct DxgiSource {
     /// input injector needs it to translate display-local pointer
     /// coordinates into virtual-desktop ones.
     output_device: String,
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    duplication: IDXGIOutputDuplication,
+    /// COM objects behind `Option` so `reinit` can drop the old (invalidated)
+    /// duplication BEFORE creating the new one: on the Basic Render Driver a
+    /// duplication created while an invalidated one is still alive in the
+    /// same process is itself invalidated instantly, wedging capture forever
+    /// (§18.52.4). Declared in drop order: duplication first, device last.
+    duplication: Option<IDXGIOutputDuplication>,
+    context: Option<ID3D11DeviceContext>,
+    device: Option<ID3D11Device>,
     width: u32,
     height: u32,
     /// Staging texture for the GPU-only path (created lazily): some display
@@ -137,9 +142,9 @@ impl DxgiSource {
         Ok(Self {
             selector: selector.clone(),
             output_device: dup.output_name,
-            device: dup.device,
-            context: dup.context,
-            duplication: dup.duplication,
+            duplication: Some(dup.duplication),
+            context: Some(dup.context),
+            device: Some(dup.device),
             width: dup.width,
             height: dup.height,
             staging: None,
@@ -163,6 +168,21 @@ impl DxgiSource {
         self.stop
             .as_ref()
             .is_some_and(|s| s.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// The live duplication (always `Some` outside `reinit`).
+    fn dup(&self) -> &IDXGIOutputDuplication {
+        self.duplication.as_ref().expect("duplication is alive")
+    }
+
+    /// The live D3D11 device (always `Some` outside `reinit`).
+    fn dev(&self) -> &ID3D11Device {
+        self.device.as_ref().expect("device is alive")
+    }
+
+    /// The live D3D11 context (always `Some` outside `reinit`).
+    fn ctx(&self) -> &ID3D11DeviceContext {
+        self.context.as_ref().expect("context is alive")
     }
 
     /// Handles `DXGI_ERROR_ACCESS_LOST` from `AcquireNextFrame`.
@@ -249,6 +269,15 @@ impl DxgiSource {
         // Lab diagnostics (§18.52.4): the storm path logs at info while we
         // chase the lock-cycle wedge; drop to debug once stable.
         info!(selector = ?self.selector, "DXGI access lost, reinitializing (storm={storm})");
+        // Drop the old (invalidated) COM objects BEFORE creating the new
+        // ones, duplication first: a duplication created while an invalidated
+        // one is still alive in this process is invalidated instantly on the
+        // Basic Render Driver, looping forever (§18.52.4). This overlap is
+        // also the most likely mechanism behind the original §18.52
+        // "poisoned display stack" observation.
+        self.duplication = None;
+        self.context = None;
+        self.device = None;
         let deadline = std::time::Instant::now() + REINIT_BUDGET;
         let mut attempt = 0u32;
         let dup = loop {
@@ -292,9 +321,9 @@ impl DxgiSource {
                 "desktop resolution changed"
             );
         }
-        self.device = dup.device;
-        self.context = dup.context;
-        self.duplication = dup.duplication;
+        self.duplication = Some(dup.duplication);
+        self.context = Some(dup.context);
+        self.device = Some(dup.device);
         self.width = dup.width;
         self.height = dup.height;
         self.staging = None;
@@ -320,8 +349,7 @@ impl FrameSource for DxgiSource {
         // SAFETY: `info` and `resource` are valid out-params; the duplication
         // object is alive for the whole call.
         let result = unsafe {
-            self.duplication
-                .AcquireNextFrame(timeout_ms, &mut info, &mut resource)
+            self.dup().AcquireNextFrame(timeout_ms, &mut info, &mut resource)
         };
         if let Err(e) = &result {
             if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
@@ -354,7 +382,7 @@ impl FrameSource for DxgiSource {
         let result = self.extract(&resource, &info);
         self.read_cursor(&info);
         // SAFETY: `resource` was acquired above and is released exactly once.
-        if let Err(e) = unsafe { self.duplication.ReleaseFrame() } {
+        if let Err(e) = unsafe { self.dup().ReleaseFrame() } {
             // The duplication died while the frame was held (a mode change
             // lands exactly here): the extracted frame is still valid, but
             // the duplication needs a rebuild before the next acquire —
@@ -411,14 +439,15 @@ impl DxgiSource {
             return;
         }
         self.shape_buf.resize(info.PointerShapeBufferSize as usize, 0);
+        let shape_ptr = self.shape_buf.as_mut_ptr();
         let mut shape_info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
         let mut needed = 0u32;
         // SAFETY: `shape_buf` is `PointerShapeBufferSize` bytes long and the
         // out-params are valid; the frame is still acquired.
         if let Err(e) = unsafe {
-            self.duplication.GetFramePointerShape(
+            self.dup().GetFramePointerShape(
                 info.PointerShapeBufferSize,
-                self.shape_buf.as_mut_ptr().cast(),
+                shape_ptr.cast(),
                 &mut needed,
                 &mut shape_info,
             )
@@ -552,7 +581,7 @@ impl DxgiSource {
             };
             let mut staging: Option<ID3D11Texture2D> = None;
             // SAFETY: `desc` is fully initialized; `staging` is a valid out-param.
-            unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut staging)) }
+            unsafe { self.dev().CreateTexture2D(&desc, None, Some(&mut staging)) }
                 .context("CreateTexture2D (staging) failed")?;
             self.staging = staging;
             info!("using staging-texture copy path (desktop image not mappable)");
@@ -560,14 +589,13 @@ impl DxgiSource {
         let staging = self.staging.as_ref().expect("staging created above");
 
         // SAFETY: both textures live for the whole call.
-        unsafe { self.context.CopyResource(staging, &texture) };
+        unsafe { self.ctx().CopyResource(staging, &texture) };
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         // SAFETY: `mapped` is a valid out-param; the staging texture is alive
         // and the returned pointer is used only until `Unmap`.
         unsafe {
-            self.context
-                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            self.ctx().Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
         .context("staging Map failed")?;
         let result = (|| {
@@ -580,7 +608,7 @@ impl DxgiSource {
             copy_bgra_rows(src, pitch, self.width, self.height, data)
         })();
         // SAFETY: the staging texture was mapped above and is unmapped once.
-        unsafe { self.context.Unmap(staging, 0) };
+        unsafe { self.ctx().Unmap(staging, 0) };
         result
     }
 
@@ -599,14 +627,15 @@ impl DxgiSource {
         }
         let count = info.TotalMetadataBufferSize as usize / size_of::<RECT>();
         self.dirty_buf.resize(count, RECT::default());
+        let dirty_ptr = self.dirty_buf.as_mut_ptr();
         let mut needed = 0u32;
         // SAFETY: `dirty_buf` holds `TotalMetadataBufferSize` bytes worth of
         // properly aligned `RECT`s, as the API requires; `needed` is a valid
         // out-param.
         unsafe {
-            self.duplication.GetFrameDirtyRects(
+            self.dup().GetFrameDirtyRects(
                 info.TotalMetadataBufferSize,
-                self.dirty_buf.as_mut_ptr(),
+                dirty_ptr,
                 &mut needed,
             )
         }
