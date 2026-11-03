@@ -40,6 +40,10 @@ pub trait InputInjector {
 pub fn dispatch(injector: &mut dyn InputInjector, msg: &InputMessage) {
     match *msg {
         InputMessage::Key { down, scancode, extended } => {
+            // LWin is rare enough to log at debug: diagnoses Win+L delivery.
+            if scancode == 0x5B && extended {
+                tracing::debug!(down, "LWin key event received");
+            }
             injector.key(down, scancode, extended);
         }
         InputMessage::PointerMove { display_id, x, y } => {

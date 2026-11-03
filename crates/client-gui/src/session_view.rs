@@ -250,6 +250,7 @@ impl SessionView {
             && self.pressed_keys.contains(&LALT)
         {
             self.swallowed_keys.insert(code);
+            debug!("Ctrl+Alt+L combo: sending remote Win+L");
             self.send_key(LWIN, true);
             self.send_key(KEY_L, true);
             self.send_key(KEY_L, false);
