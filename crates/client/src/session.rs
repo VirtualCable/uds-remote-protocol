@@ -582,6 +582,10 @@ impl Session {
             }
             Ok(ClientCommand::StorageAbort { transfer_id }) => core.storage.abort(transfer_id),
             Ok(ClientCommand::SmartcardEnable(on)) => core.set_smartcard(on),
+            Ok(ClientCommand::LockRemote) => {
+                info!("remote lock requested (Ctrl+Alt+L)");
+                stream.send(channel::CONTROL, &ControlMessage::LockRequest.encode()?).await?;
+            }
             Ok(ClientCommand::Close) => {
                 info!("close requested by the consumer");
                 return Ok(false);

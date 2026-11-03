@@ -232,17 +232,17 @@ impl SessionView {
     /// Forwards a key press/release to the remote and tracks the held set.
     /// AltGr (RAlt) is paired with an owned LCtrl (see `altgr` module).
     ///
-    /// Ctrl+Alt+L synthesizes Win+L remotely (lock the session): the local
-    /// OS grabs Win+L at Winlogon level before any application can see it,
-    /// so the substitute combo is the only way to send it. Left Alt is
-    /// required so AltGr (LCtrl+RAlt on Windows) never collides with real
-    /// typing — AltGr+L is ł on Polish layouts, for instance.
+    /// Ctrl+Alt+L asks the server to lock the remote session (§18.50): the
+    /// local OS grabs Win+L at Winlogon level before any application can
+    /// see it, and an injected Win+L keysym does not trigger the lock on
+    /// the far end either (lab-confirmed), so the combo travels as an
+    /// explicit `LockRequest` control message instead of synthetic keys.
+    /// Left Alt is required so AltGr (LCtrl+RAlt on Windows) never collides
+    /// with real typing — AltGr+L is ł on Polish layouts, for instance.
     pub fn handle_key(&mut self, code: KeyCode, down: bool) {
         const LCTRL: (u16, bool) = (0x1D, false);
         const RCTRL: (u16, bool) = (0x1D, true);
         const LALT: (u16, bool) = (0x38, false);
-        const LWIN: (u16, bool) = (0x5B, true);
-        const KEY_L: (u16, bool) = (0x26, false);
         if down
             && code == KeyCode::KeyL
             && !self.swallowed_keys.contains(&code)
@@ -250,11 +250,8 @@ impl SessionView {
             && self.pressed_keys.contains(&LALT)
         {
             self.swallowed_keys.insert(code);
-            debug!("Ctrl+Alt+L combo: sending remote Win+L");
-            self.send_key(LWIN, true);
-            self.send_key(KEY_L, true);
-            self.send_key(KEY_L, false);
-            self.send_key(LWIN, false);
+            debug!("Ctrl+Alt+L combo: requesting remote lock");
+            let _ = self.commands.try_send(ClientCommand::LockRemote);
             return;
         }
         if self.swallowed_keys.contains(&code) {

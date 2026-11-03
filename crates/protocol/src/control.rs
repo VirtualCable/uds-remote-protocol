@@ -165,6 +165,15 @@ pub enum ControlMessage {
         /// True while a secure desktop owns the console.
         active: bool,
     },
+    /// Session lock request, client → server (§18.50): the user asked to
+    /// lock the remote session (Ctrl+Alt+L substitute for Win+L, which the
+    /// local OS always intercepts). The server locks its own console via the
+    /// OS API (`LockWorkStation` on Windows) — injecting the Win+L keysym is
+    /// unreliable by design (the shell treats the synthesized hotkey as
+    /// untrusted), so the request travels as an explicit control message.
+    /// Appended at the end so existing postcard variant indices do not
+    /// shift.
+    LockRequest,
 }
 
 impl ControlMessage {

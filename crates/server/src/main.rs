@@ -2392,9 +2392,30 @@ fn handle_stream_packet(
             info!(width, height, "desktop resize requested by client (§18.37)");
             ctl.resize_request = Some((width, height));
         }
+        Ok(ControlMessage::LockRequest) => {
+            info!("lock requested by client (§18.50)");
+            lock_workstation();
+        }
         Ok(_) => {} // other control messages: not handled here yet
         Err(e) => warn!("undecodable control message: {e}"),
     }
+}
+
+/// Locks the console session on a client `LockRequest` (§18.50): the OS
+/// API is the only reliable trigger — synthesized Win+L key events do not
+/// lock (lab-confirmed; the shell treats injected hotkeys as untrusted).
+#[cfg(all(windows, feature = "windows-capture"))]
+fn lock_workstation() {
+    // SAFETY: no preconditions; locks the caller's own workstation.
+    if let Err(e) = unsafe { windows::Win32::System::Shutdown::LockWorkStation() } {
+        warn!("LockWorkStation failed: {e}");
+    }
+}
+
+/// Non-Windows placeholder (Linux/macOS locking lands with their ports).
+#[cfg(not(all(windows, feature = "windows-capture")))]
+fn lock_workstation() {
+    warn!("lock request ignored: unsupported on this platform");
 }
 
 /// Announces the display codec/geometry on the control channel (§8.3/§8.4);
