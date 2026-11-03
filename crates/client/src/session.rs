@@ -456,13 +456,15 @@ impl Session {
         snap: &crate::stats::StatsSnapshot,
     ) {
         let now = Instant::now();
-        let Some((prev_presented, prev_at)) = prev.replace((snap.presented, now)) else {
+        let Some((prev_presented, prev_at)) = *prev else {
+            *prev = Some((snap.presented, now));
             return;
         };
         let dt = now.duration_since(prev_at).as_secs_f64();
         if dt >= 4.0 {
             #[expect(clippy::cast_precision_loss, reason = "frame deltas fit an f64")]
             let fps = (snap.presented - prev_presented) as f64 / dt;
+            *prev = Some((snap.presented, now));
             tracing::info!(
                 fps = format_args!("{fps:.1}"),
                 rtt_ms = snap.rtt_ms,
