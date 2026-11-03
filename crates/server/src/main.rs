@@ -2349,6 +2349,11 @@ fn handle_stream_packet(
         // SYSTEM injector mode (§18.42): forward the raw wire message to
         // the injector on the Default desktop (reaches elevated windows).
         if let Some(pipe) = &ctl.injector_input {
+            // Diagnose Win+L delivery: the injector process keeps no log, so
+            // the agent logs LWin on its behalf (§18.50).
+            if buf.len() == 4 && buf[0] == 1 && buf[1] & 2 != 0 && buf[2..4] == [0, 0x5B] {
+                info!(down = buf[1] & 1 != 0, "LWin forwarded to the SYSTEM injector");
+            }
             let mut slot = pipe.lock().expect("injector input pipe");
             if slot.is_some() {
                 if let Some(f) = slot.as_mut()
