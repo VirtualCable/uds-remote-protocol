@@ -331,7 +331,24 @@ impl FrameSource for DxgiSource {
             tracing::debug!("ReleaseFrame failed ({e:#}); reinitializing the duplication");
             self.on_access_lost()?;
         }
-        result.map(Some)
+        match result {
+            Ok(frame) => Ok(Some(frame)),
+            Err(e) => {
+                // A desktop switch can land mid-extract (lab: lock bursts make
+                // `GetFrameDirtyRects` fail right after a rebuild, §18.52.4):
+                // the frame is unusable but the fix is the same rebuild as
+                // ACCESS_LOST, not a dead capture thread.
+                let code = e.downcast_ref::<windows::core::Error>().map(|w| w.code());
+                if code == Some(DXGI_ERROR_ACCESS_LOST) || code == Some(DXGI_ERROR_INVALID_CALL) {
+                    tracing::warn!(
+                        "frame extract failed with {code:?} mid-transition; rebuilding the duplication"
+                    );
+                    self.on_access_lost()?;
+                    return Ok(None);
+                }
+                Err(e)
+            }
+        }
     }
 
     fn take_cursor_update(&mut self) -> Option<CursorUpdate> {
