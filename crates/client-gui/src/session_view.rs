@@ -232,25 +232,31 @@ impl SessionView {
     /// Forwards a key press/release to the remote and tracks the held set.
     /// AltGr (RAlt) is paired with an owned LCtrl (see `altgr` module).
     ///
-    /// Ctrl+Alt+L asks the server to lock the remote session (§18.50): the
-    /// local OS grabs Win+L at Winlogon level before any application can
+    /// Ctrl+Alt+Shift+L asks the server to lock the remote session (§18.50):
+    /// the local OS grabs Win+L at Winlogon level before any application can
     /// see it, and an injected Win+L keysym does not trigger the lock on
     /// the far end either (lab-confirmed), so the combo travels as an
     /// explicit `LockRequest` control message instead of synthetic keys.
-    /// Left Alt is required so AltGr (LCtrl+RAlt on Windows) never collides
-    /// with real typing — AltGr+L is ł on Polish layouts, for instance.
+    /// Plain Ctrl+Alt+L is registered as a GLOBAL hotkey by vendor overlays
+    /// (AMD Adrenalin; lab-confirmed it never reaches our window), so the
+    /// combo carries Shift. Left Alt is required so AltGr (LCtrl+RAlt on
+    /// Windows) never collides with real typing — AltGr+L is ł on Polish
+    /// layouts, for instance.
     pub fn handle_key(&mut self, code: KeyCode, down: bool) {
         const LCTRL: (u16, bool) = (0x1D, false);
         const RCTRL: (u16, bool) = (0x1D, true);
         const LALT: (u16, bool) = (0x38, false);
+        const LSHIFT: (u16, bool) = (0x2A, false);
+        const RSHIFT: (u16, bool) = (0x36, false);
         if down
             && code == KeyCode::KeyL
             && !self.swallowed_keys.contains(&code)
             && (self.pressed_keys.contains(&LCTRL) || self.pressed_keys.contains(&RCTRL))
             && self.pressed_keys.contains(&LALT)
+            && (self.pressed_keys.contains(&LSHIFT) || self.pressed_keys.contains(&RSHIFT))
         {
             self.swallowed_keys.insert(code);
-            debug!("Ctrl+Alt+L combo: requesting remote lock");
+            debug!("Ctrl+Alt+Shift+L combo: requesting remote lock");
             let _ = self.commands.try_send(ClientCommand::LockRemote);
             return;
         }

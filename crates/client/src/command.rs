@@ -79,7 +79,7 @@ pub enum ClientCommand {
     /// afterwards does not change what the server believes.
     SmartcardEnable(bool),
     /// Asks the server to lock the remote session (§18.50): the GUI maps
-    /// Ctrl+Alt+L to this because Win+L is always grabbed by the local OS.
+    /// Ctrl+Alt+Shift+L to this because Win+L is always grabbed by the local OS.
     LockRemote,
 }
 
