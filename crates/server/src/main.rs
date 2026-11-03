@@ -1686,17 +1686,63 @@ async fn serve_stream<T: ReliableTransport>(
     let mut frame_rx: Option<mpsc::Receiver<CaptureMsg>> = None;
     let mut frame_handle: Option<std::thread::JoinHandle<()>> = None;
     let mut capture_stop: Option<Arc<AtomicBool>> = None;
-    start_capture(
-        args,
-        &fps_shared,
-        clock_start,
-        &mut frame_rx,
-        &mut frame_handle,
-        &mut capture_stop,
-    );
-    let ready = match recv_capture(&mut frame_rx).await {
-        Some(CaptureMsg::Ready(r)) => r?,
-        other => bail!("capture thread ended before reporting readiness ({other:?})"),
+    // Secure desktop watch (§18.41): spawned BEFORE capture starts so its
+    // initial state reaches both us and the service's secure-event mirror
+    // even when the console is already locked at connect time (the service
+    // spawns the helper on that event). Only real desktop capture needs
+    // this; the synthetic source never does.
+    #[cfg(all(windows, feature = "windows-capture"))]
+    let (_secure_watch, mut secure_rx) = if args.source == "dxgi" {
+        let (watch, rx) = server::secure_watch::SecureWatch::spawn();
+        (Some(watch), Some(rx))
+    } else {
+        (None, None)
+    };
+    #[cfg(not(all(windows, feature = "windows-capture")))]
+    let mut secure_rx: Option<tokio::sync::mpsc::UnboundedReceiver<bool>> = None;
+    // Secure-first startup (§18.52): when the console is already locked (or
+    // on any secure desktop) at connect time, DXGI duplication is denied and
+    // the init retry loop would die before the secure branch exists. Go
+    // straight to the helper pipes; when the desktop returns to Default the
+    // secure branch resumes the console capture.
+    #[cfg(all(windows, feature = "windows-capture"))]
+    let starts_secure = args.source == "dxgi" && server::secure_helper::secure_desktop_active();
+    #[cfg(not(all(windows, feature = "windows-capture")))]
+    let starts_secure = false;
+    let mut secure_state: Option<SecureState> = None;
+    if starts_secure {
+        info!("secure desktop already active at connect; starting on the helper");
+        legs.send_control(&ControlMessage::SecureDesktop { active: true }.encode()?)
+            .await?;
+        let session_id = server::secure_pipe::own_session_id().unwrap_or(0);
+        let (rx, state) = spawn_secure_pipes(session_id, clock_start);
+        frame_rx = Some(rx);
+        secure_state = Some(state);
+    } else {
+        start_capture(
+            args,
+            &fps_shared,
+            clock_start,
+            &mut frame_rx,
+            &mut frame_handle,
+            &mut capture_stop,
+        );
+    }
+    // Both capture paths report Ready before the first frame. The helper
+    // only appears once the service sees the watcher's secure event, so give
+    // that chain a bounded wait instead of hanging forever when no service
+    // orchestrates us (manual dev runs).
+    let ready = if starts_secure {
+        match tokio::time::timeout(Duration::from_secs(15), recv_capture(&mut frame_rx)).await {
+            Ok(Some(CaptureMsg::Ready(r))) => r?,
+            Ok(other) => bail!("capture thread ended before reporting readiness ({other:?})"),
+            Err(_) => bail!("secure helper did not appear within 15s (is the service running?)"),
+        }
+    } else {
+        match recv_capture(&mut frame_rx).await {
+            Some(CaptureMsg::Ready(r)) => r?,
+            other => bail!("capture thread ended before reporting readiness ({other:?})"),
+        }
     };
     let (mut width, mut height) = (ready.width, ready.height);
     let mut encoder = build_encoder(args, width, height)?;
@@ -1800,7 +1846,9 @@ async fn serve_stream<T: ReliableTransport>(
         },
         last_metrics: None,
         resize_request: None,
-        secure_input: None,
+        secure_input: secure_state
+            .as_ref()
+            .map(|s| std::sync::Arc::clone(&s.input)),
         // §18.42: the pipe acceptor waits for the service-spawned SYSTEM
         // injector; in manual/dev runs nobody connects and input stays local.
         injector_input: Some(spawn_injector_pipe(
@@ -1832,20 +1880,6 @@ async fn serve_stream<T: ReliableTransport>(
     // waiting for the 1 s liveness tick added up to a second of dead time
     // to every mode change for no reason (§18.37).
     let mut resize_tick = tokio::time::interval(Duration::from_millis(100));
-    // Secure desktop watch (§18.41): while UAC/Winlogon/lock owns the
-    // console, DXGI capture is denied and SendInput cannot reach it, so
-    // capture+input switch to the service-spawned helper over pipes. Only
-    // real desktop capture needs this; the synthetic source never does.
-    #[cfg(all(windows, feature = "windows-capture"))]
-    let (_secure_watch, mut secure_rx) = if args.source == "dxgi" {
-        let (watch, rx) = server::secure_watch::SecureWatch::spawn();
-        (Some(watch), Some(rx))
-    } else {
-        (None, None)
-    };
-    #[cfg(not(all(windows, feature = "windows-capture")))]
-    let mut secure_rx: Option<tokio::sync::mpsc::UnboundedReceiver<bool>> = None;
-    let mut secure_state: Option<SecureState> = None;
     loop {
         tokio::select! {
             msg = recv_capture(&mut frame_rx) => {
