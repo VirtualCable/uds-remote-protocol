@@ -51,6 +51,10 @@ pub struct SessionView {
     /// Keys currently held down, as (scancode, extended), so they can all be
     /// released when the window loses focus (otherwise they stick remotely).
     pressed_keys: std::collections::HashSet<(u16, bool)>,
+    /// Keys that fired a substitute-combo action (Ctrl+Alt+L → Win+L): their
+    /// press was consumed locally, so their repeats and release must not be
+    /// forwarded either.
+    swallowed_keys: std::collections::HashSet<KeyCode>,
     /// AltGr↔Ctrl pairing state (Windows' fake LCtrl events are unreliable).
     altgr: crate::altgr::AltGr,
 }
@@ -98,6 +102,7 @@ impl SessionView {
             show_stats: false,
             secure: false,
             pressed_keys: std::collections::HashSet::new(),
+            swallowed_keys: std::collections::HashSet::new(),
             altgr: crate::altgr::AltGr::default(),
         }
     }
@@ -226,8 +231,38 @@ impl SessionView {
 
     /// Forwards a key press/release to the remote and tracks the held set.
     /// AltGr (RAlt) is paired with an owned LCtrl (see `altgr` module).
+    ///
+    /// Ctrl+Alt+L synthesizes Win+L remotely (lock the session): the local
+    /// OS grabs Win+L at Winlogon level before any application can see it,
+    /// so the substitute combo is the only way to send it. Left Alt is
+    /// required so AltGr (LCtrl+RAlt on Windows) never collides with real
+    /// typing — AltGr+L is ł on Polish layouts, for instance.
     pub fn handle_key(&mut self, code: KeyCode, down: bool) {
         const LCTRL: (u16, bool) = (0x1D, false);
+        const RCTRL: (u16, bool) = (0x1D, true);
+        const LALT: (u16, bool) = (0x38, false);
+        const LWIN: (u16, bool) = (0x5B, true);
+        const KEY_L: (u16, bool) = (0x26, false);
+        if down
+            && code == KeyCode::KeyL
+            && !self.swallowed_keys.contains(&code)
+            && (self.pressed_keys.contains(&LCTRL) || self.pressed_keys.contains(&RCTRL))
+            && self.pressed_keys.contains(&LALT)
+        {
+            self.swallowed_keys.insert(code);
+            self.send_key(LWIN, true);
+            self.send_key(KEY_L, true);
+            self.send_key(KEY_L, false);
+            self.send_key(LWIN, false);
+            return;
+        }
+        if self.swallowed_keys.contains(&code) {
+            // Swallow the auto-repeats and the release of a combo key.
+            if !down {
+                self.swallowed_keys.remove(&code);
+            }
+            return;
+        }
         match (code, down) {
             (KeyCode::ControlLeft, true) => self.altgr.ctrl_down(std::time::Instant::now()),
             (KeyCode::ControlLeft, false) => self.altgr.ctrl_up(),
@@ -262,6 +297,7 @@ impl SessionView {
     /// key-up events will never reach us and the keys would stick remotely).
     pub fn release_all_keys(&mut self) {
         self.altgr.reset();
+        self.swallowed_keys.clear();
         for (scancode, extended) in self.pressed_keys.drain() {
             let _ = self.commands.try_send(ClientCommand::Input(InputMessage::Key {
                 down: false,
