@@ -183,7 +183,11 @@ impl DxgiSource {
         // poisons this process's display stack on the Basic Render Driver
         // (every later duplication is invalidated, §18.52), so bail fast and
         // let the capture-thread grace window hand over to the helper.
-        if crate::secure_helper::secure_desktop_active() {
+        // The lock curtain is NOT a secure desktop (§18.52.3): gate on the
+        // WTS lock state too, or a lock cycle recreates duplications while
+        // the console is still switching (§18.52.4).
+        if crate::secure_helper::secure_desktop_active() || crate::secure_helper::console_locked()
+        {
             anyhow::bail!("access lost to a secure desktop; the secure transition owns the restart");
         }
         let since_healthy = self.last_healthy.elapsed();

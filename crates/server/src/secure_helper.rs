@@ -69,6 +69,44 @@ pub fn secure_desktop_active() -> bool {
     name != "Default"
 }
 
+/// True while the console session shows the lock screen (WTS SessionFlags:
+/// 0 = locked, 1 = unlocked). The lock curtain runs on the DEFAULT desktop
+/// (§18.52.3), so `secure_desktop_active` alone cannot gate a capture
+/// resume: recreating a duplication mid-lock poisons the display stack on
+/// the Basic Render Driver (§18.52.4).
+#[cfg(all(windows, feature = "windows-capture"))]
+pub fn console_locked() -> bool {
+    use windows::Win32::System::RemoteDesktop::{
+        WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
+        WTS_CURRENT_SESSION,
+    };
+    let mut buf = windows::core::PWSTR::null();
+    let mut bytes = 0u32;
+    // SAFETY: valid out-params; on success the buffer is freed below.
+    let queried = unsafe {
+        WTSQuerySessionInformationW(
+            None,
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &raw mut buf,
+            &raw mut bytes,
+        )
+    };
+    if queried.is_err() || buf.is_null() {
+        // On doubt, assume unlocked: capture errors carry their own
+        // recovery path.
+        return false;
+    }
+    // SAFETY: on success the buffer holds a WTSINFOEXW; Level 1 carries the
+    // LEVEL1 union arm with the lock flag.
+    unsafe {
+        let info = buf.0 as *const WTSINFOEXW;
+        let locked = (*info).Level == 1 && (*info).Data.WTSInfoExLevel1.SessionFlags == 0;
+        WTSFreeMemory(buf.0.cast());
+        locked
+    }
+}
+
 /// Captures the calling process's desktop via GDI into 32-bpp BGRA pixels
 /// (top-down rows). Used by the secure helper (born on the Winlogon desktop)
 /// and by the lab probe (after `SetThreadDesktop`).

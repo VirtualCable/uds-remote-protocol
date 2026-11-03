@@ -580,8 +580,14 @@ fn spawn_capture(
                         // it clears. When the session loop DOES see it, it
                         // owns the restart and stops this thread via the stop
                         // flag (the helper covers the secure desktop then).
+                        // The lock curtain is NOT a secure desktop (§18.52.3),
+                        // so also wait out the WTS lock state: recreating a
+                        // duplication mid-lock poisons the display stack on
+                        // the Basic Render Driver (§18.52.4).
                         while !stop_thread.load(Ordering::Relaxed) && !tx.is_closed() {
-                            if !server::secure_helper::secure_desktop_active() {
+                            if !server::secure_helper::secure_desktop_active()
+                                && !server::secure_helper::console_locked()
+                            {
                                 break;
                             }
                             std::thread::sleep(Duration::from_millis(50));
