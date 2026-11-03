@@ -561,6 +561,22 @@ fn spawn_capture(
                 }
                 Ok(None) => {} // no desktop damage this window
                 Err(e) => {
+                    // DXGI dies the instant a secure desktop (lock, UAC,
+                    // Winlogon) takes the console — usually BEFORE the
+                    // watcher's transition reaches the session loop, where a
+                    // dead capture channel with no secure switch pending is
+                    // fatal (§18.41, §18.52). Wait out a short grace: if a
+                    // secure desktop now owns the console, idle until the
+                    // stop flag (the secure branch stops/restarts capture
+                    // properly); otherwise the failure is real — die.
+                    #[cfg(all(windows, feature = "windows-capture"))]
+                    if secure_grace_wait(&stop_thread) {
+                        info!("capture lost to a secure desktop; idling until the transition ({e:#})");
+                        while !stop_thread.load(Ordering::Relaxed) && !tx.is_closed() {
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        return;
+                    }
                     warn!("capture failed: {e:#}");
                     return;
                 }
@@ -576,6 +592,24 @@ fn spawn_capture(
         }
     });
     (rx, handle, stop)
+}
+
+/// Grace window after a capture failure (§18.52): polls for a secure
+/// desktop owning the console — the usual reason DXGI dies mid-session —
+/// for up to two seconds, honouring the stop flag. `true` means the failure
+/// is the secure-desktop transition, not a real capture error.
+#[cfg(all(windows, feature = "windows-capture"))]
+fn secure_grace_wait(stop: &Arc<AtomicBool>) -> bool {
+    for _ in 0..40 {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        if server::secure_helper::secure_desktop_active() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
 }
 
 /// Stops the capture thread: the stop flag breaks any internal retry loop
