@@ -66,7 +66,7 @@ use transport::{
     DirectListener, EncryptedDatagram, EncryptedStream, ReliableTransport, UdpTransport,
     udp_offer,
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 struct Args {
     bind: SocketAddr,
@@ -1844,6 +1844,7 @@ async fn serve_stream<T: ReliableTransport>(
         quality: None,
         forced_video: false,
         last_keyframe_req: None,
+        last_lock_req: None,
         injector: new_injector(),
         video_ceiling_kbps: args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS),
         audio_ceiling_kbps,
@@ -2340,6 +2341,9 @@ struct ControlState {
     forced_video: bool,
     /// Keyframe requests are rate-limited server-side too (riesgos §2.1).
     last_keyframe_req: Option<Instant>,
+    /// Lock requests are rate-limited: a burst of them storms the console
+    /// through lock/SAS/unlock cycles (§18.52.4).
+    last_lock_req: Option<Instant>,
     /// Platform input injector (SendInput on Windows, log elsewhere).
     injector: Box<dyn server::input::InputInjector>,
     /// SYSTEM injector pipe (§18.42): when filled, normal input is forwarded
@@ -2476,8 +2480,16 @@ fn handle_stream_packet(
             ctl.resize_request = Some((width, height));
         }
         Ok(ControlMessage::LockRequest) => {
-            info!("lock requested by client (§18.50)");
-            lock_workstation();
+            // Rate-limit (§18.52.4): each lock triggers a full
+            // lock → SAS → credential-provider → unlock cycle plus a DXGI
+            // rebuild; a burst of them kills the session.
+            if ctl.last_lock_req.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
+                info!("lock requested by client (§18.50)");
+                lock_workstation();
+                ctl.last_lock_req = Some(Instant::now());
+            } else {
+                debug!("lock request throttled (cycle still settling)");
+            }
         }
         Ok(_) => {} // other control messages: not handled here yet
         Err(e) => warn!("undecodable control message: {e}"),

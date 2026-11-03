@@ -29,8 +29,9 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
-    IDXGIResource, IDXGISurface, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_WAIT_TIMEOUT,
-    DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    IDXGIResource, IDXGISurface, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_INVALID_CALL,
+    DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_FRAME_INFO,
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO,
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
 };
@@ -298,6 +299,16 @@ impl FrameSource for DxgiSource {
                 return Ok(None);
             }
             if e.code() == DXGI_ERROR_ACCESS_LOST {
+                self.on_access_lost()?;
+                return Ok(None);
+            }
+            if e.code() == DXGI_ERROR_INVALID_CALL {
+                // Rapid secure-desktop round-trips (lock bursts, §18.52.4)
+                // leave the duplication in a state where the next acquire
+                // reports INVALID_CALL instead of ACCESS_LOST. The recovery
+                // is the same rebuild, so route it through the access-lost
+                // path instead of killing the capture thread and session.
+                tracing::warn!("AcquireNextFrame: INVALID_CALL; rebuilding the duplication");
                 self.on_access_lost()?;
                 return Ok(None);
             }
