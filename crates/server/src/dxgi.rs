@@ -176,6 +176,15 @@ impl DxgiSource {
     /// forever (seen live: returning from a UAC prompt blinded the session
     /// permanently). Broken off entirely after [`STORM_BREAKER`].
     fn on_access_lost(&mut self) -> anyhow::Result<()> {
+        // A secure desktop (lock, UAC, Winlogon) invalidates the duplication,
+        // and the secure branch of the session loop owns the restart once
+        // the transition settles. Re-creating duplications mid-transition
+        // poisons this process's display stack on the Basic Render Driver
+        // (every later duplication is invalidated, §18.52), so bail fast and
+        // let the capture-thread grace window hand over to the helper.
+        if crate::secure_helper::secure_desktop_active() {
+            anyhow::bail!("access lost to a secure desktop; the secure transition owns the restart");
+        }
         let since_healthy = self.last_healthy.elapsed();
         anyhow::ensure!(
             since_healthy < STORM_BREAKER,
@@ -223,6 +232,15 @@ impl DxgiSource {
             match init_duplication(&self.selector, storm) {
                 Ok(dup) => break dup,
                 Err(e) if std::time::Instant::now() < deadline => {
+                    // The desktop may have gone secure AFTER the access-lost
+                    // that brought us here (the switch lags the invalidation
+                    // by a few ms): stop retrying and hand over, same as the
+                    // up-front check in `on_access_lost` (§18.52).
+                    if crate::secure_helper::secure_desktop_active() {
+                        return Err(e.context(
+                            "secure desktop active; the secure transition owns the restart",
+                        ));
+                    }
                     if attempt == 1 {
                         info!(error = %format!("{e:#}"), "reinit not possible yet; retrying");
                     }
