@@ -28,8 +28,12 @@ VM_PS1=/tmp/udsrp-install.ps1
 
 cat > "$BUILD_PS1" <<EOF
 \$ErrorActionPreference = 'Stop'
-if (Test-Path '$EXPORT_DIR') { Remove-Item -Recurse -Force '$EXPORT_DIR' }
-New-Item -ItemType Directory '$EXPORT_DIR' | Out-Null
+# Keep target-windows (the cargo cache mounted as c:\out): only the sources
+# are refreshed, so rebuilds are incremental.
+if (Test-Path '$EXPORT_DIR') {
+    Get-ChildItem '$EXPORT_DIR' -Exclude 'target-windows' | Remove-Item -Recurse -Force
+}
+New-Item -ItemType Directory -Force '$EXPORT_DIR' | Out-Null
 tar -xf C:\Users\builder\udsrp-master.tar -C '$EXPORT_DIR'
 New-Item -ItemType Directory -Force '$EXPORT_DIR\target-windows' | Out-Null
 docker run --rm -v ${EXPORT_DIR}:c:\crate -v ${EXPORT_DIR}\target-windows:c:\out -w /crate $IMAGE cargo build --release -p service -p server --features '$FEATURES'
