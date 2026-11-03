@@ -206,6 +206,7 @@ impl Session {
         let mut last_recv = Instant::now();
         let mut present_tick = tokio::time::interval(PRESENT_TICK);
         let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut prev_fps_stats: Option<(u64, Instant)> = None;
         loop {
             tokio::select! {
                 res = stream.recv_into(&mut buf) => {
@@ -252,7 +253,9 @@ impl Session {
                     Self::flush_out(&mut stream, core).await?;
                 }
                 _ = stats_tick.tick() => {
-                    if !emit(&core.events, ClientEvent::Stats(core.stats.snapshot())) {
+                    let snap = core.stats.snapshot();
+                    Self::log_present_fps(&mut prev_fps_stats, &snap);
+                    if !emit(&core.events, ClientEvent::Stats(snap)) {
                         return Ok(());
                     }
                 }
@@ -305,6 +308,7 @@ impl Session {
         let mut prev_received = 0u64;
         let mut present_tick = tokio::time::interval(PRESENT_TICK);
         let mut stats_tick = tokio::time::interval(Duration::from_secs(1));
+        let mut prev_fps_stats: Option<(u64, Instant)> = None;
         let mut liveness_tick = tokio::time::interval(Duration::from_secs(1));
         let mut last_recv = Instant::now();
         loop {
@@ -434,11 +438,43 @@ impl Session {
                     Self::flush_out(&mut stream, core).await?;
                 }
                 _ = stats_tick.tick() => {
-                    if !emit(&core.events, ClientEvent::Stats(core.stats.snapshot())) {
+                    let snap = core.stats.snapshot();
+                    Self::log_present_fps(&mut prev_fps_stats, &snap);
+                    if !emit(&core.events, ClientEvent::Stats(snap)) {
                         return Ok(());
                     }
                 }
             }
+        }
+    }
+
+    /// Logs the presentation rate every ~5 s of stats ticks. The F3 overlay
+    /// shows the same numbers live; the log carries them for offline
+    /// analysis (fps deltas of the cumulative `presented` counter).
+    fn log_present_fps(
+        prev: &mut Option<(u64, Instant)>,
+        snap: &crate::stats::StatsSnapshot,
+    ) {
+        let now = Instant::now();
+        let Some((prev_presented, prev_at)) = prev.replace((snap.presented, now)) else {
+            return;
+        };
+        let dt = now.duration_since(prev_at).as_secs_f64();
+        if dt >= 4.0 {
+            #[expect(clippy::cast_precision_loss, reason = "frame deltas fit an f64")]
+            let fps = (snap.presented - prev_presented) as f64 / dt;
+            tracing::info!(
+                fps = format_args!("{fps:.1}"),
+                rtt_ms = snap.rtt_ms,
+                loss_permille = snap.loss_permille,
+                udp = snap.udp,
+                queue = snap.present_queue_len,
+                held = snap.held,
+                dropped_overflow = snap.dropped_overflow,
+                dropped_stale = snap.dropped_stale,
+                kf_req = snap.keyframe_requests,
+                "client presentation rate"
+            );
         }
     }
 
