@@ -581,21 +581,31 @@ fn spawn_capture(
                         // owns the restart and stops this thread via the stop
                         // flag (the helper covers the secure desktop then).
                         // The lock curtain is NOT a secure desktop (§18.52.3),
-                        // so also wait out the WTS lock state: recreating a
-                        // duplication mid-lock poisons the display stack on
-                        // the Basic Render Driver (§18.52.4).
+                        // so also wait out the WTS lock state. And both gates
+                        // have a flip window (~500 ms between LockWorkStation
+                        // and the flags moving) where neither sees the
+                        // transition: recreating a duplication inside it
+                        // poisons the display stack (§18.52.4). Resume only
+                        // after the desktop has been continuously stable for
+                        // a second.
+                        let mut clear_since: Option<Instant> = None;
                         while !stop_thread.load(Ordering::Relaxed) && !tx.is_closed() {
-                            if !server::secure_helper::secure_desktop_active()
-                                && !server::secure_helper::console_locked()
+                            if server::secure_helper::secure_desktop_active()
+                                || server::secure_helper::console_locked()
                             {
-                                break;
+                                clear_since = None;
+                            } else {
+                                let since = clear_since.get_or_insert_with(Instant::now);
+                                if since.elapsed() >= Duration::from_secs(1) {
+                                    break;
+                                }
                             }
                             std::thread::sleep(Duration::from_millis(50));
                         }
                         if stop_thread.load(Ordering::Relaxed) || tx.is_closed() {
                             return;
                         }
-                        info!("secure window passed; resuming capture");
+                        info!("desktop stable again; resuming capture");
                         continue;
                     }
                     warn!("capture failed: {e:#}");

@@ -196,6 +196,28 @@ impl DxgiSource {
             "the output has invalidated every new desktop duplication for {STORM_BREAKER:?}; \
              the display stack looks poisoned — giving up instead of spinning"
         );
+        // Both gates above have a flip window (~500 ms between a lock request
+        // and the WTS flags moving) where neither sees the transition, and a
+        // duplication recreated inside it poisons the display stack
+        // (§18.52.4). Spend the factory/device/duplication only once the
+        // desktop has been continuously stable for a second.
+        let mut clear_since: Option<std::time::Instant> = None;
+        loop {
+            if self.stop_requested() {
+                anyhow::bail!("capture shutdown requested; abandoning the stability wait");
+            }
+            if crate::secure_helper::secure_desktop_active()
+                || crate::secure_helper::console_locked()
+            {
+                clear_since = None;
+            } else {
+                let since = clear_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= Duration::from_secs(1) {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
         // Sleep in chunks so a shutdown request is honored promptly even
         // from inside the storm backoff.
         let mut remaining = self.storm_delay;
