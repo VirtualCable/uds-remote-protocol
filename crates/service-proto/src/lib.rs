@@ -22,6 +22,9 @@
 //!          u16   ladder tuning overrides ("k=v,..."; empty = defaults)
 //!          u16   adaptive-fps overrides ("k=v,..."; empty = disabled)
 //!          u16   stats CSV path (empty = telemetry to the log only)
+//!          u32   fixed resolution width  (0 = approach the client's mode)
+//!          u32   fixed resolution height
+//!          u8    flags (bit0 = allow_lock: client may lock the console)
 //!          u8    handoff flag (0 = none, 1 = handoff block follows)
 //!          [u64  send_seq | u64 recv_seq |
 //!           u16 hello_len + Hello bytes |
@@ -32,7 +35,7 @@
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 6;
+pub const AGENT_CONFIG_VERSION: u8 = 7;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -47,8 +50,8 @@ pub const MAX_STRING_LEN: usize = 256;
 pub const MAX_SOCKET_INFO_LEN: usize = 4096;
 
 /// Minimum frame size: version + key + ticket + the u16 string lengths
-/// (all strings empty) + the handoff flag.
-const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 6 * 2 + 1;
+/// (all strings empty) + fixed resolution + flags + the handoff flag.
+const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 6 * 2 + 8 + 1 + 1;
 
 /// Offset where the length-prefixed string fields start.
 const STRINGS_OFF: usize = 1 + KEY_LEN + TICKET_LEN;
@@ -94,6 +97,9 @@ pub struct AgentConfig {
     /// Server-fixed console resolution (§18.37); `(0, 0)` means the agent
     /// approaches the client's preferred mode instead.
     pub fixed_resolution: (u32, u32),
+    /// `true` lets the client lock the remote console (`LockRequest`);
+    /// server-side policy is mandatory — the client cannot override it.
+    pub allow_lock: bool,
     /// Validated-connection handoff: when present, the agent must not bind
     /// its own listener; it rebuilds the connected socket and continues the
     /// stream from these seqs.
@@ -156,6 +162,7 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
     }
     out.extend_from_slice(&config.fixed_resolution.0.to_le_bytes());
     out.extend_from_slice(&config.fixed_resolution.1.to_le_bytes());
+    out.push(u8::from(config.allow_lock));
     match &config.handoff {
         None => out.push(0),
         Some(h) => {
@@ -200,14 +207,15 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         *slot = core::str::from_utf8(&rest[..len]).map_err(|_| DecodeError::BadUtf8)?;
         rest = &rest[len..];
     }
-    if rest.len() < 9 {
+    if rest.len() < 10 {
         return Err(DecodeError::Truncated);
     }
     let fixed_resolution = (
         u32::from_le_bytes(rest[..4].try_into().expect("4-byte slice")),
         u32::from_le_bytes(rest[4..8].try_into().expect("4-byte slice")),
     );
-    rest = &rest[8..];
+    let allow_lock = rest[8] & 1 != 0;
+    rest = &rest[9..];
     let handoff = match rest[0] {
         0 => {
             if rest.len() != 1 {
@@ -260,6 +268,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         fps_adapt: fps_adapt.to_owned(),
         stats_csv: stats_csv.to_owned(),
         fixed_resolution,
+        allow_lock,
         handoff,
     })
 }
@@ -279,6 +288,7 @@ mod tests {
             fps_adapt: "min_fps=8".to_owned(),
             stats_csv: String::new(),
             fixed_resolution: (1280, 720),
+            allow_lock: true,
             handoff: None,
         }
     }

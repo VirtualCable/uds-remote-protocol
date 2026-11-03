@@ -50,6 +50,9 @@ pub struct StandaloneRuntime {
     /// Server-fixed console resolution (§18.37); `None` lets the agent
     /// approach the client's preferred mode.
     pub fixed_resolution: Option<(u32, u32)>,
+    /// The client may ask to lock the remote console (`[standalone.channels]
+    /// lock`); off by default, server-side mandatory.
+    pub allow_lock: bool,
 }
 
 /// Active connection mode for the service.
@@ -168,5 +171,6 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
                 let (w, h) = resolution.split_once(['x', 'X'])?;
                 Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
             }),
+        allow_lock: standalone.channels.lock,
     })
 }

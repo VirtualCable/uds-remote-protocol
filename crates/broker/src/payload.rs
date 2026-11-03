@@ -98,6 +98,8 @@ pub struct ChannelPolicy {
     pub webcam: bool,
     /// Printer redirection (future, §21).
     pub printer: bool,
+    /// The client may ask to lock the remote console (`LockRequest`).
+    pub lock: bool,
 }
 
 impl Default for ChannelPolicy {
@@ -109,6 +111,7 @@ impl Default for ChannelPolicy {
             smartcard: false,
             webcam: false,
             printer: false,
+            lock: false,
         }
     }
 }

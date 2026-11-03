@@ -933,6 +933,7 @@ pub(crate) fn watch_loop(
         fps_adapt: String::new(),
         stats_csv: String::new(),
         fixed_resolution: (0, 0),
+        allow_lock: false,
         handoff: None,
     };
 

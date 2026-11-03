@@ -260,6 +260,7 @@ async fn handle_connection(
             fps_adapt: standalone.fps_adapt.clone(),
             stats_csv: standalone.stats_csv.clone(),
             fixed_resolution: standalone.fixed_resolution.unwrap_or((0, 0)),
+            allow_lock: standalone.allow_lock,
             handoff: Some(service_proto::HandoffInfo {
                 send_seq: seqs.send,
                 recv_seq: seqs.recv,
@@ -293,6 +294,9 @@ async fn handle_connection(
                     .and_then(|grant| grant.display.as_ref())
                     .filter(|display| display.fixed)
                     .map_or((0, 0), |display| (display.width, display.height)),
+                // Server-side mandatory policy: the ticket payload decides
+                // whether the client may lock the remote console.
+                allow_lock: grant.as_ref().is_some_and(|grant| grant.channels.lock),
                 handoff: Some(service_proto::HandoffInfo {
                     send_seq: seqs.send,
                     recv_seq: seqs.recv,

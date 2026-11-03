@@ -284,6 +284,10 @@ pub struct ChannelSwitches {
     pub storage: bool,
     /// Virtual smart card reader bridge.
     pub smartcard: bool,
+    /// The client may ask to lock the remote console (`LockRequest`).
+    /// Server-side policy is mandatory: off means the request is rejected
+    /// no matter what the client sends.
+    pub lock: bool,
 }
 
 impl Default for StandaloneConfig {
@@ -304,6 +308,7 @@ impl Default for StandaloneConfig {
                 clipboard: true,
                 storage: false,
                 smartcard: false,
+                lock: false,
             },
             ladder: LadderTuning::default(),
             adaptive_fps: None,

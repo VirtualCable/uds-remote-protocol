@@ -11,7 +11,7 @@
 //!                 [--preset NAME] [--bitrate KBPS]
 //!                 [--width N] [--height N] [--fps N] [--max-frames N]
 //!                 [--audio-preset NAME] [--audio-source auto|synthetic|uds-loopback|wasapi]
-//!                 [--no-audio] [--mic-sink null|wav:PATH]`
+//!                 [--no-audio] [--mic-sink null|wav:PATH] [--allow-lock]`
 //!
 //! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`,
 //! `vp8-low-latency`); VP8/VP9 presets require the crate features
@@ -96,6 +96,9 @@ struct Args {
     spool: Option<std::path::PathBuf>,
     /// Per-session telemetry CSV (§12.8); `None` keeps telemetry log-only.
     stats_csv: Option<std::path::PathBuf>,
+    /// The client may ask to lock the remote console (`--allow-lock`,
+    /// `[standalone.channels] lock`, or the broker ticket payload).
+    allow_lock: bool,
     /// Validated-connection handoff from the orchestrator service (§18.32):
     /// when set, the agent does not bind its own TCP listener; it rebuilds
     /// the connected socket and serves exactly one session, then exits.
@@ -125,6 +128,7 @@ fn parse_args() -> Result<Args> {
         mic_sink: "null".to_string(),
         spool: None,
         stats_csv: None,
+        allow_lock: false,
         handoff: None,
     };
     let mut key_seen = false;
@@ -166,6 +170,7 @@ fn parse_args() -> Result<Args> {
             if !config.stats_csv.is_empty() {
                 args.stats_csv = Some(config.stats_csv.into());
             }
+            args.allow_lock = config.allow_lock;
             args.handoff = config.handoff;
             args.source = "dxgi".to_string();
             key_seen = true;
@@ -173,6 +178,10 @@ fn parse_args() -> Result<Args> {
         }
         if arg == "--no-audio" {
             args.audio = false;
+            continue;
+        }
+        if arg == "--allow-lock" {
+            args.allow_lock = true;
             continue;
         }
         let value = it.next().context(format!("missing value for {arg}"))?;
@@ -270,6 +279,7 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
             .unwrap_or_default();
         args.stats_csv = standalone.stats_csv.as_ref().map(std::path::PathBuf::from);
         args.audio = standalone.channels.audio;
+        args.allow_lock = standalone.channels.lock;
         info!("standalone mode: fixed ticket active (reference implementation)");
     }
     Ok(true)
@@ -1865,6 +1875,7 @@ async fn serve_stream<T: ReliableTransport>(
         forced_video: false,
         last_keyframe_req: None,
         last_lock_req: None,
+        allow_lock: args.allow_lock,
         injector: new_injector(),
         video_ceiling_kbps: args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS),
         audio_ceiling_kbps,
@@ -2401,6 +2412,9 @@ struct ControlState {
     /// Lock requests are rate-limited: a burst of them storms the console
     /// through lock/SAS/unlock cycles (§18.52.4).
     last_lock_req: Option<Instant>,
+    /// Server-side mandatory policy: the client may only lock the remote
+    /// console when the session config allows it.
+    allow_lock: bool,
     /// Platform input injector (SendInput on Windows, log elsewhere).
     injector: Box<dyn server::input::InputInjector>,
     /// SYSTEM injector pipe (§18.42): when filled, normal input is forwarded
@@ -2537,10 +2551,14 @@ fn handle_stream_packet(
             ctl.resize_request = Some((width, height));
         }
         Ok(ControlMessage::LockRequest) => {
-            // Rate-limit (§18.52.4): each lock triggers a full
-            // lock → SAS → credential-provider → unlock cycle plus a DXGI
-            // rebuild; a burst of them kills the session.
-            if ctl.last_lock_req.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
+            if !ctl.allow_lock {
+                // Server-side policy is mandatory: the client cannot enable
+                // locking on its own.
+                info!("lock request rejected by server policy (allow_lock off)");
+            } else if ctl.last_lock_req.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
+                // Rate-limit (§18.52.4): each lock triggers a full
+                // lock → SAS → credential-provider → unlock cycle plus a DXGI
+                // rebuild; a burst of them kills the session.
                 info!("lock requested by client (§18.50)");
                 lock_workstation();
                 ctl.last_lock_req = Some(Instant::now());
