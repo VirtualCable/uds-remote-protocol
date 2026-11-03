@@ -1020,20 +1020,45 @@ fn watch_with_listener(
     let secure_event = ensure_secure_event();
     let mut helper: Option<(u32, OwnedHandle)> = None;
     let mut unlock_armed = false;
+    let mut sas_sent = 0u32;
     while !stop.load(Ordering::Relaxed) {
         slot.clear_if_dead();
         slot.kill_if_unhealthy();
         if let Some(event) = &secure_event {
             let secure = secure_event_set(event);
             supervise_secure_helper(event, &mut helper);
-            // Auto-unlock (§18.41): on the rising edge of a LOCKED console
-            // (a UAC prompt is not a lock), re-arm the credential provider
-            // so the session unlocks by itself while we hold its creds.
-            if secure && !unlock_armed {
-                unlock_armed = true;
-                maybe_arm_auto_unlock(&creds_slot);
-            } else if !secure {
+            // Auto-unlock (§18.41/§18.52): on a LOCKED console (a UAC prompt
+            // is not a lock), re-arm the credential provider so the session
+            // unlocks by itself while we hold its creds, and nudge LogonUI
+            // with a synthetic SAS: with CAD enabled the lock curtain never
+            // evaluates credential providers until one arrives. The SAS is
+            // sent at most twice per lock episode — once the prompt is up,
+            // re-sending would only reset the password field under a typing
+            // user.
+            if secure {
+                let session_id = unsafe { WTSGetActiveConsoleSessionId() };
+                let locked =
+                    session_id != 0xFFFF_FFFF && console_session_locked(session_id);
+                if locked {
+                    if !unlock_armed {
+                        unlock_armed = true;
+                        maybe_arm_auto_unlock(&creds_slot);
+                    }
+                    if sas_sent < 2 {
+                        match crate::sas::send_sas() {
+                            Ok(()) => {
+                                info!("console locked; synthetic SAS sent to reach the credential prompt")
+                            }
+                            Err(err) => {
+                                warn!(error = %format!("{err:#}"), "cannot send the synthetic SAS")
+                            }
+                        }
+                        sas_sent += 1;
+                    }
+                }
+            } else {
                 unlock_armed = false;
+                sas_sent = 0;
             }
         }
         // Lab trigger (§18.41): one secure-desktop probe per flag file.
