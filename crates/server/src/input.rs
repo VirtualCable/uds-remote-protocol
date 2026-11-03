@@ -40,9 +40,10 @@ pub trait InputInjector {
 pub fn dispatch(injector: &mut dyn InputInjector, msg: &InputMessage) {
     match *msg {
         InputMessage::Key { down, scancode, extended } => {
-            // LWin is rare enough to log at debug: diagnoses Win+L delivery.
+            // LWin is rare enough to log at info: diagnoses Win+L delivery
+            // (the agent log runs at info level by default).
             if scancode == 0x5B && extended {
-                tracing::debug!(down, "LWin key event received");
+                tracing::info!(down, "LWin key event received");
             }
             injector.key(down, scancode, extended);
         }
