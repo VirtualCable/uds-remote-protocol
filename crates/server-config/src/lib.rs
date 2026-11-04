@@ -108,6 +108,39 @@ impl Default for BrokerConfig {
     }
 }
 
+/// Console-conflict policy (§18.53): what the service does when the console
+/// session belongs to a user other than the one in the session credentials.
+/// Server-side mandatory — the client never decides on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleConflictPolicy {
+    /// Evict the console owner and let the new session in (VDI default: the
+    /// ticket IS the authorization; the console is an assigned resource,
+    /// not a possession).
+    #[default]
+    TakeOver,
+    /// Reject the connection (`SessionEnd` reason `CONSOLE_BUSY`).
+    Deny,
+    /// Ask the CONNECTING client whether to take over; timeout → deny.
+    Ask,
+}
+
+/// How a console takeover evicts the previous owner (§18.53).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TakeoverMode {
+    /// `WTSDisconnectSession`: the evicted session survives disconnected,
+    /// keeping its apps (default, least destructive).
+    #[default]
+    Disconnect,
+    /// `WTSLogoffSession`: the evicted session is logged off, killing its
+    /// apps. Only on explicit request.
+    Logoff,
+}
+
+/// Default ask timeout for the console-conflict exchange (§18.53).
+pub const DEFAULT_CONFLICT_TIMEOUT_SECS: u64 = 30;
+
 /// Fixed-ticket session definition (reference mode, see module docs).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -152,6 +185,17 @@ pub struct StandaloneConfig {
     pub adaptive_fps: Option<AdaptiveFpsTuning>,
     /// Per-session telemetry CSV path; `None` keeps telemetry log-only.
     pub stats_csv: Option<String>,
+    /// Console-conflict policy (§18.53): another user owns the console.
+    pub console_conflict: ConsoleConflictPolicy,
+    /// Whether the `ask` conflict message may reveal the console owner's
+    /// name to the connecting client (privacy; off by default).
+    pub console_conflict_reveal_user: bool,
+    /// Ask timeout in seconds; without an explicit answer the connection is
+    /// denied (fail-closed).
+    pub console_conflict_timeout_secs: u64,
+    /// How a takeover evicts the console owner (disconnect keeps their
+    /// apps; logoff kills them).
+    pub console_takeover: TakeoverMode,
 }
 
 /// Adaptive-fps tuning overrides (§12.7). Every key is optional; only the
@@ -319,6 +363,10 @@ impl Default for StandaloneConfig {
             ladder: LadderTuning::default(),
             adaptive_fps: None,
             stats_csv: None,
+            console_conflict: ConsoleConflictPolicy::default(),
+            console_conflict_reveal_user: false,
+            console_conflict_timeout_secs: DEFAULT_CONFLICT_TIMEOUT_SECS,
+            console_takeover: TakeoverMode::default(),
         }
     }
 }

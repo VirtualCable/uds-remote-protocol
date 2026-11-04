@@ -11,6 +11,8 @@
 #[cfg(windows)]
 mod agent;
 #[cfg(windows)]
+mod console;
+#[cfg(windows)]
 mod credprov;
 #[cfg(windows)]
 mod install;

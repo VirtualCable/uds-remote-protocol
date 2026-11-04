@@ -73,6 +73,9 @@ struct Args {
     /// Smartcard redirection (§17): `--smartcard` offers the channel in
     /// the HELLO and runs the request dispatcher against the local PC/SC.
     smartcard: bool,
+    /// Console-conflict answer (§18.53): `--on-conflict take-over|deny`
+    /// (default take-over, the consumer default).
+    on_conflict_take_over: bool,
 }
 
 /// One scripted input action for `--selftest-input`.
@@ -125,6 +128,8 @@ impl SelfTest {
     }
 }
 
+// One arm per flag; the CLI surface is the structure.
+#[allow(clippy::too_many_lines)]
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         addr: "127.0.0.1:19790".parse().expect("valid default"),
@@ -146,6 +151,7 @@ fn parse_args() -> Result<Args> {
         storage_list: false,
         selftest_resize: None,
         smartcard: false,
+        on_conflict_take_over: true,
     };
     let mut key_seen = false;
     let mut ticket_seen = false;
@@ -217,6 +223,13 @@ fn parse_args() -> Result<Args> {
             }
             "--upload" => args.upload = Some(value.into()),
             "--download" => args.download = Some(value),
+            "--on-conflict" => {
+                args.on_conflict_take_over = match value.as_str() {
+                    "take-over" => true,
+                    "deny" => false,
+                    other => bail!("bad --on-conflict value: {other} (take-over|deny)"),
+                };
+            }
             other => bail!("unknown argument: {other}"),
         }
     }
@@ -782,6 +795,8 @@ async fn run() -> Result<()> {
         .then_some(storage_at);
     let mut transfers_in_flight = 0u32;
     let transfers_requested = u32::from(args.upload.is_some()) + u32::from(args.download.is_some());
+    // §18.53: fixed conflict answer from `--on-conflict` (default take-over).
+    let on_conflict_take_over = args.on_conflict_take_over;
     let mut frames = 0u64;
     let start = Instant::now();
     let mut close_sent = false;
@@ -867,6 +882,12 @@ async fn run() -> Result<()> {
                     }
                     ClientEvent::SecureDesktop { active } => {
                         info!(active, "UDSRP-SECURE-DESKTOP");
+                    }
+                    ClientEvent::ConsoleConflict { user, state } => {
+                        info!(?user, state, take_over = on_conflict_take_over, "UDSRP-CONSOLE-CONFLICT");
+                        let _ = commands.try_send(ClientCommand::AnswerConflict {
+                            take_over: on_conflict_take_over,
+                        });
                     }
                     ClientEvent::Error(e) => warn!("session error: {e}"),
                     ClientEvent::Disconnected => {

@@ -67,6 +67,10 @@ impl StandaloneProvider {
             }),
             channels,
             wallpaper_off: standalone.wallpaper_off,
+            console_conflict: standalone.console_conflict,
+            console_conflict_reveal_user: standalone.console_conflict_reveal_user,
+            console_conflict_timeout_secs: standalone.console_conflict_timeout_secs,
+            console_takeover: standalone.console_takeover,
             notify: None,
         };
         Ok(Self {

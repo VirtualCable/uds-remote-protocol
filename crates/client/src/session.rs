@@ -19,14 +19,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use codec::{EncodedPacket, VideoCodecType, VideoDecoder};
 use protocol::fragment::Reassembler;
 use protocol::{self, ControlMessage, CursorMessage, channel};
 use tracing::{debug, info, warn};
 use transport::{
     Connector, DirectConnector, EncryptedStream, ReliableTransport, Target, UdpLeg, UdpTransport,
-    udp_detect,
+    udp_detect, udp_probe,
 };
 
 use crate::audio::{AudioClient, AudioSpec};
@@ -50,6 +50,18 @@ const SERVER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(7);
 /// Fragments of one frame leave the server back-to-back, so 250 ms covers
 /// even heavy reordering; the sweep runs on the presentation tick.
 const REASM_STALE_AGE: Duration = Duration::from_millis(250);
+
+/// Pre-session gate budget (§18.53): covers the worst-case server-side
+/// conflict ask (~30 s) plus console eviction and autologon (~60 s) before
+/// the `SessionReady`/`UdpOffer` arrives. The normal path answers in one
+/// round-trip.
+const PRE_SESSION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long the pre-session gate waits for the consumer's
+/// `AnswerConflict` after emitting `ClientEvent::ConsoleConflict` — always
+/// shorter than the server's ask timeout (default 30 s) so the reply can
+/// still reach it. Without an answer the gate denies (fail-closed).
+const CONFLICT_ANSWER_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// Presentation-queue pump cadence (§9.1): held frames are presented when
 /// the audio clock reaches their timestamp.
@@ -155,16 +167,38 @@ impl Session {
 
         let clock_start = Instant::now();
         let clock = || micros_since(clock_start);
-        let leg = udp_detect(
-            &mut stream,
-            self.config.addr.ip(),
-            &self.config.ticket,
-            &self.config.key,
-            clock,
-            3,
-            Duration::from_millis(500),
-        )
-        .await?;
+        // §18.53 pre-session gate: the orchestrator service resolves the
+        // console-conflict policy before handing off to the agent. We wait
+        // for its `SessionReady` (or an early `UdpOffer` from a lab agent,
+        // which doubles as the ready signal), answering conflict asks.
+        let early_offer = self.pre_session(&mut stream).await?;
+        let leg = match early_offer {
+            Some((port, token)) => {
+                udp_probe(
+                    self.config.addr.ip(),
+                    &self.config.ticket,
+                    &self.config.key,
+                    port,
+                    token,
+                    clock,
+                    3,
+                    Duration::from_millis(500),
+                )
+                .await?
+            }
+            None => {
+                udp_detect(
+                    &mut stream,
+                    self.config.addr.ip(),
+                    &self.config.ticket,
+                    &self.config.key,
+                    clock,
+                    3,
+                    Duration::from_millis(500),
+                )
+                .await?
+            }
+        };
         if let Some(leg) = &leg {
             info!(rtt_micros = leg.initial_rtt_micros, "display leg: UDP");
         } else {
@@ -184,6 +218,97 @@ impl Session {
         match leg {
             Some(leg) => self.udp_loop(leg, stream, clock_start, &mut core).await,
             None => self.tcp_loop(stream, clock_start, &mut core).await,
+        }
+    }
+
+    /// §18.53 pre-session gate, run right after the handshake: waits for
+    /// the service's `SessionReady` (or an early `UdpOffer` from a lab
+    /// agent, returned for the caller to probe) and answers
+    /// console-conflict asks via the consumer's `AnswerConflict` command.
+    /// A `SessionEnd` refusal surfaces as a visible error and ends the
+    /// session before any pipeline starts.
+    async fn pre_session(
+        &mut self,
+        stream: &mut EncryptedStream<Box<dyn ReliableTransport>>,
+    ) -> Result<Option<(u16, [u8; 16])>> {
+        let deadline = Instant::now() + PRE_SESSION_TIMEOUT;
+        let mut buf = [0u8; 2048];
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            anyhow::ensure!(!remaining.is_zero(), "pre-session gate timed out");
+            let (ch, n) = tokio::time::timeout(remaining, stream.recv_into(&mut buf))
+                .await
+                .context("pre-session gate timed out")??;
+            if ch != channel::CONTROL {
+                continue;
+            }
+            match ControlMessage::decode(&buf[..n]) {
+                Ok(ControlMessage::SessionReady) => return Ok(None),
+                Ok(ControlMessage::UdpOffer { port, token }) => {
+                    // Lab agent (no service): the offer doubles as ready.
+                    return Ok(Some((port, token)));
+                }
+                Ok(ControlMessage::SessionEnd { reason }) => {
+                    let text = match reason {
+                        protocol::SESSION_END_CONSOLE_BUSY => {
+                            "the remote console is busy (owned by another user)".to_string()
+                        }
+                        protocol::SESSION_END_DENIED_BY_USER => {
+                            "console takeover refused".to_string()
+                        }
+                        other => format!("session refused by the server (reason {other})"),
+                    };
+                    let _ = emit(&self.events, ClientEvent::Error(text.clone()));
+                    anyhow::bail!("{text}");
+                }
+                Ok(ControlMessage::ConsoleConflict { user, state }) => {
+                    let take_over = self.answer_conflict(user, state).await;
+                    let reply = ControlMessage::ConsoleConflictReply { take_over };
+                    stream.send(channel::CONTROL, &reply.encode()?).await?;
+                    if !take_over {
+                        info!("console takeover denied; waiting for the server to close");
+                    }
+                }
+                // Anything else is not part of the pre-session vocabulary.
+                _ => {}
+            }
+        }
+    }
+
+    /// Emits the conflict query and waits for the consumer's
+    /// `AnswerConflict` command. Fail-closed: timeout, a disconnected
+    /// command channel or an undeliverable query event all deny the
+    /// takeover.
+    async fn answer_conflict(
+        &mut self,
+        user: Option<String>,
+        state: u8,
+    ) -> bool {
+        info!(revealed = user.is_some(), state, "console conflict; asking the consumer");
+        if !emit(&self.events, ClientEvent::ConsoleConflict { user, state }) {
+            return false;
+        }
+        let deadline = Instant::now() + CONFLICT_ANSWER_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                warn!("no AnswerConflict within {CONFLICT_ANSWER_TIMEOUT:?}; denying the takeover");
+                return false;
+            }
+            match tokio::time::timeout(remaining, self.command_rx.recv_async()).await {
+                Ok(Ok(ClientCommand::AnswerConflict { take_over })) => return take_over,
+                Ok(Ok(other)) => {
+                    debug!(?other, "command ignored while waiting for AnswerConflict");
+                }
+                Ok(Err(_)) => {
+                    warn!("command channel closed during the conflict ask; denying");
+                    return false;
+                }
+                Err(_) => {
+                    warn!("no AnswerConflict within {CONFLICT_ANSWER_TIMEOUT:?}; denying the takeover");
+                    return false;
+                }
+            }
         }
     }
 
@@ -585,6 +710,10 @@ impl Session {
             Ok(ClientCommand::LockRemote) => {
                 info!("remote lock requested (Ctrl+Alt+Shift+L)");
                 stream.send(channel::CONTROL, &ControlMessage::LockRequest.encode()?).await?;
+            }
+            Ok(ClientCommand::AnswerConflict { .. }) => {
+                // Only meaningful during the pre-session gate (§18.53).
+                debug!("AnswerConflict arrived mid-session; ignored");
             }
             Ok(ClientCommand::Close) => {
                 info!("close requested by the consumer");

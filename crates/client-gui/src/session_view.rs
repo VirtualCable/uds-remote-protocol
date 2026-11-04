@@ -9,7 +9,7 @@
 
 use client::{ClientCommand, ClientEvent, CommandSender, Displays, Rect, StatsSnapshot};
 use protocol::InputMessage;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use winit::event::{MouseButton, MouseScrollDelta};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -205,6 +205,14 @@ impl SessionView {
                 }
                 ClientEvent::SecureDesktop { active } => {
                     self.secure = active;
+                }
+                ClientEvent::ConsoleConflict { user, state } => {
+                    // §18.53: default consumer answer is take-over (the
+                    // ticket IS the authorization). A future dialog can ask
+                    // the local user; for now we answer immediately.
+                    info!(?user, state, "console conflict; answering take-over (default)");
+                    self.status = "console conflict: taking over".to_string();
+                    let _ = self.commands.try_send(ClientCommand::AnswerConflict { take_over: true });
                 }
                 ClientEvent::StorageList { .. }
                 | ClientEvent::TransferDone { .. }

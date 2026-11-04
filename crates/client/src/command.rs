@@ -81,6 +81,14 @@ pub enum ClientCommand {
     /// Asks the server to lock the remote session (§18.50): the GUI maps
     /// Ctrl+Alt+Shift+L to this because Win+L is always grabbed by the local OS.
     LockRemote,
+    /// Answers a console-conflict query (§18.53, policy `ask`). Only
+    /// meaningful during the pre-session gate, right after
+    /// [`crate::ClientEvent::ConsoleConflict`]; mid-session it is logged
+    /// and ignored.
+    AnswerConflict {
+        /// True to evict the console owner and take the session over.
+        take_over: bool,
+    },
 }
 
 /// Sending half of the command channel, handed to the consumer by

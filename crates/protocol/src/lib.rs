@@ -29,7 +29,10 @@ pub use channel::ChannelId;
 pub use clipboard::{
     ClipboardError, ClipboardMessage, ClipboardSession, FORMAT_TEXT, MAX_CLIPBOARD_PAYLOAD,
 };
-pub use control::{Capability, ControlMessage};
+pub use control::{
+    Capability, ControlMessage, CONSOLE_STATE_ACTIVE, CONSOLE_STATE_DISCONNECTED,
+    CONSOLE_STATE_LOCKED, SESSION_END_CONSOLE_BUSY, SESSION_END_DENIED_BY_USER,
+};
 pub use cursor::{CursorError, CursorMessage, MAX_CURSOR_DIM};
 pub use error::ProtocolError;
 pub use hello::{

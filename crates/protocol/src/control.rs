@@ -174,7 +174,61 @@ pub enum ControlMessage {
     /// Appended at the end so existing postcard variant indices do not
     /// shift.
     LockRequest,
+    /// Pre-session gate, server → client (§18.53): the conflict policy is
+    /// resolved and the session is about to be handed off to the agent; the
+    /// next control message will be the agent's `UdpOffer`. Always sent by
+    /// the orchestrator service before the handoff so the client can tell a
+    /// pending console-conflict exchange apart from a ready session. The
+    /// laboratory agent (no service) never sends it: the client treats an
+    /// early `UdpOffer` as an implicit ready.
+    /// Appended at the end so existing postcard variant indices do not
+    /// shift.
+    SessionReady,
+    /// Pre-session refusal, server → client (§18.53): the session is
+    /// rejected after a successful handshake; `reason` is one of the
+    /// `SESSION_END_*` constants. The connection is dropped right after.
+    /// Appended at the end so existing postcard variant indices do not
+    /// shift.
+    SessionEnd {
+        /// `SESSION_END_*` reason code.
+        reason: u8,
+    },
+    /// Console-conflict query, server → client (§18.53, policy `ask`):
+    /// another user's session owns the console. `user` is only `Some` when
+    /// the server policy allows revealing it; `state` is one of the
+    /// `CONSOLE_STATE_*` constants. The client must answer with
+    /// `ConsoleConflictReply` before the server's ask timeout.
+    /// Appended at the end so existing postcard variant indices do not
+    /// shift.
+    ConsoleConflict {
+        /// Console owner's name when the server policy reveals it.
+        user: Option<String>,
+        /// `CONSOLE_STATE_*` constant.
+        state: u8,
+    },
+    /// Console-conflict answer, client → server (§18.53): `true` evicts the
+    /// console owner and continues, `false` refuses (the server answers
+    /// with `SessionEnd`). Appended at the end so existing postcard variant
+    /// indices do not shift.
+    ConsoleConflictReply {
+        /// True to take the console over.
+        take_over: bool,
+    },
 }
+
+/// `SessionEnd` reason: the console is owned by another user and the server
+/// policy is `deny` (§18.53).
+pub const SESSION_END_CONSOLE_BUSY: u8 = 1;
+/// `SessionEnd` reason: the connecting user refused the console takeover
+/// (or the ask timed out) under policy `ask` (§18.53).
+pub const SESSION_END_DENIED_BY_USER: u8 = 2;
+
+/// `ConsoleConflict` state: the console session is active.
+pub const CONSOLE_STATE_ACTIVE: u8 = 0;
+/// `ConsoleConflict` state: the console session is locked.
+pub const CONSOLE_STATE_LOCKED: u8 = 1;
+/// `ConsoleConflict` state: the console session is disconnected.
+pub const CONSOLE_STATE_DISCONNECTED: u8 = 2;
 
 impl ControlMessage {
     /// Serializes the message (postcard).

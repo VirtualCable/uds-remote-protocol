@@ -55,6 +55,14 @@ pub struct StandaloneRuntime {
     pub allow_lock: bool,
     /// Blank the desktop wallpaper during sessions (§18.54).
     pub wallpaper_off: bool,
+    /// Console-conflict policy (§18.53).
+    pub console_conflict: server_config::ConsoleConflictPolicy,
+    /// Whether the `ask` conflict message may reveal the console owner.
+    pub console_conflict_reveal_user: bool,
+    /// Ask timeout in seconds (fail-closed).
+    pub console_conflict_timeout_secs: u64,
+    /// How a takeover evicts the console owner.
+    pub console_takeover: server_config::TakeoverMode,
 }
 
 /// Active connection mode for the service.
@@ -175,5 +183,9 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
             }),
         allow_lock: standalone.channels.lock,
         wallpaper_off: standalone.wallpaper_off,
+        console_conflict: standalone.console_conflict,
+        console_conflict_reveal_user: standalone.console_conflict_reveal_user,
+        console_conflict_timeout_secs: standalone.console_conflict_timeout_secs,
+        console_takeover: standalone.console_takeover,
     })
 }

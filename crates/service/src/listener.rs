@@ -190,7 +190,7 @@ async fn handle_connection(
     // session parameters) lands in `grant_slot` during the handshake.
     let grant_slot: Arc<Mutex<Option<broker::SessionGrant>>> = Arc::new(Mutex::new(None));
     let peer_ip = peer.ip().to_string();
-    let stream = match runtime {
+    let mut stream = match runtime {
         crate::standalone::Runtime::Standalone(standalone) => {
             tokio::time::timeout(
                 HANDSHAKE_TIMEOUT,
@@ -238,8 +238,20 @@ async fn handle_connection(
         *creds_slot.lock().expect("creds slot poisoned") = creds.clone();
     }
 
+    // Console-conflict policy (§18.53), server-mandatory: another user
+    // owning the console is resolved BEFORE any session side effect.
+    let conflict = conflict_config(runtime, grant.as_ref());
+    crate::console::resolve_conflict(&mut stream, creds.as_ref(), &conflict).await?;
+
     // From here on the client is authenticated: side effects are allowed.
     ensure_console_session(creds.as_ref()).await?;
+
+    // §18.53 pre-session gate: tell the client the session is ready; its
+    // next control message will be the agent's `UdpOffer` after the
+    // handoff. (A lab agent without the service never sends this — the
+    // client treats an early `UdpOffer` as an implicit ready.)
+    let ready = protocol::ControlMessage::SessionReady;
+    stream.send(protocol::channel::CONTROL, &ready.encode()?).await?;
 
     let (inner, hello, seqs) = stream.into_handoff();
     let socket = inner.into_stream().into_std().context("tokio -> std socket")?;
@@ -345,6 +357,31 @@ fn mode_name(runtime: &crate::standalone::Runtime) -> &'static str {
     match runtime {
         crate::standalone::Runtime::Standalone(_) => "standalone",
         crate::standalone::Runtime::Pq(_) => "pq",
+    }
+}
+
+/// Resolves the console-conflict configuration (§18.53) from the
+/// connection mode: standalone file settings, or the broker ticket payload.
+fn conflict_config(
+    runtime: &crate::standalone::Runtime,
+    grant: Option<&broker::SessionGrant>,
+) -> crate::console::ConflictConfig {
+    match runtime {
+        crate::standalone::Runtime::Standalone(standalone) => crate::console::ConflictConfig {
+            policy: standalone.console_conflict,
+            reveal_user: standalone.console_conflict_reveal_user,
+            timeout: Duration::from_secs(standalone.console_conflict_timeout_secs),
+            takeover: standalone.console_takeover,
+        },
+        crate::standalone::Runtime::Pq(_) => {
+            let grant = grant.expect("pq mode grants a session");
+            crate::console::ConflictConfig {
+                policy: grant.console_conflict,
+                reveal_user: grant.console_conflict_reveal_user,
+                timeout: Duration::from_secs(grant.console_conflict_timeout_secs),
+                takeover: grant.console_takeover,
+            }
+        }
     }
 }
 

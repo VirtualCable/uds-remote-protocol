@@ -716,7 +716,7 @@ fn secure_event_set(event: &OwnedHandle) -> bool {
 /// True when the console session shows the lock screen (WTS SessionFlags:
 /// 0 = locked, 1 = unlocked). Distinguishes a lock from a mere UAC prompt —
 /// both own the Winlogon secure desktop (§18.41).
-fn console_session_locked(session_id: u32) -> bool {
+pub(crate) fn console_session_locked(session_id: u32) -> bool {
     use windows::Win32::System::RemoteDesktop::{
         WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
     };

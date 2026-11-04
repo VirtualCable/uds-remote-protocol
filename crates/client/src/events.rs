@@ -141,6 +141,20 @@ pub enum ClientEvent {
         /// True while a secure desktop owns the remote console.
         active: bool,
     },
+    /// Console-conflict query (§18.53, server policy `ask`): another user
+    /// owns the remote console and the server asks the CONNECTING client
+    /// whether to take it over. The consumer answers with
+    /// [`crate::ClientCommand::AnswerConflict`]; without an answer before
+    /// the client-side timeout the session denies the takeover
+    /// (fail-closed). The default consumer answer is `take_over = true`
+    /// (the ticket IS the authorization; `ask` exists for misconfiguration
+    /// conflicts, not as the normal flow).
+    ConsoleConflict {
+        /// Console owner's name when the server policy reveals it.
+        user: Option<String>,
+        /// `protocol::control::CONSOLE_STATE_*` constant.
+        state: u8,
+    },
     /// Non-fatal session condition worth surfacing (e.g. the video stream
     /// broke and a keyframe was requested). Fatal errors end
     /// [`crate::Session::run`] with `Err` instead.
@@ -222,6 +236,11 @@ impl std::fmt::Debug for ClientEvent {
             Self::SecureDesktop { active } => f
                 .debug_struct("SecureDesktop")
                 .field("active", active)
+                .finish(),
+            Self::ConsoleConflict { user, state } => f
+                .debug_struct("ConsoleConflict")
+                .field("user", user)
+                .field("state", state)
                 .finish(),
             Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
             Self::Disconnected => f.debug_struct("Disconnected").finish(),

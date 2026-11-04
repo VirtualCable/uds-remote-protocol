@@ -74,7 +74,34 @@ pub async fn udp_detect<T: ReliableTransport>(
         return Err(TransportError::UnexpectedMessage(format!("{msg:?}")));
     };
     debug_assert_eq!(ch, channel::CONTROL);
+    udp_probe(
+        server_ip,
+        ticket,
+        secret,
+        port,
+        token,
+        clock,
+        max_attempts,
+        timeout,
+    )
+    .await
+}
 
+/// Probing half of [`udp_detect`] with an already-received offer (§18.53:
+/// the client's pre-session gate may have consumed the `UdpOffer` while
+/// waiting for the service's `SessionReady`).
+#[allow(clippy::too_many_arguments)]
+pub async fn udp_probe(
+    server_ip: IpAddr,
+    ticket: &[u8; consts::TICKET_LENGTH],
+    secret: &[u8; consts::KEY_LENGTH],
+    port: u16,
+    token: [u8; consts::TOKEN_LENGTH],
+    clock: impl Fn() -> u64,
+    max_attempts: u32,
+    timeout: Duration,
+) -> Result<Option<UdpLeg<UdpTransport>>> {
+    let mut buf = [0u8; 1024];
     let raw = UdpTransport::connect("0.0.0.0:0", SocketAddr::new(server_ip, port)).await?;
     let keys = derive_datagram_keys(ticket, secret)?;
     let mut dgram = EncryptedDatagram::new(raw, &keys.c2s, &keys.s2c, &token);

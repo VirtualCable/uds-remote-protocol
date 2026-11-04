@@ -43,6 +43,23 @@ pub struct TicketPayload {
     /// animation reduction is unconditional — this is the only opt-in).
     #[serde(default)]
     pub wallpaper_off: bool,
+    /// Console-conflict policy (§18.53): another user owns the console.
+    #[serde(default)]
+    pub console_conflict: server_config::ConsoleConflictPolicy,
+    /// Whether the `ask` conflict message may reveal the console owner's
+    /// name (privacy; off by default).
+    #[serde(default)]
+    pub console_conflict_reveal_user: bool,
+    /// Ask timeout in seconds (fail-closed).
+    #[serde(default = "default_conflict_timeout")]
+    pub console_conflict_timeout_secs: u64,
+    /// How a takeover evicts the console owner.
+    #[serde(default)]
+    pub console_takeover: server_config::TakeoverMode,
+}
+
+fn default_conflict_timeout() -> u64 {
+    server_config::DEFAULT_CONFLICT_TIMEOUT_SECS
 }
 
 /// Auto-logon credentials delivered per session by the broker.
@@ -156,6 +173,14 @@ pub struct SessionGrant {
     pub channels: ChannelPolicy,
     /// Blank the desktop wallpaper during the session (§18.54).
     pub wallpaper_off: bool,
+    /// Console-conflict policy (§18.53).
+    pub console_conflict: server_config::ConsoleConflictPolicy,
+    /// Whether the `ask` conflict message may reveal the console owner.
+    pub console_conflict_reveal_user: bool,
+    /// Ask timeout in seconds (fail-closed).
+    pub console_conflict_timeout_secs: u64,
+    /// How a takeover evicts the console owner.
+    pub console_takeover: server_config::TakeoverMode,
     /// Stop-notification ticket (`None` = no stop notification).
     pub notify: Option<String>,
 }
@@ -171,6 +196,10 @@ impl SessionGrant {
             video: payload.video,
             channels: payload.channels,
             wallpaper_off: payload.wallpaper_off,
+            console_conflict: payload.console_conflict,
+            console_conflict_reveal_user: payload.console_conflict_reveal_user,
+            console_conflict_timeout_secs: payload.console_conflict_timeout_secs,
+            console_takeover: payload.console_takeover,
             notify,
         }
     }
