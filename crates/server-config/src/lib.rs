@@ -130,11 +130,14 @@ pub enum ConsoleConflictPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum TakeoverMode {
     /// `WTSDisconnectSession`: the evicted session survives disconnected,
-    /// keeping its apps (default, least destructive).
-    #[default]
+    /// keeping its apps. Only when the deployment explicitly wants the old
+    /// session preserved (e.g. same-user reconnects).
     Disconnect,
-    /// `WTSLogoffSession`: the evicted session is logged off, killing its
-    /// apps. Only on explicit request.
+    /// `WTSLogoffSession` (default): the evicted session is logged off,
+    /// killing its apps. A takeover reassigns the WHOLE machine — a
+    /// surviving disconnected session would hold locks (roaming profiles),
+    /// GPO state and resources that no longer belong to it.
+    #[default]
     Logoff,
 }
 
@@ -193,8 +196,8 @@ pub struct StandaloneConfig {
     /// Ask timeout in seconds; without an explicit answer the connection is
     /// denied (fail-closed).
     pub console_conflict_timeout_secs: u64,
-    /// How a takeover evicts the console owner (disconnect keeps their
-    /// apps; logoff kills them).
+    /// How a takeover evicts the console owner (default logoff kills their
+    /// apps and frees the session; disconnect keeps it alive).
     pub console_takeover: TakeoverMode,
 }
 

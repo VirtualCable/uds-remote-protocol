@@ -15,9 +15,11 @@
 //! CONNECTING client decides; the local console user has no voice — anyone
 //! sitting in front of the machine could otherwise deny remote access).
 //!
-//! The eviction itself is `WTSDisconnectSession` (default: the evicted
-//! session survives disconnected, keeping its apps) or `WTSLogoffSession`
-//! (config `console_takeover = "logoff"`).
+//! The eviction itself is `WTSLogoffSession` (default: a takeover
+//! reassigns the WHOLE machine — the evicted session is destroyed, freeing
+//! profile locks, GPO state and resources) or `WTSDisconnectSession`
+//! (config `console_takeover = "disconnect"`: the evicted session survives
+//! disconnected, keeping its apps).
 
 use std::time::Duration;
 
