@@ -53,9 +53,7 @@ pub struct StandaloneRuntime {
     /// The client may ask to lock the remote console (`[standalone.channels]
     /// lock`); off by default, server-side mandatory.
     pub allow_lock: bool,
-    /// Reduce shell visual effects during the session (§18.54).
-    pub visual_effects: bool,
-    /// Also blank the desktop wallpaper during the session.
+    /// Blank the desktop wallpaper during sessions (§18.54).
     pub wallpaper_off: bool,
 }
 
@@ -176,7 +174,6 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
                 Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
             }),
         allow_lock: standalone.channels.lock,
-        visual_effects: standalone.effects.visual_effects,
-        wallpaper_off: standalone.effects.wallpaper_off,
+        wallpaper_off: standalone.wallpaper_off,
     })
 }

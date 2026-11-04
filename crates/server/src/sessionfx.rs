@@ -3,25 +3,18 @@
 // All rights reserved.
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-//! Session-scoped Windows shell visual-effects policy (§18.54), RDP-style:
-//! while a session runs, shell animations and effects that only cost
-//! bandwidth are switched off; the user's previous values are snapshot first
-//! and restored when the session ends (the guard's `Drop`).
+//! Session-scoped Windows shell visual-effects reduction (§18.54),
+//! RDP-style: while a session runs, shell animations and effects that only
+//! cost bandwidth are switched off — unconditionally, this is protocol
+//! behaviour, not a policy. The desktop wallpaper is blanked too when the
+//! session opts in (the only configurable piece: it is visually invasive).
+//! The user's previous values are snapshot first and restored when the
+//! session ends (the guard's `Drop`).
 //!
 //! Nothing is persisted (`SPIF_UPDATEINIFILE` is never passed), so a reboot
 //! also restores everything even if the agent dies before its `Drop` runs.
 //! Font smoothing is intentionally left alone: text readability is not an
 //! effect we trade for bandwidth.
-
-/// What to apply for one session.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct EffectsPolicy {
-    /// Reduce shell animations/effects (menu/window animation, fades,
-    /// smooth scrolling, drag-full-windows, cursor shadow).
-    pub visual_effects: bool,
-    /// Additionally blank the desktop wallpaper (opt-in, more invasive).
-    pub wallpaper_off: bool,
-}
 
 #[cfg(not(all(windows, feature = "windows-capture")))]
 pub use stub::VisualEffectsGuard;
@@ -34,9 +27,10 @@ mod stub {
     pub struct VisualEffectsGuard;
 
     impl VisualEffectsGuard {
-        /// Applies the policy (no-op).
+        /// Applies the reduction (no-op). `wallpaper_off` blanks the
+        /// desktop wallpaper too.
         #[must_use]
-        pub fn apply(_policy: super::EffectsPolicy) -> Self {
+        pub fn apply(_wallpaper_off: bool) -> Self {
             Self
         }
     }
@@ -150,31 +144,30 @@ mod win {
     }
 
     impl VisualEffectsGuard {
-        /// Snapshots the current shell settings and applies `policy`.
-        /// Always returns a guard; individual setting failures are logged
-        /// and skipped (the session must not fail over cosmetics).
+        /// Snapshots the current shell settings, reduces the animations
+        /// (always), and blanks the wallpaper when `wallpaper_off` is set.
+        /// Individual setting failures are logged and skipped (the session
+        /// must not fail over cosmetics).
         #[must_use]
-        pub fn apply(policy: super::EffectsPolicy) -> Self {
+        pub fn apply(wallpaper_off: bool) -> Self {
             let mut guard = Self {
                 saved: Vec::new(),
                 saved_animation: None,
                 saved_wallpaper: None,
             };
-            if policy.visual_effects {
-                debug!("reducing shell visual effects for the session");
-                for setting in BOOL_SETTINGS {
-                    let previous = get_bool(setting);
-                    if previous == Some(true) {
-                        set_bool(setting, false);
-                    }
-                    guard.saved.push(previous);
+            debug!("reducing shell visual effects for the session");
+            for setting in BOOL_SETTINGS {
+                let previous = get_bool(setting);
+                if previous == Some(true) {
+                    set_bool(setting, false);
                 }
-                guard.saved_animation = get_animation();
-                if guard.saved_animation.is_some_and(|info| info.iMinAnimate != 0) {
-                    set_animation(false);
-                }
+                guard.saved.push(previous);
             }
-            if policy.wallpaper_off {
+            guard.saved_animation = get_animation();
+            if guard.saved_animation.is_some_and(|info| info.iMinAnimate != 0) {
+                set_animation(false);
+            }
+            if wallpaper_off {
                 let mut buffer = [0u16; 260];
                 // SAFETY: `buffer` is a valid writable wide-char buffer of
                 // the passed length.

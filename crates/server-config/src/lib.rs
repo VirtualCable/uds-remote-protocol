@@ -140,9 +140,9 @@ pub struct StandaloneConfig {
     /// Channel switches (flat keys in the TOML `[standalone]` section).
     #[serde(flatten)]
     pub channels: ChannelSwitches,
-    /// Visual-effects switches (flat keys in `[standalone]`, §18.54).
-    #[serde(flatten)]
-    pub effects: EffectsSwitches,
+    /// Blank the desktop wallpaper during sessions (§18.54; the shell
+    /// animation reduction is unconditional — this is the only opt-in).
+    pub wallpaper_off: bool,
     /// Codec-ladder sensitivity overrides (`[standalone.ladder]` table);
     /// unset keys keep the agent's built-in balanced defaults.
     pub ladder: LadderTuning,
@@ -293,29 +293,7 @@ pub struct ChannelSwitches {
     pub lock: bool,
 }
 
-/// Shell visual-effects policy applied while the session runs (§18.54).
-/// Reductions are session-scoped: the agent snapshots the previous values
-/// and restores them on disconnect (never persisted to the user profile).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct EffectsSwitches {
-    /// Reduce Windows shell animations/effects during the session
-    /// (RDP-style): menu/window animations, fades, smooth scrolling, drag
-    /// full windows, cursor shadow. Font smoothing stays on.
-    pub visual_effects: bool,
-    /// Additionally blank the desktop wallpaper (more invasive; some users
-    /// notice and dislike it, hence a separate opt-in switch).
-    pub wallpaper_off: bool,
-}
 
-impl Default for EffectsSwitches {
-    fn default() -> Self {
-        Self {
-            visual_effects: true,
-            wallpaper_off: false,
-        }
-    }
-}
 
 impl Default for StandaloneConfig {
     fn default() -> Self {
@@ -337,7 +315,7 @@ impl Default for StandaloneConfig {
                 smartcard: false,
                 lock: false,
             },
-            effects: EffectsSwitches::default(),
+            wallpaper_off: false,
             ladder: LadderTuning::default(),
             adaptive_fps: None,
             stats_csv: None,

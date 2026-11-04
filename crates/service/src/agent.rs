@@ -934,7 +934,6 @@ pub(crate) fn watch_loop(
         stats_csv: String::new(),
         fixed_resolution: (0, 0),
         allow_lock: false,
-        visual_effects: true,
         wallpaper_off: false,
         handoff: None,
     };

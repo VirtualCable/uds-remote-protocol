@@ -39,9 +39,10 @@ pub struct TicketPayload {
     /// the client cannot enable what this disables).
     #[serde(default)]
     pub channels: ChannelPolicy,
-    /// Shell visual-effects policy for the session (§18.54).
+    /// Blank the desktop wallpaper during the session (§18.54; the shell
+    /// animation reduction is unconditional — this is the only opt-in).
     #[serde(default)]
-    pub effects: EffectsPolicy,
+    pub wallpaper_off: bool,
 }
 
 /// Auto-logon credentials delivered per session by the broker.
@@ -119,26 +120,6 @@ impl Default for ChannelPolicy {
     }
 }
 
-/// Shell visual-effects policy applied while the session runs (§18.54).
-/// Session-scoped only: previous values are restored on disconnect.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(default)]
-pub struct EffectsPolicy {
-    /// Reduce Windows shell animations/effects during the session
-    /// (RDP-style). Default on: it is the bandwidth-friendly behaviour.
-    pub visual_effects: bool,
-    /// Additionally blank the desktop wallpaper (opt-in; more invasive).
-    pub wallpaper_off: bool,
-}
-
-impl Default for EffectsPolicy {
-    fn default() -> Self {
-        Self {
-            visual_effects: true,
-            wallpaper_off: false,
-        }
-    }
-}
 
 impl TicketPayload {
     /// Parses a payload from its JSON form, rejecting unknown versions.
@@ -173,8 +154,8 @@ pub struct SessionGrant {
     pub video: Option<VideoPolicy>,
     /// Channel switches.
     pub channels: ChannelPolicy,
-    /// Visual-effects policy (§18.54).
-    pub effects: EffectsPolicy,
+    /// Blank the desktop wallpaper during the session (§18.54).
+    pub wallpaper_off: bool,
     /// Stop-notification ticket (`None` = no stop notification).
     pub notify: Option<String>,
 }
@@ -189,7 +170,7 @@ impl SessionGrant {
             display: payload.display,
             video: payload.video,
             channels: payload.channels,
-            effects: payload.effects,
+            wallpaper_off: payload.wallpaper_off,
             notify,
         }
     }

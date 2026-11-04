@@ -25,8 +25,7 @@
 //!          u32   fixed resolution width  (0 = approach the client's mode)
 //!          u32   fixed resolution height
 //!          u8    flags (bit0 = allow_lock: client may lock the console,
-//!                bit1 = visual_effects: reduce shell animations,
-//!                bit2 = wallpaper_off: blank the desktop wallpaper)
+//!                bit1 = wallpaper_off: blank the desktop wallpaper)
 //!          u8    handoff flag (0 = none, 1 = handoff block follows)
 //!          [u64  send_seq | u64 recv_seq |
 //!           u16 hello_len + Hello bytes |
@@ -37,7 +36,7 @@
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 8;
+pub const AGENT_CONFIG_VERSION: u8 = 9;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -102,11 +101,9 @@ pub struct AgentConfig {
     /// `true` lets the client lock the remote console (`LockRequest`);
     /// server-side policy is mandatory — the client cannot override it.
     pub allow_lock: bool,
-    /// `true` reduces Windows shell visual effects during the session
-    /// (RDP-style, §18.54); restored when the session ends.
-    pub visual_effects: bool,
-    /// `true` also blanks the desktop wallpaper for the session (the more
-    /// invasive companion of `visual_effects`; off by default).
+    /// `true` blanks the desktop wallpaper for the session (§18.54; the
+    /// shell-animation reduction itself is unconditional, this is the only
+    /// opt-in because it is visually invasive). Restored on session end.
     pub wallpaper_off: bool,
     /// Validated-connection handoff: when present, the agent must not bind
     /// its own listener; it rebuilds the connected socket and continues the
@@ -170,9 +167,7 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
     }
     out.extend_from_slice(&config.fixed_resolution.0.to_le_bytes());
     out.extend_from_slice(&config.fixed_resolution.1.to_le_bytes());
-    let flags = u8::from(config.allow_lock)
-        | (u8::from(config.visual_effects) << 1)
-        | (u8::from(config.wallpaper_off) << 2);
+    let flags = u8::from(config.allow_lock) | (u8::from(config.wallpaper_off) << 1);
     out.push(flags);
     match &config.handoff {
         None => out.push(0),
@@ -226,8 +221,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         u32::from_le_bytes(rest[4..8].try_into().expect("4-byte slice")),
     );
     let allow_lock = rest[8] & 1 != 0;
-    let visual_effects = rest[8] & 2 != 0;
-    let wallpaper_off = rest[8] & 4 != 0;
+    let wallpaper_off = rest[8] & 2 != 0;
     rest = &rest[9..];
     let handoff = match rest[0] {
         0 => {
@@ -282,7 +276,6 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         stats_csv: stats_csv.to_owned(),
         fixed_resolution,
         allow_lock,
-        visual_effects,
         wallpaper_off,
         handoff,
     })
@@ -304,7 +297,6 @@ mod tests {
             stats_csv: String::new(),
             fixed_resolution: (1280, 720),
             allow_lock: true,
-            visual_effects: true,
             wallpaper_off: false,
             handoff: None,
         }

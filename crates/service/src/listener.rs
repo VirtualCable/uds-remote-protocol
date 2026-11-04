@@ -261,7 +261,6 @@ async fn handle_connection(
             stats_csv: standalone.stats_csv.clone(),
             fixed_resolution: standalone.fixed_resolution.unwrap_or((0, 0)),
             allow_lock: standalone.allow_lock,
-            visual_effects: standalone.visual_effects,
             wallpaper_off: standalone.wallpaper_off,
             handoff: Some(service_proto::HandoffInfo {
                 send_seq: seqs.send,
@@ -299,10 +298,7 @@ async fn handle_connection(
                 // Server-side mandatory policy: the ticket payload decides
                 // whether the client may lock the remote console.
                 allow_lock: grant.as_ref().is_some_and(|grant| grant.channels.lock),
-                // §18.54: visual-effects policy from the ticket; defaults
-                // (reduce on, wallpaper kept) apply when the grant is absent.
-                visual_effects: grant.as_ref().is_none_or(|grant| grant.effects.visual_effects),
-                wallpaper_off: grant.as_ref().is_some_and(|grant| grant.effects.wallpaper_off),
+                wallpaper_off: grant.as_ref().is_some_and(|grant| grant.wallpaper_off),
                 handoff: Some(service_proto::HandoffInfo {
                     send_seq: seqs.send,
                     recv_seq: seqs.recv,
