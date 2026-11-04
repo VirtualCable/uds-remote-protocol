@@ -40,7 +40,7 @@ mod stub {
 mod win {
     use std::ffi::c_void;
 
-    use tracing::{debug, warn};
+    use tracing::{info, warn};
     use windows::Win32::UI::WindowsAndMessaging::{
         ANIMATIONINFO, SPI_GETCOMBOBOXANIMATION, SPI_GETCURSORSHADOW, SPI_GETDESKWALLPAPER,
         SPI_GETDRAGFULLWINDOWS, SPI_GETLISTBOXSMOOTHSCROLLING, SPI_GETMENUANIMATION, SPI_GETMENUFADE,
@@ -155,9 +155,10 @@ mod win {
                 saved_animation: None,
                 saved_wallpaper: None,
             };
-            debug!("reducing shell visual effects for the session");
+            info!("reducing shell visual effects for the session");
             for setting in BOOL_SETTINGS {
                 let previous = get_bool(setting);
+                info!(setting = setting.name, ?previous, "sessionfx get");
                 if previous == Some(true) {
                     set_bool(setting, false);
                 }
