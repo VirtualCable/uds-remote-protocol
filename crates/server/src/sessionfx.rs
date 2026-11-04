@@ -225,7 +225,7 @@ mod win {
                     warn!(error = %format!("{err:#}"), "wallpaper restore failed");
                 }
             }
-            debug!("shell visual effects restored");
+            info!("shell visual effects restored");
         }
     }
 }
