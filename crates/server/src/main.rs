@@ -68,6 +68,7 @@ use transport::{
 };
 use tracing::{debug, error, info, warn};
 
+#[allow(clippy::struct_excessive_bools)] // a CLI switch bag
 struct Args {
     bind: SocketAddr,
     key: [u8; consts::KEY_LENGTH],
@@ -99,6 +100,11 @@ struct Args {
     /// The client may ask to lock the remote console (`--allow-lock`,
     /// `[standalone.channels] lock`, or the broker ticket payload).
     allow_lock: bool,
+    /// Reduce Windows shell visual effects during the session (§18.54);
+    /// restored on session end. `--no-visual-effects` opts out.
+    visual_effects: bool,
+    /// Additionally blank the desktop wallpaper for the session.
+    wallpaper_off: bool,
     /// Validated-connection handoff from the orchestrator service (§18.32):
     /// when set, the agent does not bind its own TCP listener; it rebuilds
     /// the connected socket and serves exactly one session, then exits.
@@ -129,6 +135,8 @@ fn parse_args() -> Result<Args> {
         spool: None,
         stats_csv: None,
         allow_lock: false,
+        visual_effects: true,
+        wallpaper_off: false,
         handoff: None,
     };
     let mut key_seen = false;
@@ -171,6 +179,8 @@ fn parse_args() -> Result<Args> {
                 args.stats_csv = Some(config.stats_csv.into());
             }
             args.allow_lock = config.allow_lock;
+            args.visual_effects = config.visual_effects;
+            args.wallpaper_off = config.wallpaper_off;
             args.handoff = config.handoff;
             args.source = "dxgi".to_string();
             key_seen = true;
@@ -182,6 +192,14 @@ fn parse_args() -> Result<Args> {
         }
         if arg == "--allow-lock" {
             args.allow_lock = true;
+            continue;
+        }
+        if arg == "--no-visual-effects" {
+            args.visual_effects = false;
+            continue;
+        }
+        if arg == "--wallpaper-off" {
+            args.wallpaper_off = true;
             continue;
         }
         let value = it.next().context(format!("missing value for {arg}"))?;
@@ -280,6 +298,8 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
         args.stats_csv = standalone.stats_csv.as_ref().map(std::path::PathBuf::from);
         args.audio = standalone.channels.audio;
         args.allow_lock = standalone.channels.lock;
+        args.visual_effects = standalone.effects.visual_effects;
+        args.wallpaper_off = standalone.effects.wallpaper_off;
         info!("standalone mode: fixed ticket active (reference implementation)");
     }
     Ok(true)
@@ -1757,6 +1777,13 @@ async fn serve_stream<T: ReliableTransport>(
             info!(?args.fixed_resolution, ?preferred, "session resolution applied");
         }
     }
+
+    // Shell visual effects (§18.54): reduced for the session when policy
+    // says so; the guard restores the user's settings on session end.
+    let _effects_guard = server::sessionfx::VisualEffectsGuard::apply(server::sessionfx::EffectsPolicy {
+        visual_effects: args.visual_effects,
+        wallpaper_off: args.wallpaper_off,
+    });
 
     let mut udp_bind = args.bind;
     udp_bind.set_port(0);

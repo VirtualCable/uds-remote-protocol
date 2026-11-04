@@ -66,6 +66,10 @@ impl StandaloneProvider {
                     .map(server_config::AdaptiveFpsTuning::to_wire),
             }),
             channels,
+            effects: crate::payload::EffectsPolicy {
+                visual_effects: standalone.effects.visual_effects,
+                wallpaper_off: standalone.effects.wallpaper_off,
+            },
             notify: None,
         };
         Ok(Self {

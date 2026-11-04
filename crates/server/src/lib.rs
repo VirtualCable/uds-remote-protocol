@@ -34,6 +34,7 @@ pub mod mic;
 pub mod pacer;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod session_mutex;
+pub mod sessionfx;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod secure_helper;
 pub mod secure_pipe;
