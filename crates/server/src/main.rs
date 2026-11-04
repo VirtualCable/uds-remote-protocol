@@ -720,10 +720,22 @@ async fn recv_secure(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<bool>>
     }
 }
 
-/// Agent-side secure-mode state (§18.41): the helper-pipe threads and the
-/// input writer shared with the input dispatcher.
-struct SecureState {
-    /// Input pipe writer (agent → helper); `None` until the helper connects.
+/// Agent-side secure-pipe state (§18.41): both pipe servers are created ONCE
+/// per agent and re-accept helper connections per secure-desktop transition
+/// (recreating the pipe names raced the previous acceptor threads —
+/// `CreateNamedPipeW` fails with `ERROR_ACCESS_DENIED` while the name is
+/// still open — and permanently killed the secure pipes after the first
+/// ~250 ms lock/unlock cycle).
+#[cfg_attr(
+    not(all(windows, feature = "windows-capture")),
+    allow(dead_code)
+)]
+struct SecurePipes {
+    /// Helper-frames receiver, parked here while the console capture owns
+    /// `frame_rx`; taken on the secure-ON transition, parked back on OFF.
+    rx: Option<mpsc::Receiver<CaptureMsg>>,
+    /// Helper input-pipe writer slot; the pipe thread fills it while a
+    /// helper is connected and clears it on disconnect/write failure.
     input: std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>,
 }
 
@@ -733,10 +745,11 @@ struct SecureState {
 /// windows; SYSTEM can).
 type InjectorSlot = std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>;
 
-/// Spawns the injector-pipe acceptor thread (§18.42): the pipe server waits
-/// for the SYSTEM injector; until it connects the slot stays `None` and
-/// input falls back to the local (user-token) injector. Portable stub
-/// outside Windows: the slot simply never fills.
+/// Spawns the injector-pipe acceptor thread (§18.42): the pipe server
+/// re-accepts the SYSTEM injector for the whole agent lifetime; until it
+/// connects the slot stays `None` and input falls back to the local
+/// (user-token) injector. Portable stub outside Windows: the slot simply
+/// never fills.
 #[cfg_attr(
     not(all(windows, feature = "windows-capture")),
     expect(unused_variables, reason = "stub: the injector exists only on Windows")
@@ -745,117 +758,173 @@ fn spawn_injector_pipe(session_id: u32) -> InjectorSlot {
     let slot: InjectorSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
     #[cfg(all(windows, feature = "windows-capture"))]
     {
-        let target = std::sync::Arc::clone(&slot);
-        std::thread::Builder::new()
-            .name("injector-input".into())
-            .spawn(move || {
-                match server::secure_pipe::win::accept_pipe(
-                    &server::secure_pipe::injector_pipe_name(session_id),
-                    false,
-                ) {
-                    Ok(f) => {
-                        info!("SYSTEM input injector connected");
-                        *target.lock().expect("injector pipe slot") = Some(f);
-                    }
-                    Err(e) => warn!("injector pipe: {e:#}"),
-                }
-            })
-            .map_err(|e| warn!("injector pipe thread: {e}"))
-            .ok();
+        match server::secure_pipe::win::PipeServer::create(
+            &server::secure_pipe::injector_pipe_name(session_id),
+            false,
+        ) {
+            Ok(pipe) => {
+                let target = std::sync::Arc::clone(&slot);
+                std::thread::Builder::new()
+                    .name("injector-input".into())
+                    .spawn(move || outbound_pipe_loop(pipe, target, "SYSTEM input injector"))
+                    .map_err(|e| warn!("injector pipe thread: {e}"))
+                    .ok();
+            }
+            Err(e) => warn!("injector pipe: {e:#}"),
+        }
     }
     slot
 }
 
-/// Spawns the two secure-mode pipe threads (frames acceptor + input
-/// acceptor) and returns the capture receiver that feeds the session loop.
-/// Only reachable on Windows DXGI builds; the portable stub is never used
-/// (the secure branch pends forever without a watcher).
-#[cfg_attr(
-    not(all(windows, feature = "windows-capture")),
-    expect(unused_variables, reason = "stub: the secure branch never fires")
-)]
-fn spawn_secure_pipes(
-    session_id: u32,
-    clock_start: Instant,
-) -> (mpsc::Receiver<CaptureMsg>, SecureState) {
-    let (tx, rx) = mpsc::channel(2);
+/// Outbound pipe acceptor loop (§18.41/§18.42): blocks for a client, hands
+/// the connected end to the shared slot, watches for the client going away
+/// (zero-length probe write), then disconnects and re-accepts. Runs for the
+/// whole agent lifetime; the thread dies with the process.
+#[cfg(all(windows, feature = "windows-capture"))]
+fn outbound_pipe_loop(
+    pipe: server::secure_pipe::win::PipeServer,
+    slot: std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>,
+    label: &'static str,
+) {
+    loop {
+        if let Err(e) = pipe.wait_client() {
+            warn!("{label} pipe accept failed; giving up: {e:#}");
+            return;
+        }
+        match pipe.dup_file() {
+            Ok(f) => {
+                info!("{label} connected");
+                *slot.lock().expect("pipe slot") = Some(f);
+                while !pipe.outbound_client_gone() {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                // If the dispatcher already cleared the slot on a write
+                // error this is a no-op; otherwise drop our end now.
+                slot.lock().expect("pipe slot").take();
+            }
+            Err(e) => warn!("{label} pipe handle duplication failed: {e:#}"),
+        }
+        pipe.disconnect();
+        info!("{label} disconnected; re-accepting");
+    }
+}
+
+/// Creates both secure-mode pipe servers (frames + input) and spawns their
+/// acceptor threads. Runs ONCE per agent at startup (Windows DXGI only);
+/// the pipes then re-accept a helper per secure-desktop transition. `None`
+/// when pipe creation fails (loud warning; secure mode stays dark for the
+/// session) and always off Windows.
+fn spawn_secure_pipes(session_id: u32, clock_start: Instant) -> Option<SecurePipes> {
     #[cfg(all(windows, feature = "windows-capture"))]
     {
+        use server::secure_pipe::win::PipeServer;
+        let frames = match PipeServer::create(
+            &server::secure_pipe::frames_pipe_name(session_id),
+            true,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("secure frames pipe: {e:#}");
+                return None;
+            }
+        };
+        let input_pipe = match PipeServer::create(
+            &server::secure_pipe::input_pipe_name(session_id),
+            false,
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("secure input pipe: {e:#}");
+                return None;
+            }
+        };
+        let (tx, rx) = mpsc::channel(2);
         std::thread::Builder::new()
             .name("secure-frames".into())
-            .spawn(move || secure_frames_main(session_id, tx, clock_start))
+            .spawn(move || secure_frames_main(frames, tx, clock_start))
             .map_err(|e| warn!("secure frames thread: {e}"))
-            .ok();
-    }
-    let input = std::sync::Arc::new(std::sync::Mutex::new(None));
-    #[cfg(all(windows, feature = "windows-capture"))]
-    {
+            .ok()?;
+        let input = std::sync::Arc::new(std::sync::Mutex::new(None));
         let slot = std::sync::Arc::clone(&input);
         std::thread::Builder::new()
             .name("secure-input".into())
-            .spawn(move || {
-                match server::secure_pipe::win::accept_pipe(
-                    &server::secure_pipe::input_pipe_name(session_id),
-                    false,
-                ) {
-                    Ok(f) => *slot.lock().expect("input pipe slot") = Some(f),
-                    Err(e) => warn!("secure input pipe: {e:#}"),
-                }
-            })
+            .spawn(move || outbound_pipe_loop(input_pipe, slot, "secure input"))
             .map_err(|e| warn!("secure input thread: {e}"))
-            .ok();
+            .ok()?;
+        Some(SecurePipes { rx: Some(rx), input })
     }
-    (rx, SecureState { input })
+    #[cfg(not(all(windows, feature = "windows-capture")))]
+    {
+        let _ = (session_id, clock_start);
+        None
+    }
 }
 
-/// Frames pipe acceptor loop: one helper connection, then frame messages
-/// until EOF (helper exits when the secure desktop goes away).
+/// Frames pipe acceptor loop (§18.41): waits for a helper, forwards its
+/// frame messages (a `Ready` with the geometry on the first frame of each
+/// connection) until the helper disconnects, then re-accepts. Runs for the
+/// whole agent lifetime; the pipe name is created once by the caller.
 #[cfg(all(windows, feature = "windows-capture"))]
-fn secure_frames_main(session_id: u32, tx: mpsc::Sender<CaptureMsg>, clock_start: Instant) {
-    let mut frames = match server::secure_pipe::win::accept_pipe(
-        &server::secure_pipe::frames_pipe_name(session_id),
-        true,
-    ) {
-        Ok(f) => f,
-        Err(e) => {
-            warn!("secure frames pipe: {e:#}");
-            return;
-        }
-    };
-    let mut ready_sent = false;
+fn secure_frames_main(
+    pipe: server::secure_pipe::win::PipeServer,
+    tx: mpsc::Sender<CaptureMsg>,
+    clock_start: Instant,
+) {
     loop {
         if tx.is_closed() {
             return; // session over
         }
-        match server::secure_pipe::read_msg(&mut frames) {
-            Ok(Some((server::secure_pipe::TAG_FRAME, payload))) => {
-                let Ok((w, h, pixels)) = server::secure_pipe::decode_frame(&payload) else {
-                    warn!("secure helper sent a malformed frame");
-                    continue;
-                };
-                if !ready_sent {
-                    if tx
-                        .blocking_send(CaptureMsg::Ready(Ok(ReadyInfo { width: w, height: h })))
-                        .is_err()
-                    {
-                        return;
-                    }
-                    ready_sent = true;
-                }
-                let frame = OwnedFrame {
-                    width: w,
-                    height: h,
-                    stride: w as usize * 4,
-                    capture_ts_ms: millis_since(clock_start),
-                    data: pixels.to_vec(),
-                };
-                if tx.blocking_send(CaptureMsg::Frame(frame)).is_err() {
-                    return; // session over
-                }
-            }
-            Ok(Some((tag, _))) => warn!(tag, "secure frames pipe: unexpected tag"),
-            Ok(None) | Err(_) => return, // helper gone
+        if let Err(e) = pipe.wait_client() {
+            warn!("secure frames pipe accept failed; giving up: {e:#}");
+            return;
         }
+        info!("secure helper connected (frames pipe)");
+        let mut frames = match pipe.dup_file() {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("secure frames pipe handle duplication failed: {e:#}");
+                pipe.disconnect();
+                continue;
+            }
+        };
+        let mut ready_sent = false;
+        loop {
+            if tx.is_closed() {
+                return; // session over
+            }
+            match server::secure_pipe::read_msg(&mut frames) {
+                Ok(Some((server::secure_pipe::TAG_FRAME, payload))) => {
+                    let Ok((w, h, pixels)) = server::secure_pipe::decode_frame(&payload) else {
+                        warn!("secure helper sent a malformed frame");
+                        continue;
+                    };
+                    if !ready_sent {
+                        if tx
+                            .blocking_send(CaptureMsg::Ready(Ok(ReadyInfo { width: w, height: h })))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        ready_sent = true;
+                    }
+                    let frame = OwnedFrame {
+                        width: w,
+                        height: h,
+                        stride: w as usize * 4,
+                        capture_ts_ms: millis_since(clock_start),
+                        data: pixels.to_vec(),
+                    };
+                    if tx.blocking_send(CaptureMsg::Frame(frame)).is_err() {
+                        return; // session over
+                    }
+                }
+                Ok(Some((tag, _))) => warn!(tag, "secure frames pipe: unexpected tag"),
+                Ok(None) | Err(_) => break, // helper gone
+            }
+        }
+        drop(frames);
+        pipe.disconnect();
+        info!("secure helper disconnected; frames pipe re-accepting");
     }
 }
 
@@ -1754,15 +1823,26 @@ async fn serve_stream<T: ReliableTransport>(
     let starts_secure = args.source == "dxgi" && server::secure_helper::secure_desktop_active();
     #[cfg(not(all(windows, feature = "windows-capture")))]
     let starts_secure = false;
-    let mut secure_state: Option<SecureState> = None;
+    // Secure-mode pipe servers (§18.41): created ONCE per agent so the pipe
+    // names never have to be recreated per transition (that raced the old
+    // acceptor threads into permanent ERROR_ACCESS_DENIED).
+    let session_id = server::secure_pipe::own_session_id().unwrap_or(0);
+    let mut secure_pipes = if args.source == "dxgi" {
+        spawn_secure_pipes(session_id, clock_start)
+    } else {
+        None
+    };
+    let mut secure_mode = starts_secure;
     if starts_secure {
         info!("secure desktop already active at connect; starting on the helper");
         legs.send_control(&ControlMessage::SecureDesktop { active: true }.encode()?)
             .await?;
-        let session_id = server::secure_pipe::own_session_id().unwrap_or(0);
-        let (rx, state) = spawn_secure_pipes(session_id, clock_start);
-        frame_rx = Some(rx);
-        secure_state = Some(state);
+        if let Some(pipes) = &mut secure_pipes {
+            frame_rx = pipes.rx.take();
+        }
+        if frame_rx.is_none() {
+            warn!("secure pipes unavailable; the secure desktop will stay dark");
+        }
     } else {
         start_capture(
             args,
@@ -1893,14 +1973,14 @@ async fn serve_stream<T: ReliableTransport>(
         },
         last_metrics: None,
         resize_request: None,
-        secure_input: secure_state
-            .as_ref()
-            .map(|s| std::sync::Arc::clone(&s.input)),
+        secure_input: if starts_secure {
+            secure_pipes.as_ref().map(|p| std::sync::Arc::clone(&p.input))
+        } else {
+            None
+        },
         // §18.42: the pipe acceptor waits for the service-spawned SYSTEM
         // injector; in manual/dev runs nobody connects and input stays local.
-        injector_input: Some(spawn_injector_pipe(
-            server::secure_pipe::own_session_id().unwrap_or(0),
-        )),
+        injector_input: Some(spawn_injector_pipe(session_id)),
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -2194,19 +2274,29 @@ async fn serve_stream<T: ReliableTransport>(
                 // helper pipes; the helper's first frame sends Ready, which
                 // rebuilds the encoder and re-announces the display. Leaving:
                 // back to a fresh console capture (same Ready path).
-                if active && secure_state.is_none() {
+                if active && !secure_mode {
+                    secure_mode = true;
                     info!("secure desktop active; switching capture/input to the helper");
                     capture_restart_pending = false;
                     legs.send_control(&ControlMessage::SecureDesktop { active: true }.encode()?).await?;
                     stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
-                    let session_id = server::secure_pipe::own_session_id().unwrap_or(0);
-                    let (rx, state) = spawn_secure_pipes(session_id, clock_start);
-                    frame_rx = Some(rx);
-                    ctl.secure_input = Some(std::sync::Arc::clone(&state.input));
-                    secure_state = Some(state);
-                } else if !active && secure_state.is_some() {
+                    if let Some(pipes) = &mut secure_pipes {
+                        frame_rx = pipes.rx.take();
+                        ctl.secure_input = Some(std::sync::Arc::clone(&pipes.input));
+                        // Drop frames queued while the receiver was parked
+                        // (helper frames from before the transition are stale).
+                        if let Some(rx) = &mut frame_rx {
+                            while rx.try_recv().is_ok() {}
+                        }
+                    }
+                } else if !active && secure_mode {
+                    secure_mode = false;
                     ctl.secure_input = None;
-                    secure_state = None;
+                    // Park the helper-frames receiver (the persistent pipe
+                    // thread keeps it alive) instead of dropping it.
+                    if let Some(pipes) = &mut secure_pipes {
+                        pipes.rx = frame_rx.take();
+                    }
                     stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
                     // The release event can fire while the console is still
                     // locked (the credential UI drops BEFORE winlogon finishes

@@ -135,17 +135,21 @@ pub mod win {
     use anyhow::{Context, Result, bail};
     use std::os::windows::io::FromRawHandle;
     use std::time::{Duration, Instant};
-    use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
+    use windows::Win32::Foundation::{
+        CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_BROKEN_PIPE, ERROR_NO_DATA,
+        ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, HANDLE,
+    };
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
-        PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND,
+        PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, WriteFile,
     };
     use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
-        WaitNamedPipeW,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_TYPE_BYTE, PIPE_WAIT, WaitNamedPipeW,
     };
+    use windows::Win32::System::Threading::GetCurrentProcess;
     use windows::core::PCWSTR;
 
     /// Builds the SECURITY_ATTRIBUTES for our pipe SDDL. The descriptor
@@ -172,40 +176,120 @@ pub mod win {
         })
     }
 
-    /// Creates the pipe server end (agent side) and blocks until the helper
-    /// connects. `inbound`: server reads (frames pipe); otherwise server
-    /// writes (input pipe).
-    pub fn accept_pipe(name: &str, inbound: bool) -> Result<std::fs::File> {
-        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        let security = pipe_security()?;
-        let access = if inbound { PIPE_ACCESS_INBOUND } else { PIPE_ACCESS_OUTBOUND };
-        // SAFETY: `wide` is NUL-terminated; `security` points to a valid
-        // descriptor that outlives the pipe (leaked on purpose).
-        let handle = unsafe {
-            CreateNamedPipeW(
-                PCWSTR(wide.as_ptr()),
-                access,
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                1,
-                64 * 1024,
-                64 * 1024,
-                0,
-                Some(&raw const security),
-            )
-        };
-        if handle.is_invalid() {
-            bail!("CreateNamedPipeW({name}): {:?}", windows::core::Error::from_thread());
+    /// Persistent pipe server end (agent side): owns the pipe NAME for the
+    /// whole process lifetime and re-accepts helper connections with
+    /// Disconnect/Connect cycles. Recreating the name on every secure
+    /// transition raced the previous acceptor thread — a name that is still
+    /// open makes `CreateNamedPipeW` fail with `ERROR_ACCESS_DENIED` — which
+    /// permanently killed the secure pipes after the first fast lock/unlock
+    /// cycle (the ~250 ms auto-unlock window is shorter than the helper
+    /// spawn, so the acceptor was usually still blocked in
+    /// `ConnectNamedPipe`).
+    pub struct PipeServer {
+        handle: HANDLE,
+    }
+
+    // SAFETY: after construction the handle is only touched by the thread
+    // that owns the server.
+    unsafe impl Send for PipeServer {}
+
+    impl PipeServer {
+        /// Creates the single-instance pipe end without waiting for a client
+        /// (see [`PipeServer::wait_client`]).
+        pub fn create(name: &str, inbound: bool) -> Result<Self> {
+            let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let security = pipe_security()?;
+            let access = if inbound { PIPE_ACCESS_INBOUND } else { PIPE_ACCESS_OUTBOUND };
+            // SAFETY: `wide` is NUL-terminated; `security` points to a valid
+            // descriptor that outlives the pipe (leaked on purpose).
+            let handle = unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(wide.as_ptr()),
+                    access,
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    1,
+                    64 * 1024,
+                    64 * 1024,
+                    0,
+                    Some(&raw const security),
+                )
+            };
+            if handle.is_invalid() {
+                bail!("CreateNamedPipeW({name}): {:?}", windows::core::Error::from_thread());
+            }
+            Ok(Self { handle })
         }
-        // SAFETY: valid pipe handle; blocking mode waits for the client.
-        // ERROR_PIPE_CONNECTED means the client already connected between
-        // CreateNamedPipeW and this call — that is success, not a failure.
-        if let Err(e) = unsafe { ConnectNamedPipe(handle, None) }
-            && e.code() != windows::core::HRESULT::from_win32(ERROR_PIPE_CONNECTED.0)
-        {
-            return Err(e).context("ConnectNamedPipe");
+
+        /// Blocks until a client connects. `ERROR_PIPE_CONNECTED` means the
+        /// client already connected between creation and this call — that is
+        /// success, not a failure.
+        pub fn wait_client(&self) -> Result<()> {
+            // SAFETY: valid pipe handle; blocking mode waits for the client.
+            if let Err(e) = unsafe { ConnectNamedPipe(self.handle, None) }
+                && e.code() != windows::core::HRESULT::from_win32(ERROR_PIPE_CONNECTED.0)
+            {
+                return Err(e).context("ConnectNamedPipe");
+            }
+            Ok(())
         }
-        // SAFETY: we own the handle; File takes ownership.
-        Ok(unsafe { std::fs::File::from_raw_handle(handle.0 as _) })
+
+        /// Drops the server side of the current connection so
+        /// [`PipeServer::wait_client`] can accept the next one. Best-effort.
+        pub fn disconnect(&self) {
+            // SAFETY: the handle is valid; failure just means no client was
+            // connected.
+            unsafe {
+                let _ = DisconnectNamedPipe(self.handle);
+            }
+        }
+
+        /// Duplicated handle as an owned `File` for the connected phase; the
+        /// master handle stays with the server for disconnect/re-accept.
+        pub fn dup_file(&self) -> Result<std::fs::File> {
+            let mut target = HANDLE::default();
+            // SAFETY: duplicating our own handle within this process; the
+            // target is a fresh owned handle wrapped into a File.
+            unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    self.handle,
+                    GetCurrentProcess(),
+                    &raw mut target,
+                    0,
+                    false,
+                    DUPLICATE_SAME_ACCESS,
+                )
+                .context("DuplicateHandle(pipe)")?;
+                Ok(std::fs::File::from_raw_handle(target.0 as _))
+            }
+        }
+
+        /// True when the client end of an OUTBOUND pipe is gone (there is no
+        /// read side to watch): a zero-length probe write fails with a
+        /// broken-pipe error. Other errors count as "still connected" so a
+        /// live helper is never disconnected by mistake.
+        pub fn outbound_client_gone(&self) -> bool {
+            // SAFETY: empty probe write on our own pipe handle.
+            match unsafe { WriteFile(self.handle, Some(&[]), None, None) } {
+                Ok(()) => false,
+                Err(e) => {
+                    let gone = windows::core::HRESULT::from_win32(ERROR_BROKEN_PIPE.0);
+                    let closing = windows::core::HRESULT::from_win32(ERROR_NO_DATA.0);
+                    let not_connected =
+                        windows::core::HRESULT::from_win32(ERROR_PIPE_NOT_CONNECTED.0);
+                    matches!(e.code(), c if c == gone || c == closing || c == not_connected)
+                }
+            }
+        }
+    }
+
+    impl Drop for PipeServer {
+        fn drop(&mut self) {
+            // SAFETY: we own the handle.
+            unsafe {
+                let _ = CloseHandle(self.handle);
+            }
+        }
     }
 
     /// Connects to a pipe as the client (helper side), retrying while the
