@@ -22,7 +22,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use transport::{EncryptedStream, ReliableTransport};
 use udscredprov::logic::Credentials;
 use windows::Win32::System::RemoteDesktop::{
@@ -92,7 +92,9 @@ fn active_console() -> Option<ConsoleOwner> {
     }
     let user = query_session_string(id, WTSUserName);
     if user.as_deref().unwrap_or_default().is_empty() {
-        warn!(session_id = id, "console session without a queryable user");
+        // Normal while the console sits at the logon/secure-attention
+        // screen; callers poll this on a timer, so keep it out of the log.
+        debug!(session_id = id, "console session without a queryable user");
         return None;
     }
     Some(ConsoleOwner {

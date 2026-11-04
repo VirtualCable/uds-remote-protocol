@@ -430,7 +430,15 @@ async fn ensure_console_session(creds: Option<&Credentials>) -> Result<()> {
     std::fs::write(crate::credprov::ARM_PATH, b"").context("creating the autologon arm flag")?;
     crate::sas::send_sas().context("synthetic SAS")?;
 
+    // The first SAS can land while winlogon is still building the logon
+    // session (e.g. right after a console-conflict eviction, §18.53) and is
+    // then lost: the credential provider never loads and the logon never
+    // happens. Re-send it on a slow cadence until the console comes up —
+    // a SAS on an already-logged console is harmless (it just shows the
+    // secure-attention options, which the autologon dismisses).
+    const SAS_RETRY: Duration = Duration::from_secs(5);
     let start = Instant::now();
+    let mut last_sas = Instant::now();
     loop {
         if crate::console::console_has_user() {
             info!("console session up after the autologon");
@@ -438,6 +446,12 @@ async fn ensure_console_session(creds: Option<&Credentials>) -> Result<()> {
         }
         if start.elapsed() >= LOGON_TIMEOUT {
             bail!("autologon did not produce a console session within {LOGON_TIMEOUT:?}");
+        }
+        if last_sas.elapsed() >= SAS_RETRY {
+            if let Err(err) = crate::sas::send_sas() {
+                warn!(error = %format!("{err:#}"), "SAS retry failed");
+            }
+            last_sas = Instant::now();
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
