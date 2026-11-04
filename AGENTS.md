@@ -13,6 +13,16 @@
 - **License: BSD 3-Clause** (same as uds client). Every crate declares
   `license = "BSD-3-Clause"` via the workspace; keep the `LICENSE` file at
   the repo root in sync.
+
+## Design philosophy
+
+- **State machines: second round, not first.** The owner prefers solving
+  the problem directly first, detecting the stateful tangle in practice,
+  and ONLY THEN consolidating into an explicit state machine (that is how
+  the console FSM was born, §18.55). If the state machine shape is obvious
+  up front, fine — but do not force one by default.
+- Same pattern for abstractions in general: earn them with evidence, then
+  consolidate. Avoid speculative generality.
 - **Source file header (mandatory in every source file, present and
   future)**: `.rs` files start with these four lines (adapt the comment
   prefix for other file types, e.g. `#` for shell/PowerShell/Dockerfile):
