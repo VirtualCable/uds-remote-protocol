@@ -17,11 +17,10 @@
 //! remote session and cleans up everything ephemeral.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, HANDLE_FLAGS,
     HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -72,14 +71,6 @@ pub(crate) const SECURE_EVENT: &str = r"Global\UDSRP-SecureDesktop";
 /// Grace period after spawning before the mutex must be observable.
 const MUTEX_GRACE: Duration = Duration::from_secs(15);
 
-/// Maximum respawns per service run before giving up (crash-loop guard).
-const MAX_RESPAWNS: u32 = 5;
-
-/// Minimum interval between synthetic SAS attempts while waiting for the
-/// auto-logon to produce an interactive session (the logon itself takes
-/// several seconds; re-sending faster would just strobe the secure screen).
-const SAS_COOLDOWN: Duration = Duration::from_secs(15);
-
 /// RAII wrapper for a Win32 handle.
 pub(crate) struct OwnedHandle(HANDLE);
 
@@ -89,6 +80,13 @@ impl Drop for OwnedHandle {
         unsafe {
             let _ = CloseHandle(self.0);
         }
+    }
+}
+
+impl OwnedHandle {
+    /// Raw handle value, for Win32 calls outside this module.
+    pub(crate) fn raw(&self) -> HANDLE {
+        self.0
     }
 }
 
@@ -640,7 +638,7 @@ fn open_agent_log() -> Result<OwnedHandle> {
 /// with an Everyone DACL granting only set/reset/wait rights
 /// (`EVENT_MODIFY_STATE | SYNCHRONIZE`) — same reasoning as the session
 /// mutex DACL above. Returns `None` (supervision disabled) on any failure.
-fn ensure_secure_event() -> Option<OwnedHandle> {
+pub(crate) fn ensure_secure_event() -> Option<OwnedHandle> {
     let mut world_sid = vec![0u8; 68];
     let mut sid_len = world_sid.len() as u32;
     let sid_ok = unsafe {
@@ -708,7 +706,7 @@ fn ensure_secure_event() -> Option<OwnedHandle> {
 
 /// Whether the secure-desktop event is currently set (manual-reset: the wait
 /// does not consume the state).
-fn secure_event_set(event: &OwnedHandle) -> bool {
+pub(crate) fn secure_event_set(event: &OwnedHandle) -> bool {
     // SAFETY: the event handle is ours and open; a zero timeout never blocks.
     (unsafe { WaitForSingleObject(event.0, 0) }) == WAIT_OBJECT_0
 }
@@ -744,7 +742,7 @@ pub(crate) fn console_session_locked(session_id: u32) -> bool {
 /// is locked and we hold its credentials (§18.41) — same one-shot arm flag
 /// as the autologon path (`credprov.rs`). Without credentials the user types
 /// the password over the secure-desktop helper instead.
-fn maybe_arm_auto_unlock(
+pub(crate) fn maybe_arm_auto_unlock(
     creds_slot: &std::sync::Arc<std::sync::Mutex<Option<udscredprov::logic::Credentials>>>,
 ) {
     let session_id = unsafe { WTSGetActiveConsoleSessionId() };
@@ -765,11 +763,12 @@ fn maybe_arm_auto_unlock(
     }
 }
 
-/// Supervises the secure-desktop helper against the event (§18.41): spawns
-/// it when the event is set and no helper runs, kills it when the event is
-/// clear. The helper also self-exits when the desktop returns to Default;
-/// this is the belt-and-braces path.
-fn supervise_secure_helper(event: &OwnedHandle, helper: &mut Option<(u32, OwnedHandle)>) {
+/// Supervises the secure-desktop helper against the secure-desktop state
+/// (§18.41): spawns it while the desktop is secure and no helper runs,
+/// kills it when the desktop returns to Default. The helper also self-exits
+/// on Default; this is the belt-and-braces path. Called by the console
+/// state machine (§18.55) with the poller's latest secure-desktop reading.
+pub(crate) fn supervise_secure_helper(active: bool, helper: &mut Option<(u32, OwnedHandle)>) {
     // Drop finished helpers first (they exit by themselves on Default).
     if let Some((_, process)) = helper {
         // SAFETY: the process handle is ours and open.
@@ -777,7 +776,7 @@ fn supervise_secure_helper(event: &OwnedHandle, helper: &mut Option<(u32, OwnedH
             *helper = None;
         }
     }
-    match (helper.is_some(), secure_event_set(event)) {
+    match (helper.is_some(), active) {
         (false, true) => {
             let session_id = unsafe { WTSGetActiveConsoleSessionId() };
             match spawn_secure_helper(session_id) {
@@ -815,7 +814,7 @@ fn supervise_secure_helper(event: &OwnedHandle, helper: &mut Option<(u32, OwnedH
 /// once the agent ran as a standard user). The agent OPENS this mutex and
 /// takes ownership for its lifetime; this handle just keeps the object
 /// alive and unowned between agents.
-fn ensure_session_mutex() -> Option<OwnedHandle> {
+pub(crate) fn ensure_session_mutex() -> Option<OwnedHandle> {
     // DACL: Everyone gets ONLY acquire/release rights (SYNCHRONIZE |
     // MUTEX_MODIFY_STATE) — never WRITE_DAC/WRITE_OWNER/DELETE, so a local
     // process cannot tamper with or destroy the watchdog token. The agent
@@ -894,191 +893,4 @@ fn ensure_session_mutex() -> Option<OwnedHandle> {
             None
         }
     }
-}
-
-pub(crate) fn watch_loop(
-    stop: &'static AtomicBool,
-    runtime: Option<crate::standalone::Runtime>,
-    creds_slot: std::sync::Arc<std::sync::Mutex<Option<udscredprov::logic::Credentials>>>,
-) {
-    // Pre-create the global session mutex before any agent spawns: only a
-    // privileged process can create Global\ objects (see ensure_session_mutex).
-    let _session_mutex = ensure_session_mutex();
-    // Standalone/pq modes (§18.32): the service owns the validating listener
-    // and spawns one agent per validated connection; the watch loop only
-    // watches.
-    if let Some(runtime) = runtime {
-        watch_with_listener(stop, runtime, creds_slot);
-        return;
-    }
-    let mut agent: Option<Agent> = None;
-    let mut respawns = 0u32;
-    // Key and ticket are generated once per service run; the agent gets them
-    // through the stdin pipe (M3). Regenerating per respawn would invalidate
-    // connected clients for no benefit. In standalone mode they come from
-    // the shared config file instead (fixed, documented ticket).
-    let mut key = [0u8; 32];
-    let mut ticket = [0u8; 48];
-    if let Err(err) = getrandom::fill(&mut key).and_then(|()| getrandom::fill(&mut ticket)) {
-        error!(error = %format!("{err:#}"), "cannot generate session credentials");
-        return;
-    }
-    let config = service_proto::AgentConfig {
-        key,
-        ticket,
-        bind: "0.0.0.0:14433".to_owned(),
-        output_name: String::new(),
-        preset: "ladder".to_owned(),
-        ladder: String::new(),
-        fps_adapt: String::new(),
-        stats_csv: String::new(),
-        fixed_resolution: (0, 0),
-        allow_lock: false,
-        wallpaper_off: false,
-        handoff: None,
-    };
-
-    // Unattended auto-logon (see sas.rs), gated by the one-shot arm flag
-    // (§18.30): only while a logon is armed do we nudge LogonUI with a
-    // synthetic SAS — without CAD satisfied it never enumerates providers,
-    // so an armed auto-logon would wait for a human pressing Ctrl+Alt+Del
-    // forever. Without the flag the machine must boot to a plain logon
-    // screen and stay there.
-    let has_logon_creds = std::path::Path::new(crate::credprov::CREDS_PATH).exists();
-    let mut last_sas: Option<Instant> = None;
-    let nudge_towards_logon = |last_sas: &mut Option<Instant>| {
-        if has_logon_creds
-            && std::path::Path::new(crate::credprov::ARM_PATH).exists()
-            && last_sas.is_none_or(|t| t.elapsed() >= SAS_COOLDOWN)
-        {
-            match crate::sas::send_sas() {
-                Ok(()) => info!("armed with no interactive session; synthetic SAS sent"),
-                Err(err) => warn!(error = %format!("{err:#}"), "cannot send the synthetic SAS"),
-            }
-            *last_sas = Some(Instant::now());
-        }
-    };
-
-    while !stop.load(Ordering::Relaxed) {
-        match &agent {
-            None if respawns >= MAX_RESPAWNS => {
-                error!(MAX_RESPAWNS, "agent respawn limit reached; giving up until service restart");
-                // Keep the loop alive so the SCM can still stop us cleanly.
-                while !stop.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-                break;
-            }
-            None => match Agent::spawn_in_console_session(&config) {
-                Ok(Some(spawned)) => {
-                    respawns += 1;
-                    agent = Some(spawned);
-                }
-                Ok(None) => {
-                    nudge_towards_logon(&mut last_sas);
-                    std::thread::sleep(Duration::from_secs(2)); // no console session yet
-                }
-                Err(err) => {
-                    error!(error = %format!("{err:#}"), "cannot spawn the session agent");
-                    nudge_towards_logon(&mut last_sas);
-                    std::thread::sleep(Duration::from_secs(5));
-                }
-            },
-            Some(a) if !a.is_alive() => {
-                warn!("session agent exited; cleaning up and respawning");
-                agent = None;
-            }
-            Some(a) if !a.mutex_healthy() => {
-                error!("session agent lost its mutex (wedged); killing it");
-                a.kill();
-                agent = None;
-            }
-            Some(_) => std::thread::sleep(Duration::from_millis(500)),
-        }
-    }
-    // Service stopping: do not leave an orphaned agent behind.
-    if let Some(a) = &agent
-        && a.is_alive()
-    {
-        info!("service stopping: terminating the session agent");
-        a.kill();
-    }
-}
-
-/// Validating-listener watch body (§18.32): the listener thread owns the
-/// public TCP endpoint, validates each connection (handshake + possession
-/// proof, against the fixed standalone ticket or the broker in pq mode) and
-/// spawns one session agent per validated client. This loop only supervises:
-/// it clears dead agents, kills wedged ones, and cleans up on service stop.
-/// No proactive spawn and no respawn cap: agents map one-to-one to client
-/// connections, so a crash loop cannot spin here.
-fn watch_with_listener(
-    stop: &'static AtomicBool,
-    runtime: crate::standalone::Runtime,
-    creds_slot: std::sync::Arc<std::sync::Mutex<Option<udscredprov::logic::Credentials>>>,
-) {
-    let slot = std::sync::Arc::new(crate::listener::AgentSlot::default());
-    crate::listener::spawn(stop, runtime, std::sync::Arc::clone(&slot), std::sync::Arc::clone(&creds_slot));
-    let secure_event = ensure_secure_event();
-    let mut helper: Option<(u32, OwnedHandle)> = None;
-    let mut unlock_armed = false;
-    let mut sas_sent = 0u32;
-    while !stop.load(Ordering::Relaxed) {
-        slot.clear_if_dead();
-        slot.kill_if_unhealthy();
-        if let Some(event) = &secure_event {
-            supervise_secure_helper(event, &mut helper);
-        }
-        // Auto-unlock (§18.41/§18.52): on a LOCKED console (a UAC prompt is
-        // not a lock), re-arm the credential provider so the session unlocks
-        // by itself while we hold its creds, and nudge LogonUI with a
-        // synthetic SAS. Driven by the WTS lock state, NOT by the secure
-        // event: the lock curtain is painted by LockApp on the *Default*
-        // desktop, so the OpenInputDesktop-based watch cannot see it — only
-        // the post-SAS credential UI lives on the secure Winlogon desktop.
-        // The SAS is sent at most twice per lock episode, and only while a
-        // client session is live — never at boot or on an idle machine.
-        let session_id = unsafe { WTSGetActiveConsoleSessionId() };
-        let locked = session_id != 0xFFFF_FFFF && console_session_locked(session_id);
-        if !locked {
-            unlock_armed = false;
-            sas_sent = 0;
-        } else if slot.has_live_agent() {
-            if !unlock_armed {
-                unlock_armed = true;
-                maybe_arm_auto_unlock(&creds_slot);
-            }
-            if sas_sent < 2 {
-                match crate::sas::send_sas() {
-                    Ok(()) => {
-                        info!("console locked; synthetic SAS sent to reach the credential prompt")
-                    }
-                    Err(err) => {
-                        warn!(error = %format!("{err:#}"), "cannot send the synthetic SAS")
-                    }
-                }
-                sas_sent += 1;
-            }
-        }
-        // Lab trigger (§18.41): one secure-desktop probe per flag file.
-        if std::path::Path::new(PROBE_FLAG).exists() {
-            let _ = std::fs::remove_file(PROBE_FLAG);
-            match spawn_probe_in_console() {
-                Ok(Some(pid)) => info!(pid, "secure-desktop probe spawned"),
-                Ok(None) => info!("secure-desktop probe requested but there is no console session"),
-                Err(err) => {
-                    warn!(error = %format!("{err:#}"), "cannot spawn the secure-desktop probe");
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    // Never leave a secure helper behind on service stop.
-    if let Some((_, process)) = helper.take() {
-        // SAFETY: the process handle is ours and open.
-        unsafe {
-            let _ = TerminateProcess(process.0, 0);
-        }
-    }
-    slot.kill();
 }

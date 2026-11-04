@@ -3,28 +3,20 @@
 // All rights reserved.
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-//! Console-session ownership (§18.53): who holds the physical console and
-//! how a new session takes it over.
+//! Console-session queries and actions (§18.53/§18.55).
 //!
-//! The detection runs in the service right after the ticket is validated
-//! and BEFORE any session side effect (autologon, agent spawn): when the
-//! console's interactive session belongs to a user other than the one in
-//! the session credentials, the configured `ConsoleConflictPolicy`
-//! applies — `take_over` (default: the ticket IS the authorization),
-//! `deny` (reject with `SESSION_END_CONSOLE_BUSY`) or `ask` (the
-//! CONNECTING client decides; the local console user has no voice — anyone
-//! sitting in front of the machine could otherwise deny remote access).
+//! This module is deliberately passive: it knows HOW to read the console
+//! state and HOW to perform the primitive actions (evict, notify the
+//! client), but not WHEN. All orchestration — conflict resolution, eviction
+//! settling, autologon waits, auto-unlock — lives in the console state
+//! machine (`crate::console_fsm`), the single owner of console side effects.
 //!
-//! The eviction itself is `WTSLogoffSession` (default: a takeover
-//! reassigns the WHOLE machine — the evicted session is destroyed, freeing
-//! profile locks, GPO state and resources) or `WTSDisconnectSession`
-//! (config `console_takeover = "disconnect"`: the evicted session survives
-//! disconnected, keeping its apps).
+//! Account comparison (§18.53): user name case-insensitive, domain
+//! normalized — `""`, `"."` and the machine name all mean "local account".
+//! `DOMAIN\alice` and `.\alice` are DIFFERENT accounts and must conflict.
 
-use std::time::Duration;
-
-use anyhow::{Context, Result, bail};
-use tracing::{debug, info, warn};
+use anyhow::{Context, Result};
+use tracing::debug;
 use transport::{EncryptedStream, ReliableTransport};
 use udscredprov::logic::Credentials;
 use windows::Win32::System::RemoteDesktop::{
@@ -34,13 +26,12 @@ use windows::Win32::System::RemoteDesktop::{
 
 use protocol::ControlMessage;
 use protocol::channel;
-use protocol::{
-    CONSOLE_STATE_ACTIVE, CONSOLE_STATE_LOCKED, SESSION_END_CONSOLE_BUSY,
-    SESSION_END_DENIED_BY_USER, SESSION_STAGE_EVICTING,
-};
-/// How long to wait for an evicted console to actually flip before arming
-/// the autologon (disconnect is asynchronous on the WTS side).
-const EVICT_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the state machine waits for an evicted console to actually
+/// flip before giving up (logoff/disconnect are asynchronous on the WTS
+/// side).
+pub(crate) const EVICT_SETTLE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
 
 /// Server-side conflict configuration, resolved from the standalone config
 /// or the broker ticket payload.
@@ -50,22 +41,48 @@ pub struct ConflictConfig {
     /// Whether the `ask` message may carry the console owner's name.
     pub reveal_user: bool,
     /// Ask timeout; without an explicit answer the connection is denied.
-    pub timeout: Duration,
-    /// Disconnect (keep apps) or logoff (kill apps) on takeover.
+    pub timeout: std::time::Duration,
+    /// Disconnect (keep apps) or logoff (kill apps, default) on takeover.
     pub takeover: server_config::TakeoverMode,
 }
 
-/// Snapshot of the interactive console session, when there is one.
-pub struct ConsoleOwner {
-    /// WTS session id.
-    pub id: u32,
-    /// Session user name (no domain), as reported by `WTSUserName`.
+/// Full account identity of a session (§18.53): user name plus domain as
+/// reported by `WTSUserName`/`WTSDomainName` (machine name for local
+/// accounts, domain name for domain accounts).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Account {
+    /// User name (no domain).
     pub user: String,
-    /// Session domain (`WTSDomainName`): the machine name for local
-    /// accounts, the domain name for domain accounts.
+    /// Domain (or machine name for local accounts).
     pub domain: String,
-    /// True while the session shows the lock screen.
-    pub locked: bool,
+}
+
+impl Account {
+    /// `DOMAIN\user` display form.
+    pub fn display(&self) -> String {
+        format!("{}\\{}", self.domain, self.user)
+    }
+}
+
+/// Service-side view of the interactive console (§18.55 state machine).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsoleState {
+    /// No console session at all (`0xFFFF_FFFF`, a clean boot).
+    NoSession,
+    /// A console session id exists but has NO logged-on user: the logon
+    /// screen, including the winlogon session left behind by a logoff or a
+    /// console disconnect (§18.53 lesson of 2026-11-04).
+    LogonScreen,
+    /// A user owns the console. `locked` (secure attention / lock screen)
+    /// is a PROPERTY of the session, not a state of its own.
+    Session {
+        /// WTS session id.
+        id: u32,
+        /// Owning account.
+        account: Account,
+        /// True while the session shows the lock screen.
+        locked: bool,
+    },
 }
 
 /// Queries one null-terminated UTF-16 string field of a WTS session.
@@ -85,40 +102,34 @@ fn query_session_string(session_id: u32, class: windows::Win32::System::RemoteDe
     Some(value)
 }
 
-/// The interactive console session, or `None` at the logon screen.
-fn active_console() -> Option<ConsoleOwner> {
+/// Snapshot of the interactive console. Cheap WTS queries; the state
+/// machine's poller calls this on its cadence (500 ms).
+pub(crate) fn console_state() -> ConsoleState {
     // SAFETY: plain query, no out-params.
     let id = unsafe { WTSGetActiveConsoleSessionId() };
     if id == 0xFFFF_FFFF {
-        return None;
+        return ConsoleState::NoSession;
     }
     let user = query_session_string(id, WTSUserName);
     if user.as_deref().unwrap_or_default().is_empty() {
         // Normal while the console sits at the logon/secure-attention
         // screen; callers poll this on a timer, so keep it out of the log.
         debug!(session_id = id, "console session without a queryable user");
-        return None;
+        return ConsoleState::LogonScreen;
     }
-    Some(ConsoleOwner {
+    ConsoleState::Session {
         id,
-        user: user.unwrap_or_default(),
-        domain: query_session_string(id, WTSDomainName).unwrap_or_default(),
+        account: Account {
+            user: user.unwrap_or_default(),
+            domain: query_session_string(id, WTSDomainName).unwrap_or_default(),
+        },
         locked: crate::agent::console_session_locked(id),
-    })
-}
-
-/// True when the console session has a logged-on user. A console sitting at
-/// the logon screen (post-logoff, post-disconnect of the console session)
-/// still reports an active session id, but with no user it cannot host an
-/// agent — the autologon must run first (§18.53 lesson of 2026-11-04).
-pub fn console_has_user() -> bool {
-    active_console().is_some()
+    }
 }
 
 /// Account comparison (§18.53): user name case-insensitive, domain
 /// normalized — `""`, `"."` and the machine name all mean "local account".
-/// `DOMAIN\alice` and `.\alice` are DIFFERENT accounts and must conflict.
-fn same_account(owner: &ConsoleOwner, creds: &Credentials) -> bool {
+pub(crate) fn same_account(owner: &Account, creds: &Credentials) -> bool {
     if !creds.username.eq_ignore_ascii_case(&owner.user) {
         return false;
     }
@@ -131,134 +142,29 @@ fn same_account(owner: &ConsoleOwner, creds: &Credentials) -> bool {
         && (is_local(&owner.domain) || owner.domain.eq_ignore_ascii_case(&creds.domain))
 }
 
-/// Applies the conflict policy before any session side effect. `creds` are
-/// the session's auto-logon credentials; without them there is no identity
-/// to compare and the existing console is simply mirrored (no conflict).
-///
-/// Sends `SessionEnd` and bails on refusal; on takeover evicts the console
-/// owner and returns so the caller's autologon path brings up the new
-/// user's session.
-pub async fn resolve_conflict<T: ReliableTransport>(
-    stream: &mut EncryptedStream<T>,
-    creds: Option<&Credentials>,
-    config: &ConflictConfig,
-) -> Result<()> {
-    let Some(owner) = active_console() else {
-        return Ok(());
-    };
-    let Some(creds) = creds else {
-        return Ok(());
-    };
-    if same_account(&owner, creds) {
-        return Ok(());
-    }
-    info!(
-        console_user = %format!("{}\\{}", owner.domain, owner.user),
-        session_user = %format!("{}\\{}", creds.domain, creds.username),
-        locked = owner.locked,
-        policy = ?config.policy,
-        "console conflict: another account owns the console"
-    );
-    let take_over = match config.policy {
-        server_config::ConsoleConflictPolicy::TakeOver => true,
-        server_config::ConsoleConflictPolicy::Deny => {
-            send_session_end(stream, SESSION_END_CONSOLE_BUSY).await;
-            bail!("console busy (owned by another user); policy is deny");
-        }
-        server_config::ConsoleConflictPolicy::Ask => {
-            ask_client(stream, &owner, config).await?
-        }
-    };
-    if !take_over {
-        send_session_end(stream, SESSION_END_DENIED_BY_USER).await;
-        bail!("console takeover refused by the connecting client");
-    }
-    // The eviction can take a few seconds; tell the client what the wait
-    // is about so it does not read it as a hang.
-    send_progress(stream, SESSION_STAGE_EVICTING).await;
-    evict(&owner, config.takeover)
-}
-
-/// Policy `ask`: queries the CONNECTING client (never the local console)
-/// and waits for its `ConsoleConflictReply` up to the configured timeout.
-/// Timeout or a negative answer are both a refusal (fail-closed).
-async fn ask_client<T: ReliableTransport>(
-    stream: &mut EncryptedStream<T>,
-    owner: &ConsoleOwner,
-    config: &ConflictConfig,
-) -> Result<bool> {
-    let query = ControlMessage::ConsoleConflict {
-        user: config
-            .reveal_user
-            .then(|| format!("{}\\{}", owner.domain, owner.user)),
-        state: if owner.locked {
-            CONSOLE_STATE_LOCKED
-        } else {
-            CONSOLE_STATE_ACTIVE
-        },
-    };
-    stream.send(channel::CONTROL, &query.encode()?).await?;
-    let mut buf = [0u8; 2048];
-    let reply = tokio::time::timeout(config.timeout, async {
-        loop {
-            let (ch, n) = stream.recv_into(&mut buf).await?;
-            if ch != channel::CONTROL {
-                continue;
-            }
-            if let Ok(ControlMessage::ConsoleConflictReply { take_over }) =
-                ControlMessage::decode(&buf[..n])
-            {
-                return Ok::<bool, anyhow::Error>(take_over);
-            }
-        }
-    })
-    .await;
-    match reply {
-        Ok(Ok(take_over)) => {
-            info!(take_over, "console conflict answered by the client");
-            Ok(take_over)
-        }
-        Ok(Err(err)) => Err(err),
-        Err(_) => {
-            info!(timeout = ?config.timeout, "console conflict ask timed out; denying");
-            Ok(false)
-        }
-    }
-}
-
-/// Evicts the console owner per the takeover mode and waits for the
-/// console to actually flip before returning (the autologon path keys on
-/// "no active console session").
-fn evict(owner: &ConsoleOwner, mode: server_config::TakeoverMode) -> Result<()> {
+/// Fires the eviction of a console session (§18.53): `WTSLogoffSession`
+/// (default — a takeover reassigns the WHOLE machine) or
+/// `WTSDisconnectSession`. Asynchronous on the WTS side: the caller (state
+/// machine) waits for the console to flip with `EVICT_SETTLE_TIMEOUT`.
+pub(crate) fn evict_start(session_id: u32, account: &Account, mode: server_config::TakeoverMode) -> Result<()> {
     match mode {
         server_config::TakeoverMode::Disconnect => {
-            info!(session_id = owner.id, user = %owner.user, "disconnecting the console session (takeover)");
+            debug!(session_id, user = %account.display(), "disconnecting the console session (takeover)");
             // SAFETY: local server handle, valid session id.
-            unsafe { WTSDisconnectSession(None, owner.id, true) }.context("WTSDisconnectSession")?;
+            unsafe { WTSDisconnectSession(None, session_id, true) }.context("WTSDisconnectSession")?;
         }
         server_config::TakeoverMode::Logoff => {
-            warn!(session_id = owner.id, user = %owner.user, "LOGGING OFF the console session (takeover mode logoff)");
+            debug!(session_id, user = %account.display(), "LOGGING OFF the console session (takeover mode logoff)");
             // SAFETY: local server handle, valid session id.
-            unsafe { WTSLogoffSession(None, owner.id, true) }.context("WTSLogoffSession")?;
+            unsafe { WTSLogoffSession(None, session_id, true) }.context("WTSLogoffSession")?;
         }
     }
-    let start = std::time::Instant::now();
-    loop {
-        // SAFETY: plain query, no out-params.
-        let current = unsafe { WTSGetActiveConsoleSessionId() };
-        if current != owner.id {
-            return Ok(());
-        }
-        if start.elapsed() >= EVICT_SETTLE_TIMEOUT {
-            bail!("console session {} still active {EVICT_SETTLE_TIMEOUT:?} after the eviction", owner.id);
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    Ok(())
 }
 
 /// Best-effort `SessionEnd` notification right before dropping a refused
 /// connection (§18.53 reason codes).
-async fn send_session_end<T: ReliableTransport>(stream: &mut EncryptedStream<T>, reason: u8) {
+pub(crate) async fn send_session_end<T: ReliableTransport>(stream: &mut EncryptedStream<T>, reason: u8) {
     let msg = ControlMessage::SessionEnd { reason };
     if let Ok(encoded) = msg.encode() {
         let _ = stream.send(channel::CONTROL, &encoded).await;

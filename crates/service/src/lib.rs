@@ -13,6 +13,8 @@ mod agent;
 #[cfg(windows)]
 mod console;
 #[cfg(windows)]
+mod console_fsm;
+#[cfg(windows)]
 mod credprov;
 #[cfg(windows)]
 mod install;

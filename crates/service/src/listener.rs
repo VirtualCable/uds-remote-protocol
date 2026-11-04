@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use broker::ConnectionProvider as _;
 use tracing::{error, info, warn};
-use transport::{EncryptedStream, ReliableTransport, TcpTransport};
+use transport::{EncryptedStream, TcpTransport};
 use udscredprov::logic::Credentials;
 use windows::Win32::Networking::WinSock::{WSAPROTOCOL_INFOW, WSADuplicateSocketW};
 
@@ -95,12 +95,16 @@ impl AgentSlot {
 }
 
 /// Starts the validating listener on a dedicated thread with its own
-/// current-thread tokio runtime (the service itself is sync).
+/// current-thread tokio runtime (the service itself is sync). Validated
+/// connections are handed to the console state machine (§18.55) as
+/// [`crate::console_fsm::Event::ClientValidated`] events; the listener no
+/// longer drives the pre-session sequence itself.
 pub fn spawn(
     stop: &'static AtomicBool,
-    runtime: crate::standalone::Runtime,
+    runtime: Arc<crate::standalone::Runtime>,
     slot: Arc<AgentSlot>,
     creds_slot: Arc<Mutex<Option<Credentials>>>,
+    events: flume::Sender<crate::console_fsm::Event>,
 ) {
     std::thread::Builder::new()
         .name("udsrp-listener".into())
@@ -115,18 +119,19 @@ pub fn spawn(
                     return;
                 }
             };
-            runtime_tokio.block_on(accept_loop(stop, runtime, slot, creds_slot));
+            runtime_tokio.block_on(accept_loop(stop, runtime, slot, creds_slot, events));
         })
         .expect("cannot spawn the listener thread");
 }
 
 async fn accept_loop(
     stop: &AtomicBool,
-    runtime: crate::standalone::Runtime,
+    runtime: Arc<crate::standalone::Runtime>,
     slot: Arc<AgentSlot>,
     creds_slot: Arc<Mutex<Option<Credentials>>>,
+    events: flume::Sender<crate::console_fsm::Event>,
 ) {
-    let bind = match &runtime {
+    let bind = match &*runtime {
         crate::standalone::Runtime::Standalone(standalone) => &standalone.bind,
         crate::standalone::Runtime::Pq(pq) => &pq.bind,
     };
@@ -151,12 +156,7 @@ async fn accept_loop(
             }
         };
         info!(%peer, "connection accepted by the service");
-        let runtime = &runtime;
-        let slot = &slot;
-        let creds_slot = &creds_slot;
-        // Sequential on purpose (one session per machine): a second client
-        // waits until the current attempt resolves.
-        if let Err(err) = handle_connection(socket, peer, runtime, slot, creds_slot).await {
+        if let Err(err) = handle_connection(socket, peer, &runtime, &slot, &creds_slot, &events).await {
             warn!(%peer, error = %format!("{err:#}"), "connection rejected before handoff");
         }
     }
@@ -171,15 +171,14 @@ async fn wait_for_stop(stop: &AtomicBool) {
 
 /// Handshake timeout: a stalled or probing peer must not hold the session.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
-/// How long to wait for the autologon to produce a console session.
-const LOGON_TIMEOUT: Duration = Duration::from_secs(60);
 
 async fn handle_connection(
     socket: tokio::net::TcpStream,
     peer: std::net::SocketAddr,
-    runtime: &crate::standalone::Runtime,
+    runtime: &Arc<crate::standalone::Runtime>,
     slot: &Arc<AgentSlot>,
     creds_slot: &Arc<Mutex<Option<Credentials>>>,
+    events: &flume::Sender<crate::console_fsm::Event>,
 ) -> Result<()> {
     if slot.has_live_agent() {
         // SESSION_BUSY (§18.38): one interactive session per machine.
@@ -189,7 +188,7 @@ async fn handle_connection(
     // session parameters) lands in `grant_slot` during the handshake.
     let grant_slot: Arc<Mutex<Option<broker::SessionGrant>>> = Arc::new(Mutex::new(None));
     let peer_ip = peer.ip().to_string();
-    let mut stream = match runtime {
+    let stream = match &**runtime {
         crate::standalone::Runtime::Standalone(standalone) => {
             tokio::time::timeout(
                 HANDSHAKE_TIMEOUT,
@@ -221,34 +220,55 @@ async fn handle_connection(
             .context("handshake timed out")??
         }
     };
-    info!(mode = mode_name(runtime), "handshake validated (possession proof passed)");
     let grant = grant_slot.lock().expect("grant slot poisoned").take();
 
     // Per-session credentials (broker mode) replace the credprov slot for
-    // the autologon below; standalone mode keeps its configured credentials.
-    let creds = match runtime {
+    // the autologon; standalone mode keeps its configured credentials.
+    let creds = match &**runtime {
         crate::standalone::Runtime::Standalone(standalone) => standalone.creds.clone(),
         crate::standalone::Runtime::Pq(_) => grant
             .as_ref()
             .and_then(|grant| grant.credentials.clone())
             .map(|creds| Credentials::new(creds.user.trim(), &creds.domain, &creds.password)),
     };
-    if matches!(runtime, crate::standalone::Runtime::Pq(_)) {
+    if matches!(&**runtime, crate::standalone::Runtime::Pq(_)) {
         *creds_slot.lock().expect("creds slot poisoned") = creds.clone();
     }
 
-    // Console-conflict policy (§18.53), server-mandatory: another user
-    // owning the console is resolved BEFORE any session side effect.
+    // Hand the validated connection to the console state machine (§18.55):
+    // it resolves the console conflict (§18.53), runs the autologon when
+    // needed and completes the session with a fresh agent.
     let conflict = conflict_config(runtime, grant.as_ref());
-    crate::console::resolve_conflict(&mut stream, creds.as_ref(), &conflict).await?;
+    events
+        .send_async(crate::console_fsm::Event::ClientValidated(Box::new(
+            crate::console_fsm::ClientValidated {
+                stream,
+                runtime: Arc::clone(runtime),
+                grant,
+                creds,
+                conflict,
+            },
+        )))
+        .await
+        .context("console state machine channel closed")
+}
 
-    // From here on the client is authenticated: side effects are allowed.
-    ensure_console_session(&mut stream, creds.as_ref()).await?;
-
-    // §18.53 pre-session gate: tell the client the session is ready; its
-    // next control message will be the agent's `UdpOffer` after the
-    // handoff. (A lab agent without the service never sends this — the
-    // client treats an early `UdpOffer` as an implicit ready.)
+/// Second half of a validated connection, driven by the console state
+/// machine once the console is ready (§18.55): tells the client the
+/// session is ready, spawns the session agent into the console and hands
+/// the socket over.
+///
+/// §18.53 pre-session gate: the client's next control message after
+/// `SessionReady` will be the agent's `UdpOffer` after the handoff. (A lab
+/// agent without the service never sends this — the client treats an early
+/// `UdpOffer` as an implicit ready.)
+pub(crate) async fn complete_session(
+    mut stream: EncryptedStream<TcpTransport>,
+    runtime: &crate::standalone::Runtime,
+    grant: Option<broker::SessionGrant>,
+    slot: &Arc<AgentSlot>,
+    creds_slot: &Arc<Mutex<Option<Credentials>>>,
+) -> Result<()> {
     let ready = protocol::ControlMessage::SessionReady;
     stream.send(protocol::channel::CONTROL, &ready.encode()?).await?;
 
@@ -352,7 +372,7 @@ async fn handle_connection(
     Ok(())
 }
 
-fn mode_name(runtime: &crate::standalone::Runtime) -> &'static str {
+pub(crate) fn mode_name(runtime: &crate::standalone::Runtime) -> &'static str {
     match runtime {
         crate::standalone::Runtime::Standalone(_) => "standalone",
         crate::standalone::Runtime::Pq(_) => "pq",
@@ -410,55 +430,3 @@ fn duplicate_socket_into(socket: &std::net::TcpStream, pid: u32) -> Result<Vec<u
     Ok(bytes.to_vec())
 }
 
-/// Ensures an interactive console session exists, triggering the autologon
-/// (arm flag + synthetic SAS; the credential provider pipe then pushes the
-/// session credentials) when the machine sits at the logon screen.
-///
-/// "Console up" means a console session WITH a logged-on user: after a
-/// logoff (or a console disconnect) the console keeps a live winlogon
-/// session id with no user, and spawning the agent there dies in
-/// `WTSQueryUserToken` (0x800703F0) — only a fresh boot reports
-/// `0xFFFF_FFFF` (§18.53 lesson of 2026-11-04).
-async fn ensure_console_session<T: ReliableTransport>(
-    stream: &mut EncryptedStream<T>,
-    creds: Option<&Credentials>,
-) -> Result<()> {
-    if crate::console::console_has_user() {
-        return Ok(());
-    }
-    let Some(creds) = creds else {
-        bail!("no console session and no autologon credentials configured");
-    };
-    info!(user = %creds.username, "no console session; arming autologon and sending SAS");
-    // The sign-in takes a few seconds; tell the client what the wait is
-    // about so it does not read it as a hang.
-    crate::console::send_progress(stream, protocol::SESSION_STAGE_AUTOLOGON).await;
-    std::fs::write(crate::credprov::ARM_PATH, b"").context("creating the autologon arm flag")?;
-    crate::sas::send_sas().context("synthetic SAS")?;
-
-    // The first SAS can land while winlogon is still building the logon
-    // session (e.g. right after a console-conflict eviction, §18.53) and is
-    // then lost: the credential provider never loads and the logon never
-    // happens. Re-send it on a slow cadence until the console comes up —
-    // a SAS on an already-logged console is harmless (it just shows the
-    // secure-attention options, which the autologon dismisses).
-    const SAS_RETRY: Duration = Duration::from_secs(5);
-    let start = Instant::now();
-    let mut last_sas = Instant::now();
-    loop {
-        if crate::console::console_has_user() {
-            info!("console session up after the autologon");
-            return Ok(());
-        }
-        if start.elapsed() >= LOGON_TIMEOUT {
-            bail!("autologon did not produce a console session within {LOGON_TIMEOUT:?}");
-        }
-        if last_sas.elapsed() >= SAS_RETRY {
-            if let Err(err) = crate::sas::send_sas() {
-                warn!(error = %format!("{err:#}"), "SAS retry failed");
-            }
-            last_sas = Instant::now();
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}

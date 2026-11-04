@@ -17,7 +17,6 @@ use windows::Win32::System::Services::{
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
-use crate::agent;
 use crate::install::SERVICE_NAME;
 use crate::logging;
 
@@ -88,13 +87,15 @@ fn service_main_impl() -> Result<()> {
     Ok(())
 }
 
-/// Service body: watch loop that keeps one session agent alive in the
-/// console session (spawn, watchdog, respawn with a crash-loop cap).
+/// Service body: the console state machine (§18.55) owns every console
+/// side effect — pre-session sequence for validated connections, agent
+/// supervision, secure-desktop helper, auto-unlock and legacy proactive
+/// spawn.
 fn service_body(
     runtime: Option<crate::standalone::Runtime>,
     creds_slot: std::sync::Arc<std::sync::Mutex<Option<udscredprov::logic::Credentials>>>,
 ) {
-    agent::watch_loop(&STOP_REQUESTED, runtime, creds_slot);
+    crate::console_fsm::run(&STOP_REQUESTED, runtime, creds_slot);
 }
 
 /// `HandlerEx` callback: the SCM asks us to stop/shutdown.

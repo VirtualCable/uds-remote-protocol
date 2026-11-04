@@ -22,6 +22,7 @@ tracing-subscriber.workspace = true
 [target.'cfg(windows)'.dependencies]
 transport.workspace = true
 crypt.workspace = true
+flume.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
 udscredprov = { path = "../udscredprov" }
 widestring = "1.2"
