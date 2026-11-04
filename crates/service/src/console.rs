@@ -34,7 +34,7 @@ use protocol::ControlMessage;
 use protocol::channel;
 use protocol::{
     CONSOLE_STATE_ACTIVE, CONSOLE_STATE_LOCKED, SESSION_END_CONSOLE_BUSY,
-    SESSION_END_DENIED_BY_USER,
+    SESSION_END_DENIED_BY_USER, SESSION_STAGE_EVICTING,
 };
 /// How long to wait for an evicted console to actually flip before arming
 /// the autologon (disconnect is asynchronous on the WTS side).
@@ -171,6 +171,9 @@ pub async fn resolve_conflict<T: ReliableTransport>(
         send_session_end(stream, SESSION_END_DENIED_BY_USER).await;
         bail!("console takeover refused by the connecting client");
     }
+    // The eviction can take a few seconds; tell the client what the wait
+    // is about so it does not read it as a hang.
+    send_progress(stream, SESSION_STAGE_EVICTING).await;
     evict(&owner, config.takeover)
 }
 
@@ -255,6 +258,15 @@ fn evict(owner: &ConsoleOwner, mode: server_config::TakeoverMode) -> Result<()> 
 /// connection (§18.53 reason codes).
 async fn send_session_end<T: ReliableTransport>(stream: &mut EncryptedStream<T>, reason: u8) {
     let msg = ControlMessage::SessionEnd { reason };
+    if let Ok(encoded) = msg.encode() {
+        let _ = stream.send(channel::CONTROL, &encoded).await;
+    }
+}
+
+/// Best-effort `SessionProgress` notice so the client can show what the
+/// pre-session wait is about (§18.53 stage codes).
+pub(crate) async fn send_progress<T: ReliableTransport>(stream: &mut EncryptedStream<T>, stage: u8) {
+    let msg = ControlMessage::SessionProgress { stage };
     if let Ok(encoded) = msg.encode() {
         let _ = stream.send(channel::CONTROL, &encoded).await;
     }

@@ -889,6 +889,7 @@ async fn run() -> Result<()> {
                             take_over: on_conflict_take_over,
                         });
                     }
+                    ClientEvent::Status(msg) => info!("UDSRP-STATUS: {msg}"),
                     ClientEvent::Error(e) => warn!("session error: {e}"),
                     ClientEvent::Disconnected => {
                         info!("session disconnected");

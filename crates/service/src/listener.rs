@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, bail};
 use broker::ConnectionProvider as _;
 use tracing::{error, info, warn};
-use transport::{EncryptedStream, TcpTransport};
+use transport::{EncryptedStream, ReliableTransport, TcpTransport};
 use udscredprov::logic::Credentials;
 use windows::Win32::Networking::WinSock::{WSAPROTOCOL_INFOW, WSADuplicateSocketW};
 
@@ -243,7 +243,7 @@ async fn handle_connection(
     crate::console::resolve_conflict(&mut stream, creds.as_ref(), &conflict).await?;
 
     // From here on the client is authenticated: side effects are allowed.
-    ensure_console_session(creds.as_ref()).await?;
+    ensure_console_session(&mut stream, creds.as_ref()).await?;
 
     // §18.53 pre-session gate: tell the client the session is ready; its
     // next control message will be the agent's `UdpOffer` after the
@@ -419,7 +419,10 @@ fn duplicate_socket_into(socket: &std::net::TcpStream, pid: u32) -> Result<Vec<u
 /// session id with no user, and spawning the agent there dies in
 /// `WTSQueryUserToken` (0x800703F0) — only a fresh boot reports
 /// `0xFFFF_FFFF` (§18.53 lesson of 2026-11-04).
-async fn ensure_console_session(creds: Option<&Credentials>) -> Result<()> {
+async fn ensure_console_session<T: ReliableTransport>(
+    stream: &mut EncryptedStream<T>,
+    creds: Option<&Credentials>,
+) -> Result<()> {
     if crate::console::console_has_user() {
         return Ok(());
     }
@@ -427,6 +430,9 @@ async fn ensure_console_session(creds: Option<&Credentials>) -> Result<()> {
         bail!("no console session and no autologon credentials configured");
     };
     info!(user = %creds.username, "no console session; arming autologon and sending SAS");
+    // The sign-in takes a few seconds; tell the client what the wait is
+    // about so it does not read it as a hang.
+    crate::console::send_progress(stream, protocol::SESSION_STAGE_AUTOLOGON).await;
     std::fs::write(crate::credprov::ARM_PATH, b"").context("creating the autologon arm flag")?;
     crate::sas::send_sas().context("synthetic SAS")?;
 

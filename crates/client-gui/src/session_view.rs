@@ -195,7 +195,7 @@ impl SessionView {
                         .stats
                         .replace((snapshot, std::time::Instant::now()));
                 }
-                ClientEvent::Error(message) => {
+                ClientEvent::Error(message) | ClientEvent::Status(message) => {
                     self.status = message;
                 }
                 ClientEvent::Disconnected => {

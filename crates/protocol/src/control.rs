@@ -214,6 +214,16 @@ pub enum ControlMessage {
         /// True to take the console over.
         take_over: bool,
     },
+    /// Pre-session progress notice, server → client (§18.53): the wait has
+    /// stages (evicting a previous console owner, waiting for the
+    /// autologon) that can take several seconds; the client shows them so
+    /// the user does not read the wait as a hang. `stage` is one of the
+    /// `SESSION_STAGE_*` constants. Appended at the end so existing
+    /// postcard variant indices do not shift.
+    SessionProgress {
+        /// `SESSION_STAGE_*` constant.
+        stage: u8,
+    },
 }
 
 /// `SessionEnd` reason: the console is owned by another user and the server
@@ -229,6 +239,13 @@ pub const CONSOLE_STATE_ACTIVE: u8 = 0;
 pub const CONSOLE_STATE_LOCKED: u8 = 1;
 /// `ConsoleConflict` state: the console session is disconnected.
 pub const CONSOLE_STATE_DISCONNECTED: u8 = 2;
+
+/// `SessionProgress` stage: evicting the previous console owner
+/// (disconnect/logoff can take a few seconds).
+pub const SESSION_STAGE_EVICTING: u8 = 1;
+/// `SessionProgress` stage: waiting for the autologon to bring the console
+/// up (SAS + credential provider + shell startup).
+pub const SESSION_STAGE_AUTOLOGON: u8 = 2;
 
 impl ControlMessage {
     /// Serializes the message (postcard).

@@ -269,6 +269,18 @@ impl Session {
                         info!("console takeover denied; waiting for the server to close");
                     }
                 }
+                Ok(ControlMessage::SessionProgress { stage }) => {
+                    let text = match stage {
+                        protocol::SESSION_STAGE_EVICTING => {
+                            "cleaning up the previous console session…".to_string()
+                        }
+                        protocol::SESSION_STAGE_AUTOLOGON => {
+                            "warming up the session (signing in)…".to_string()
+                        }
+                        other => format!("server is preparing the session ({other})…"),
+                    };
+                    let _ = emit(&self.events, ClientEvent::Status(text));
+                }
                 // Anything else is not part of the pre-session vocabulary.
                 _ => {}
             }

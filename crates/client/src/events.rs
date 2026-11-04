@@ -155,6 +155,11 @@ pub enum ClientEvent {
         /// `protocol::control::CONSOLE_STATE_*` constant.
         state: u8,
     },
+    /// Pre-session progress notice (§18.53): the server is working through
+    /// a slow step before the session is ready (console eviction, autologon
+    /// sign-in). Informational; the consumer typically shows it as the
+    /// connection status.
+    Status(String),
     /// Non-fatal session condition worth surfacing (e.g. the video stream
     /// broke and a keyframe was requested). Fatal errors end
     /// [`crate::Session::run`] with `Err` instead.
@@ -242,6 +247,7 @@ impl std::fmt::Debug for ClientEvent {
                 .field("user", user)
                 .field("state", state)
                 .finish(),
+            Self::Status(s) => f.debug_tuple("Status").field(s).finish(),
             Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
             Self::Disconnected => f.debug_struct("Disconnected").finish(),
         }

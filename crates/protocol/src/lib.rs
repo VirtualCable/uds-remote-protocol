@@ -32,6 +32,7 @@ pub use clipboard::{
 pub use control::{
     Capability, ControlMessage, CONSOLE_STATE_ACTIVE, CONSOLE_STATE_DISCONNECTED,
     CONSOLE_STATE_LOCKED, SESSION_END_CONSOLE_BUSY, SESSION_END_DENIED_BY_USER,
+    SESSION_STAGE_AUTOLOGON, SESSION_STAGE_EVICTING,
 };
 pub use cursor::{CursorError, CursorMessage, MAX_CURSOR_DIM};
 pub use error::ProtocolError;
