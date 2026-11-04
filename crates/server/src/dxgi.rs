@@ -396,10 +396,15 @@ impl FrameSource for DxgiSource {
             Ok(frame) => Ok(Some(frame)),
             Err(e) => {
                 // A desktop switch can land mid-extract (lab: lock bursts make
-                // `GetFrameDirtyRects` fail right after a rebuild, §18.52.4):
-                // the frame is unusable but the fix is the same rebuild as
-                // ACCESS_LOST, not a dead capture thread.
-                let code = e.downcast_ref::<windows::core::Error>().map(|w| w.code());
+                // `GetFrameDirtyRects` fail right after a rebuild, §18.52.4;
+                // the winlogon→user desktop switch after an autologon does
+                // the same, §18.53): the frame is unusable but the fix is the
+                // same rebuild as ACCESS_LOST, not a dead capture thread. The
+                // HRESULT sits anywhere in the context chain.
+                let code = e
+                    .chain()
+                    .find_map(|cause| cause.downcast_ref::<windows::core::Error>())
+                    .map(|w| w.code());
                 if code == Some(DXGI_ERROR_ACCESS_LOST) || code == Some(DXGI_ERROR_INVALID_CALL) {
                     tracing::warn!(
                         "frame extract failed with {code:?} mid-transition; rebuilding the duplication"
@@ -640,7 +645,10 @@ impl DxgiSource {
                 &mut needed,
             )
         }
-        .ok()
+        // Keep the windows error in the chain: `next_frame` routes
+        // ACCESS_LOST / INVALID_CALL (desktop switch mid-extract, e.g. the
+        // winlogon→user switch right after an autologon) to the duplication
+        // rebuild, and a fatal log needs the HRESULT to diagnose the rest.
         .context("GetFrameDirtyRects failed")?;
 
         let rects: Vec<Rect> = self
