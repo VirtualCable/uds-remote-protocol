@@ -26,8 +26,8 @@ use tracing::{info, warn};
 use transport::{EncryptedStream, ReliableTransport};
 use udscredprov::logic::Credentials;
 use windows::Win32::System::RemoteDesktop::{
-    WTSDisconnectSession, WTSFreeMemory, WTSGetActiveConsoleSessionId, WTSLogoffSession,
-    WTSQuerySessionInformationW, WTSUserName,
+    WTSDisconnectSession, WTSDomainName, WTSFreeMemory, WTSGetActiveConsoleSessionId,
+    WTSLogoffSession, WTSQuerySessionInformationW, WTSUserName,
 };
 
 use protocol::ControlMessage;
@@ -59,8 +59,28 @@ pub struct ConsoleOwner {
     pub id: u32,
     /// Session user name (no domain), as reported by `WTSUserName`.
     pub user: String,
+    /// Session domain (`WTSDomainName`): the machine name for local
+    /// accounts, the domain name for domain accounts.
+    pub domain: String,
     /// True while the session shows the lock screen.
     pub locked: bool,
+}
+
+/// Queries one null-terminated UTF-16 string field of a WTS session.
+fn query_session_string(session_id: u32, class: windows::Win32::System::RemoteDesktop::WTS_INFO_CLASS) -> Option<String> {
+    let mut buf = windows::core::PWSTR::null();
+    let mut bytes = 0u32;
+    // SAFETY: valid out-params; on success the buffer is freed below.
+    let queried = unsafe {
+        WTSQuerySessionInformationW(None, session_id, class, &raw mut buf, &raw mut bytes)
+    };
+    if queried.is_err() || buf.is_null() {
+        return None;
+    }
+    // SAFETY: on success the buffer holds a null-terminated UTF-16 string.
+    let value = unsafe { buf.to_string().unwrap_or_default() };
+    unsafe { WTSFreeMemory(buf.0.cast()) };
+    Some(value)
 }
 
 /// The interactive console session, or `None` at the logon screen.
@@ -70,27 +90,33 @@ fn active_console() -> Option<ConsoleOwner> {
     if id == 0xFFFF_FFFF {
         return None;
     }
-    let mut buf = windows::core::PWSTR::null();
-    let mut bytes = 0u32;
-    // SAFETY: valid out-params; on success the buffer is freed below.
-    let queried = unsafe {
-        WTSQuerySessionInformationW(None, id, WTSUserName, &raw mut buf, &raw mut bytes)
-    };
-    if queried.is_err() || buf.is_null() {
+    let user = query_session_string(id, WTSUserName);
+    if user.as_deref().unwrap_or_default().is_empty() {
         warn!(session_id = id, "console session without a queryable user");
-        return None;
-    }
-    // SAFETY: on success the buffer holds a null-terminated UTF-16 string.
-    let user = unsafe { buf.to_string().unwrap_or_default() };
-    unsafe { WTSFreeMemory(buf.0.cast()) };
-    if user.is_empty() {
         return None;
     }
     Some(ConsoleOwner {
         id,
-        user,
+        user: user.unwrap_or_default(),
+        domain: query_session_string(id, WTSDomainName).unwrap_or_default(),
         locked: crate::agent::console_session_locked(id),
     })
+}
+
+/// Account comparison (§18.53): user name case-insensitive, domain
+/// normalized — `""`, `"."` and the machine name all mean "local account".
+/// `DOMAIN\alice` and `.\alice` are DIFFERENT accounts and must conflict.
+fn same_account(owner: &ConsoleOwner, creds: &Credentials) -> bool {
+    if !creds.username.eq_ignore_ascii_case(&owner.user) {
+        return false;
+    }
+    let machine = std::env::var("COMPUTERNAME").unwrap_or_default();
+    let is_local = |domain: &str| {
+        let d = domain.trim();
+        d.is_empty() || d == "." || d.eq_ignore_ascii_case(&machine)
+    };
+    is_local(&owner.domain) == is_local(&creds.domain)
+        && (is_local(&owner.domain) || owner.domain.eq_ignore_ascii_case(&creds.domain))
 }
 
 /// Applies the conflict policy before any session side effect. `creds` are
@@ -111,15 +137,15 @@ pub async fn resolve_conflict<T: ReliableTransport>(
     let Some(creds) = creds else {
         return Ok(());
     };
-    if creds.username.eq_ignore_ascii_case(&owner.user) {
+    if same_account(&owner, creds) {
         return Ok(());
     }
     info!(
-        console_user = %owner.user,
-        session_user = %creds.username,
+        console_user = %format!("{}\\{}", owner.domain, owner.user),
+        session_user = %format!("{}\\{}", creds.domain, creds.username),
         locked = owner.locked,
         policy = ?config.policy,
-        "console conflict: another user owns the console"
+        "console conflict: another account owns the console"
     );
     let take_over = match config.policy {
         server_config::ConsoleConflictPolicy::TakeOver => true,
@@ -147,7 +173,9 @@ async fn ask_client<T: ReliableTransport>(
     config: &ConflictConfig,
 ) -> Result<bool> {
     let query = ControlMessage::ConsoleConflict {
-        user: config.reveal_user.then(|| owner.user.clone()),
+        user: config
+            .reveal_user
+            .then(|| format!("{}\\{}", owner.domain, owner.user)),
         state: if owner.locked {
             CONSOLE_STATE_LOCKED
         } else {
