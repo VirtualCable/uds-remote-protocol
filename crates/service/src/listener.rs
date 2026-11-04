@@ -30,7 +30,6 @@ use tracing::{error, info, warn};
 use transport::{EncryptedStream, TcpTransport};
 use udscredprov::logic::Credentials;
 use windows::Win32::Networking::WinSock::{WSAPROTOCOL_INFOW, WSADuplicateSocketW};
-use windows::Win32::System::RemoteDesktop::WTSGetActiveConsoleSessionId;
 
 use crate::agent::Agent;
 
@@ -414,8 +413,14 @@ fn duplicate_socket_into(socket: &std::net::TcpStream, pid: u32) -> Result<Vec<u
 /// Ensures an interactive console session exists, triggering the autologon
 /// (arm flag + synthetic SAS; the credential provider pipe then pushes the
 /// session credentials) when the machine sits at the logon screen.
+///
+/// "Console up" means a console session WITH a logged-on user: after a
+/// logoff (or a console disconnect) the console keeps a live winlogon
+/// session id with no user, and spawning the agent there dies in
+/// `WTSQueryUserToken` (0x800703F0) — only a fresh boot reports
+/// `0xFFFF_FFFF` (§18.53 lesson of 2026-11-04).
 async fn ensure_console_session(creds: Option<&Credentials>) -> Result<()> {
-    if unsafe { WTSGetActiveConsoleSessionId() } != 0xFFFF_FFFF {
+    if crate::console::console_has_user() {
         return Ok(());
     }
     let Some(creds) = creds else {
@@ -427,7 +432,7 @@ async fn ensure_console_session(creds: Option<&Credentials>) -> Result<()> {
 
     let start = Instant::now();
     loop {
-        if unsafe { WTSGetActiveConsoleSessionId() } != 0xFFFF_FFFF {
+        if crate::console::console_has_user() {
             info!("console session up after the autologon");
             return Ok(());
         }

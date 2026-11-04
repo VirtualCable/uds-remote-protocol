@@ -103,6 +103,14 @@ fn active_console() -> Option<ConsoleOwner> {
     })
 }
 
+/// True when the console session has a logged-on user. A console sitting at
+/// the logon screen (post-logoff, post-disconnect of the console session)
+/// still reports an active session id, but with no user it cannot host an
+/// agent — the autologon must run first (§18.53 lesson of 2026-11-04).
+pub fn console_has_user() -> bool {
+    active_console().is_some()
+}
+
 /// Account comparison (§18.53): user name case-insensitive, domain
 /// normalized — `""`, `"."` and the machine name all mean "local account".
 /// `DOMAIN\alice` and `.\alice` are DIFFERENT accounts and must conflict.
