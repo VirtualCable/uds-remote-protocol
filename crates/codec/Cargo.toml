@@ -25,3 +25,7 @@ opus = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = ["Win32_System_Threading"] }
+
+[[example]]
+name = "bench_cam_decode"
+required-features = ["codec-vp9", "codec-jpeg"]

@@ -73,6 +73,9 @@ struct Args {
     /// Smartcard redirection (§17): `--smartcard` offers the channel in
     /// the HELLO and runs the request dispatcher against the local PC/SC.
     smartcard: bool,
+    /// Webcam redirection (§18.57): `--webcam` offers the channel in the
+    /// HELLO (set `UDSRP_CAM_MOCK=1` for a camera-less E2E).
+    webcam: bool,
     /// Console-conflict answer (§18.53): `--on-conflict take-over|deny`
     /// (default take-over, the consumer default).
     on_conflict_take_over: bool,
@@ -151,6 +154,7 @@ fn parse_args() -> Result<Args> {
         storage_list: false,
         selftest_resize: None,
         smartcard: false,
+        webcam: false,
         on_conflict_take_over: true,
     };
     let mut key_seen = false;
@@ -187,6 +191,10 @@ fn parse_args() -> Result<Args> {
         }
         if arg == "--smartcard" {
             args.smartcard = true;
+            continue;
+        }
+        if arg == "--webcam" {
+            args.webcam = true;
             continue;
         }
         let value = it.next().context(format!("missing value for {arg}"))?;
@@ -762,6 +770,7 @@ async fn run() -> Result<()> {
         mic: args.mic,
         privacy_screen: args.privacy,
         smartcard: args.smartcard,
+        webcam: args.webcam,
         pref_resolution: args.pref_resolution,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);

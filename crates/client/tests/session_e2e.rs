@@ -205,6 +205,7 @@ async fn session_delivers_frames_cursor_and_input_end_to_end() -> Result<()> {
         mic: MicMode::Off,
         privacy_screen: false,
         smartcard: false,
+        webcam: false,
         pref_resolution: (0, 0),
     };
     let (session, commands, displays) = Session::new(config, events_tx);
@@ -296,6 +297,7 @@ async fn session_falls_back_to_tcp_when_udp_is_silent() -> Result<()> {
         mic: MicMode::Off,
         privacy_screen: false,
         smartcard: false,
+        webcam: false,
         pref_resolution: (0, 0),
     };
     let (session, commands, displays) = Session::new(config, events_tx);

@@ -35,6 +35,7 @@ use crate::command::{COMMAND_CHANNEL_CAPACITY, ClientCommand, CommandReceiver, C
 use crate::events::ClientEvent;
 use crate::framebuffer::Displays;
 use crate::mic::{MicClient, MicMode};
+use crate::webcam::CamClient;
 
 /// Keyframe requests on unrecoverable frame loss are rate-limited to one
 /// per this interval (riesgos §2.1).
@@ -71,6 +72,9 @@ const PRESENT_TICK: Duration = Duration::from_millis(8);
 const SYNC_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Static configuration of one client session.
+// A plain bag of independent switches the consumer fills; grouping them
+// into sub-structs would only add nesting at every call site.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Server address (direct, or the launcher's local tunnel endpoint).
@@ -93,6 +97,9 @@ pub struct ClientConfig {
     /// runs the request dispatcher against the local PC/SC backend (or
     /// answers `SCARD_E_NO_SERVICE` when there is none).
     pub smartcard: bool,
+    /// Offer webcam redirection (§18.57; `FLAG_WEBCAM`): when the server
+    /// asks for it, stream the local camera VP9-encoded on `channel::WEBCAM`.
+    pub webcam: bool,
     /// Preferred remote display resolution (§18.37), sent in the HELLO.
     /// `(0, 0)` means no preference: the server keeps its current mode or
     /// applies its own fixed `resolution` policy.
@@ -149,6 +156,16 @@ impl Session {
         }
         if self.config.smartcard {
             flags |= protocol::FLAG_SMARTCARD;
+        }
+        // Webcam (§18.57): the source is probed here so the flag reflects a
+        // real capture capability, and passed down to the Core.
+        let cam_source = if self.config.webcam {
+            ::webcam::default_source()
+        } else {
+            None
+        };
+        if cam_source.is_some() {
+            flags |= protocol::FLAG_WEBCAM;
         }
         let mut stream: EncryptedStream<Box<dyn ReliableTransport>> =
             EncryptedStream::client_handshake(
@@ -213,8 +230,14 @@ impl Session {
             self.displays.clone(),
             &self.config,
             clock_start,
+            cam_source,
         );
         core.stats.set_udp(leg.is_some());
+        // Webcam capabilities (§18.57): the server answers with WebcamConfig
+        // (+ WebcamStart) when its policy allows the stream.
+        if let Some(caps) = core.cam.caps_message() {
+            stream.send(channel::CONTROL, &caps.encode()?).await?;
+        }
         match leg {
             Some(leg) => self.udp_loop(leg, stream, clock_start, &mut core).await,
             None => self.tcp_loop(stream, clock_start, &mut core).await,
@@ -374,6 +397,17 @@ impl Session {
                     } else {
                         warn!("mic thread ended; audio-in disabled for this session");
                         core.mic.disable();
+                    }
+                }
+                msg = core.cam.recv() => {
+                    if let Some(payload) = msg {
+                        // §18.57: webcam frames are droppable, but with no
+                        // UDP leg they share the reliable stream (best
+                        // effort, like audio-out on the fallback).
+                        stream.send(channel::WEBCAM, &payload).await?;
+                    } else {
+                        warn!("webcam thread ended; webcam disabled for this session");
+                        core.cam.stop();
                     }
                 }
                 cmd = self.command_rx.recv_async() => {
@@ -554,6 +588,15 @@ impl Session {
                     } else {
                         warn!("mic thread ended; audio-in disabled for this session");
                         core.mic.disable();
+                    }
+                }
+                msg = core.cam.recv() => {
+                    if let Some(payload) = msg {
+                        // §18.57: webcam frames travel on the lossy leg.
+                        leg.dgram.send(channel::WEBCAM, &payload).await?;
+                    } else {
+                        warn!("webcam thread ended; webcam disabled for this session");
+                        core.cam.stop();
                     }
                 }
                 cmd = self.command_rx.recv_async() => {
@@ -1088,6 +1131,8 @@ struct Core {
     recovery_awaiting: Arc<AtomicBool>,
     audio: AudioClient,
     mic: MicClient,
+    /// Webcam streaming endpoint (§18.57).
+    cam: CamClient,
     /// Live stats accumulator shared with the audio thread; snapshots go to
     /// the consumer once per second (§15.3 debug aid).
     stats: std::sync::Arc<crate::stats::SessionStats>,
@@ -1119,6 +1164,7 @@ impl Core {
         displays: Displays,
         config: &ClientConfig,
         clock_start: Instant,
+        cam_source: Option<Box<dyn ::webcam::WebcamSource>>,
     ) -> Self {
         let (scard_tx, scard_rx) = flume::unbounded();
         let smartcard = config
@@ -1141,6 +1187,7 @@ impl Core {
             recovery_awaiting,
             audio,
             mic: MicClient::new(config.mic, clock_start),
+            cam: CamClient::new(cam_source),
             stats,
             last_key_req: None,
             prev_dropped: 0,
@@ -1322,6 +1369,7 @@ impl Core {
     }
 
     /// Handles one control-channel message (announcements, §8.4/§9/§9.2).
+    #[allow(clippy::too_many_lines)] // a flat dispatch over the control vocabulary
     fn handle_control(&mut self, packet: &[u8]) {
         match ControlMessage::decode(packet) {
             Ok(ControlMessage::DisplayInfo {
@@ -1396,6 +1444,36 @@ impl Core {
                     frame_ms,
                     fec,
                 });
+            }
+            Ok(ControlMessage::WebcamConfig {
+                codec,
+                width,
+                height,
+                fps,
+                bitrate_kbps,
+            }) => {
+                // §18.57: the server picked the webcam wire format.
+                info!(codec, width, height, fps, bitrate_kbps, "webcam configured by server");
+                self.cam.configure(crate::webcam::CamSpec {
+                    codec,
+                    width,
+                    height,
+                    fps,
+                    bitrate_kbps,
+                });
+            }
+            Ok(ControlMessage::WebcamStart) => {
+                info!("webcam stream requested by server");
+                self.cam.start();
+            }
+            Ok(ControlMessage::WebcamStop) => {
+                info!("webcam stream stopped by server");
+                self.cam.stop();
+            }
+            Ok(ControlMessage::WebcamRequestKeyframe) => {
+                // §18.57: the server lost webcam fragments; resync the VP9
+                // stream (the encoder thread rate-limits via the flag).
+                self.cam.request_keyframe();
             }
             Ok(ControlMessage::SecureDesktop { active }) => {
                 // §18.41: the console switched to/from a secure desktop

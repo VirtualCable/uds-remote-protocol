@@ -54,9 +54,30 @@ fn chroma_v(r: i32, g: i32, b: i32) -> i32 {
     112 * r - 94 * g - 18 * b
 }
 
+/// Converts a tight RGB24 frame (webcam capture format, §18.57) to a BGRA
+/// [`VideoFrame`] buffer (alpha = 255), the encoder input shape. Returns
+/// `CodecError::BadDimensions` when the input length does not match
+/// `width*height*3`.
+pub fn rgb24_to_bgra(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    let pixels = width as usize * height as usize;
+    if width == 0 || height == 0 || rgb.len() < pixels * 3 {
+        return Err(CodecError::BadDimensions {
+            width,
+            height,
+            stride: width as usize * 3,
+            data_len: rgb.len(),
+        });
+    }
+    let mut out = Vec::with_capacity(pixels * 4);
+    for px in rgb.as_chunks::<3>().0 {
+        // RGB24 → BGRA (channel swap, opaque alpha).
+        out.extend_from_slice(&[px[2], px[1], px[0], 255]);
+    }
+    Ok(out)
+}
+
 /// Converts a BGRA frame (explicit stride, see [`VideoFrame`]) to I420.
-pub fn bgra_to_i420(frame: &VideoFrame<'_>) -> Result<I420Frame> {
-    let (width, height) = (frame.width as usize, frame.height as usize);
+pub fn bgra_to_i420(frame: &VideoFrame<'_>) -> Result<I420Frame> {    let (width, height) = (frame.width as usize, frame.height as usize);
     let row = width * 4;
     if width == 0 || height == 0 || frame.stride < row || frame.data.len() < frame.stride * (height - 1) + row {
         return Err(CodecError::BadDimensions {

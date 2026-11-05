@@ -33,6 +33,7 @@ mod session;
 pub mod smartcard;
 pub mod stats;
 mod storage;
+pub mod webcam;
 
 pub use command::{ClientCommand, CommandSender};
 pub use events::{ClientEvent, Rect, TransferDirection};

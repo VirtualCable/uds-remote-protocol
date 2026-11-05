@@ -6,7 +6,7 @@
 //! Reference standalone client for the UDS remote protocol.
 //!
 //! Usage: `uds-rp-client [--addr host:port] [--ticket STR] [--key HEX]
-//!         [--no-audio] [--smartcard] [--privacy]`
+//!         [--no-audio] [--smartcard] [--webcam] [--privacy]`
 //!
 //! Without parameters the connect dialog asks for them; with all three of
 //! `--addr`/`--ticket`/`--key` the client connects immediately. The ticket
@@ -42,6 +42,7 @@ fn run() -> Result<()> {
     let mut flags = SessionFlags {
         audio: true,
         smartcard: false,
+        webcam: false,
         privacy_screen: false,
         audio_dump: None,
     };
@@ -50,6 +51,7 @@ fn run() -> Result<()> {
         match arg.as_str() {
             "--no-audio" => flags.audio = false,
             "--smartcard" => flags.smartcard = true,
+            "--webcam" => flags.webcam = true,
             "--privacy" => flags.privacy_screen = true,
             "--audio-dump" => flags.audio_dump = Some(take(&mut it, "--audio-dump")?.into()),
             "--addr" => form.addr = take(&mut it, "--addr")?,
