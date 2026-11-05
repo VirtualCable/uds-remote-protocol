@@ -224,6 +224,54 @@ pub enum ControlMessage {
         /// `SESSION_STAGE_*` constant.
         stage: u8,
     },
+    /// Webcam capabilities, client → server (§18.57): sent once after
+    /// `ClientCaps` when the client offered `FLAG_WEBCAM` in the HELLO.
+    /// `codecs` holds `VideoCodecType` wire IDs the client can encode,
+    /// most-preferred first. Appended at the end so existing postcard
+    /// variant indices do not shift.
+    WebcamCaps {
+        /// Maximum capture width the camera supports.
+        max_width: u32,
+        /// Maximum capture height the camera supports.
+        max_height: u32,
+        /// Maximum capture frame rate.
+        max_fps: u8,
+        /// Encodable `VideoCodecType` wire IDs (VP9 only in this phase).
+        codecs: Vec<u16>,
+    },
+    /// Webcam stream configuration, server → client (§18.57): the server
+    /// has a camera sink and picks the wire format (Server > Client: the
+    /// choice is clamped to the client's announced `WebcamCaps`). Absence
+    /// means no webcam support: the client must not send `WEBCAM` packets
+    /// then. Appended at the end so existing postcard variant indices do
+    /// not shift.
+    WebcamConfig {
+        /// `VideoCodecType` wire ID (VP9 in this phase).
+        codec: u16,
+        /// Capture width in pixels.
+        width: u32,
+        /// Capture height in pixels.
+        height: u32,
+        /// Capture frame rate.
+        fps: u8,
+        /// Target bitrate in kbps (adapted at runtime, §12).
+        bitrate_kbps: u32,
+    },
+    /// Starts the webcam stream, server → client (§18.57): an app opened
+    /// the virtual camera (or the session policy wants it always on).
+    /// Appended at the end so existing postcard variant indices do not
+    /// shift.
+    WebcamStart,
+    /// Stops the webcam stream, server → client (§18.57): no consumer left
+    /// on the virtual camera; the client stops capturing immediately.
+    /// Appended at the end so existing postcard variant indices do not
+    /// shift.
+    WebcamStop,
+    /// Webcam keyframe request, server → client (§18.57): fragment loss
+    /// made the VP9 stream undecodable; rate-limited like the display
+    /// `RequestKeyframe` (max 1 per 500 ms — riesgos §2.1). Appended at the
+    /// end so existing postcard variant indices do not shift.
+    WebcamRequestKeyframe,
 }
 
 /// `SessionEnd` reason: the console is owned by another user and the server

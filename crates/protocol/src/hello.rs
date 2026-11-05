@@ -33,6 +33,15 @@ pub const FLAG_PRIVACY_SCREEN: u8 = 0x01;
 /// answer `SmartcardMessage` requests on `channel::SMARTCARD`.
 pub const FLAG_SMARTCARD: u8 = 0x02;
 
+/// HELLO flag: the client offers webcam redirection (§18.57): it can
+/// capture, VP9-encode and stream its local camera on `channel::WEBCAM`
+/// when the server asks for it via `ControlMessage::WebcamConfig`.
+pub const FLAG_WEBCAM: u8 = 0x04;
+
+/// HELLO flag: the client offers printer redirection (§18.57): it can
+/// receive print jobs on `channel::PRINTER` and deliver them locally.
+pub const FLAG_PRINTER: u8 = 0x08;
+
 /// Handshake commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

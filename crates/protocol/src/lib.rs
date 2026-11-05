@@ -14,12 +14,14 @@ pub mod channel;
 pub mod fragment;
 pub mod hex;
 pub mod jitter;
+pub mod webcam;
 mod clipboard;
 mod control;
 mod cursor;
 mod error;
 mod hello;
 mod input;
+mod printer;
 mod probe;
 mod quality;
 mod smartcard;
@@ -37,10 +39,14 @@ pub use control::{
 pub use cursor::{CursorError, CursorMessage, MAX_CURSOR_DIM};
 pub use error::ProtocolError;
 pub use hello::{
-    Command, FLAG_PRIVACY_SCREEN, FLAG_SMARTCARD, HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION,
-    TICKET_LENGTH,
+    Command, FLAG_PRINTER, FLAG_PRIVACY_SCREEN, FLAG_SMARTCARD, FLAG_WEBCAM, HANDSHAKE_SIGNATURE,
+    Hello, PROTOCOL_VERSION, TICKET_LENGTH,
 };
 pub use input::{InputError, InputMessage, PointerButton};
+pub use printer::{
+    JOB_FORMAT_PDF, JOB_FORMAT_POSTSCRIPT, MAX_JOB_BYTES, MAX_JOB_CHUNK, PrinterError,
+    PrinterMessage, STATUS_SUCCESS,
+};
 pub use probe::{Probe, ProbeAck, ProbeError, compute_rtt};
 pub use quality::{
     FEC_OFF_LOSS, FEC_ON_LOSS, LEVEL_DEGRADED, LEVEL_FULL, QualityController, QualityEvent,

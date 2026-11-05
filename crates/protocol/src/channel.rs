@@ -30,6 +30,14 @@ pub const STORAGE: ChannelId = 7;
 /// Channel 8: smartcard redirection (S→C requests / C→S replies, reliable;
 /// APDUs tolerate neither loss nor reordering — the volume is trivial).
 pub const SMARTCARD: ChannelId = 8;
+/// Channel 9: webcam redirection (C→S, lossy; one self-contained VP9 frame
+/// per logical element, fragmented exactly like the display channel — a
+/// lost fragment drops the whole frame and the client resyncs on the next
+/// keyframe request; design doc §18.57).
+pub const WEBCAM: ChannelId = 9;
+/// Channel 10: printer redirection (S→C jobs / C→S replies, reliable;
+/// print data tolerates neither loss nor reordering — §18.57).
+pub const PRINTER: ChannelId = 10;
 
 /// Last ID reserved for UDS core channels (`0x0000..=0x00FF`).
 pub const CORE_MAX: ChannelId = 0x00FF;
