@@ -29,10 +29,13 @@ pub fn line(msg: &str) {
     let _ = writeln!(f, "[pid {pid}] {msg}");
 }
 
-/// Formats and logs one line.
+/// Formats and logs one line. Silent once the DLL is detached from the
+/// process (see `globals::DETACHED`).
 #[macro_export]
 macro_rules! vlog {
     ($($arg:tt)*) => {
-        $crate::log::line(&format!($($arg)*))
+        if !$crate::globals::is_detached() {
+            $crate::log::line(&format!($($arg)*));
+        }
     };
 }

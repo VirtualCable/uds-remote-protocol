@@ -75,6 +75,7 @@ mod imp {
             crate::vlog!("process attach");
         } else if fdw_reason == DLL_PROCESS_DETACH {
             crate::vlog!("process detach");
+            globals::set_detached();
         }
         BOOL::from(true)
     }

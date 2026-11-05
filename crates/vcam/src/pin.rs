@@ -209,7 +209,7 @@ fn stream_loop(
     let mut index: i64 = 0;
     unsafe {
         loop {
-            if quit.load(Ordering::Acquire) {
+            if quit.load(Ordering::Acquire) || crate::globals::is_detached() {
                 break;
             }
             if let Some(r) = &reader {

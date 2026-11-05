@@ -65,6 +65,11 @@ impl IPersist_Impl for UdsCamFilter_Impl {
 #[allow(non_snake_case)]
 impl IMediaFilter_Impl for UdsCamFilter_Impl {
     fn Stop(&self) -> Result<()> {
+        // After DLL_PROCESS_DETACH the host is exiting: touching COM objects
+        // owned by the dying process (allocator, downstream pin) crashes it.
+        if globals::is_detached() {
+            return Ok(());
+        }
         crate::vlog!("filter Stop");
         UdsCamPin::stop_streaming(&self.shared);
         *self.shared.filter_state.lock().unwrap() = State_Stopped;
@@ -72,6 +77,9 @@ impl IMediaFilter_Impl for UdsCamFilter_Impl {
     }
 
     fn Pause(&self) -> Result<()> {
+        if globals::is_detached() {
+            return Ok(());
+        }
         crate::vlog!("filter Pause");
         UdsCamPin::start_streaming(&self.shared);
         *self.shared.filter_state.lock().unwrap() = State_Paused;
@@ -79,6 +87,9 @@ impl IMediaFilter_Impl for UdsCamFilter_Impl {
     }
 
     fn Run(&self, _tstart: i64) -> Result<()> {
+        if globals::is_detached() {
+            return Ok(());
+        }
         crate::vlog!("filter Run");
         UdsCamPin::start_streaming(&self.shared);
         *self.shared.filter_state.lock().unwrap() = State_Running;
@@ -86,6 +97,9 @@ impl IMediaFilter_Impl for UdsCamFilter_Impl {
     }
 
     fn GetState(&self, _dwmillisecstimeout: u32) -> Result<FILTER_STATE> {
+        if globals::is_detached() {
+            return Ok(State_Stopped);
+        }
         Ok(*self.shared.filter_state.lock().unwrap())
     }
 

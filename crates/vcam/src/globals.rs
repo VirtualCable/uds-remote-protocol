@@ -8,7 +8,7 @@
 
 use std::sync::{
     OnceLock,
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
 use windows::Win32::Foundation::HINSTANCE;
@@ -22,6 +22,22 @@ pub const VCAM_NAME: &str = "UDS Webcam";
 
 /// Global DLL reference count (for `DllCanUnloadNow`).
 pub static DLL_REF_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Set on DLL_PROCESS_DETACH: every COM entry point and the streaming loop
+/// must become a no-op afterwards. Consumers like OpenCV tear the graph down
+/// during process exit, i.e. AFTER our DllMain(detach) ran; executing real
+/// code (or even logging) at that point crashes the host process.
+pub static DETACHED: AtomicBool = AtomicBool::new(false);
+
+/// Marks the DLL as detached from the process.
+pub fn set_detached() {
+    DETACHED.store(true, Ordering::SeqCst);
+}
+
+/// Returns true once DllMain(DLL_PROCESS_DETACH) ran.
+pub fn is_detached() -> bool {
+    DETACHED.load(Ordering::SeqCst)
+}
 
 static DLL_INSTANCE: OnceLock<SafeHInstance> = OnceLock::new();
 
