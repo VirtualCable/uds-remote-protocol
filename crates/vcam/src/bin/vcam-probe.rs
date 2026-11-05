@@ -9,7 +9,7 @@
 //! Webcam" filter without browser noise. The filter's own trace lands in
 //! C:\ProgramData\UdsRp\vcam.log.
 
-use windows::Win32::Media::DirectShow::{ICaptureGraphBuilder, IGraphBuilder, IMediaControl};
+use windows::Win32::Media::DirectShow::{ICaptureGraphBuilder2, IGraphBuilder, IMediaControl};
 use windows::Win32::Media::MediaFoundation::{CLSID_CaptureGraphBuilder2, CLSID_FilterGraph, PIN_CATEGORY_CAPTURE};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
 use windows::core::GUID;
@@ -18,6 +18,8 @@ use windows::core::GUID;
 const CLSID_UDS_VCAM: GUID = GUID::from_u128(0x9e1a7c42_3b5d_4f6a_8c1e_2d3f4a5b6c7d);
 /// CLSID_NullRenderer (not exposed by the windows crate).
 const CLSID_NULL_RENDERER: GUID = GUID::from_u128(0xc1f400a4_3f08_11d3_9f0b_006008039e37);
+/// MEDIATYPE_Video.
+const MEDIATYPE_VIDEO: GUID = GUID::from_u128(0x73646976_0000_0010_8000_00aa00389b71);
 
 fn main() -> anyhow::Result<()> {
     use anyhow::Context as _;
@@ -25,7 +27,7 @@ fn main() -> anyhow::Result<()> {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
         let graph: IGraphBuilder =
             CoCreateInstance(&CLSID_FilterGraph, None, CLSCTX_INPROC_SERVER).context("FilterGraph")?;
-        let builder: ICaptureGraphBuilder =
+        let builder: ICaptureGraphBuilder2 =
             CoCreateInstance(&CLSID_CaptureGraphBuilder2, None, CLSCTX_INPROC_SERVER)
                 .context("CaptureGraphBuilder2")?;
         builder.SetFiltergraph(&graph).context("SetFiltergraph")?;
@@ -41,7 +43,7 @@ fn main() -> anyhow::Result<()> {
 
         println!("rendering stream...");
         builder
-            .RenderStream(Some(&PIN_CATEGORY_CAPTURE), &cam, None, &null)
+            .RenderStream(Some(&PIN_CATEGORY_CAPTURE), &MEDIATYPE_VIDEO, &cam, None, &null)
             .context("RenderStream")?;
         println!("stream connected");
 
