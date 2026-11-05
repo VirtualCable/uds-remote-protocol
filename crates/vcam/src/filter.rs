@@ -61,18 +61,21 @@ impl IPersist_Impl for UdsCamFilter_Impl {
 #[allow(non_snake_case)]
 impl IMediaFilter_Impl for UdsCamFilter_Impl {
     fn Stop(&self) -> Result<()> {
+        crate::vlog!("filter Stop");
         UdsCamPin::stop_streaming(&self.shared);
         *self.shared.filter_state.lock().unwrap() = State_Stopped;
         Ok(())
     }
 
     fn Pause(&self) -> Result<()> {
+        crate::vlog!("filter Pause");
         UdsCamPin::start_streaming(&self.shared);
         *self.shared.filter_state.lock().unwrap() = State_Paused;
         Ok(())
     }
 
     fn Run(&self, _tstart: i64) -> Result<()> {
+        crate::vlog!("filter Run");
         UdsCamPin::start_streaming(&self.shared);
         *self.shared.filter_state.lock().unwrap() = State_Running;
         Ok(())
@@ -132,6 +135,7 @@ impl IBaseFilter_Impl for UdsCamFilter_Impl {
     }
 
     fn JoinFilterGraph(&self, pgraph: Ref<IFilterGraph>, pname: &PCWSTR) -> Result<()> {
+        crate::vlog!("filter JoinFilterGraph");
         *self.shared.graph.lock().unwrap() = pgraph.as_ref().cloned();
         if !pname.is_null()
             && let Ok(name) = unsafe { pname.to_string() }

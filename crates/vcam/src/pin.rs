@@ -26,9 +26,8 @@ use windows::Win32::Media::DirectShow::{
     VFW_E_NOT_CONNECTED,
 };
 use windows::Win32::Media::DirectShow::{IAMStreamConfig, IAMStreamConfig_Impl};
-use windows::Win32::Media::MediaFoundation::{
-    AM_MEDIA_TYPE, CLSID_MemoryAllocator,
-};
+use windows::Win32::Media::KernelStreaming::{IKsPropertySet, IKsPropertySet_Impl};
+use windows::Win32::Media::MediaFoundation::{AM_MEDIA_TYPE, AMPROPSETID_Pin, CLSID_MemoryAllocator};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemAlloc};
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::core::*;
@@ -47,7 +46,7 @@ pub const DEFAULT_HEIGHT: u32 = 720;
 pub const DEFAULT_FPS: u32 = 30;
 
 /// The single output pin.
-#[implement(IPin, IAMStreamConfig)]
+#[implement(IPin, IAMStreamConfig, IKsPropertySet)]
 pub struct UdsCamPin {
     pub(crate) shared: Arc<Shared>,
 }
@@ -229,6 +228,9 @@ fn stream_loop(
             }
             let Some(sample) = sample else { continue };
             let Ok(buf) = sample.GetPointer() else { continue };
+            if index == 0 {
+                crate::vlog!("stream: first sample");
+            }
             if (sample.GetSize() as usize) < frame_bytes {
                 continue;
             }
@@ -247,7 +249,8 @@ fn stream_loop(
             let start = index * frame_dur;
             let _ = sample.SetTime(Some(&start), Some(&(start + frame_dur)));
             let _ = sample.SetSyncPoint(true);
-            if mem_input.Receive(&sample).is_err() {
+            if let Err(e) = mem_input.Receive(&sample) {
+                crate::vlog!("stream: Receive failed: {e:?}");
                 break;
             }
             index += 1;
@@ -268,9 +271,11 @@ unsafe fn acceptable(mt: *const AM_MEDIA_TYPE, width: u32, height: u32) -> Optio
 #[allow(non_snake_case)]
 impl IPin_Impl for UdsCamPin_Impl {
     fn Connect(&self, preceivepin: Ref<IPin>, pmt: *const AM_MEDIA_TYPE) -> Result<()> {
+        crate::vlog!("pin Connect pmt_null={}", pmt.is_null());
         let receive = preceivepin.ok()?;
         let mut pin = self.shared.pin.lock().unwrap();
         if pin.connected.is_some() {
+            crate::vlog!("pin Connect: already connected");
             return Err(VFW_E_ALREADY_CONNECTED.into());
         }
         // Pick the offered format (or validate the requested one).
@@ -311,6 +316,7 @@ impl IPin_Impl for UdsCamPin_Impl {
         pin.connected = Some(receive.clone());
         pin.mem_input = Some(mem_input);
         pin.allocator = Some(allocator);
+        crate::vlog!("pin connected fmt={format:?} {width}x{height}", width = pin.width, height = pin.height);
         Ok(())
     }
 
@@ -429,6 +435,7 @@ impl IPin_Impl for UdsCamPin_Impl {
 #[allow(non_snake_case)]
 impl IAMStreamConfig_Impl for UdsCamPin_Impl {
     fn SetFormat(&self, pmt: *const AM_MEDIA_TYPE) -> Result<()> {
+        crate::vlog!("pin SetFormat: {:?}", unsafe { crate::media::parse_media_type(pmt) });
         let mut pin = self.shared.pin.lock().unwrap();
         if pin.connected.is_some() {
             return Err(VFW_E_ALREADY_CONNECTED.into());
@@ -469,6 +476,63 @@ impl IAMStreamConfig_Impl for UdsCamPin_Impl {
             media::fill_stream_caps(pscc, pin.width, pin.height, pin.fps);
         }
         Ok(())
+    }
+}
+
+/// Pin category property (`AMPROPSETID_Pin` / `AMPROPERTY_PIN_CATEGORY`):
+/// capture-graph builders (and Chromium) refuse pins without it.
+#[allow(non_snake_case)]
+impl IKsPropertySet_Impl for UdsCamPin_Impl {
+    fn Set(
+        &self,
+        _guidpropset: *const GUID,
+        _dwpropid: u32,
+        _pinstancedata: *const core::ffi::c_void,
+        _cbinstancedata: u32,
+        _ppropdata: *const core::ffi::c_void,
+        _cbpropdata: u32,
+    ) -> Result<()> {
+        Err(windows::Win32::Foundation::E_NOTIMPL.into())
+    }
+
+    fn Get(
+        &self,
+        guidpropset: *const GUID,
+        dwpropid: u32,
+        _pinstancedata: *const core::ffi::c_void,
+        _cbinstancedata: u32,
+        ppropdata: *mut core::ffi::c_void,
+        cbpropdata: u32,
+        pcbreturned: *mut u32,
+    ) -> Result<()> {
+        crate::vlog!("pin KsPropertySet::Get set={:?} id={dwpropid}", unsafe { guidpropset.as_ref() });
+        if guidpropset.is_null()
+            || unsafe { *guidpropset } != AMPROPSETID_Pin
+            || dwpropid != 0
+            || ppropdata.is_null()
+            || cbpropdata < size_of::<GUID>() as u32
+        {
+            return Err(E_INVALIDARG.into());
+        }
+        unsafe {
+            *(ppropdata.cast::<GUID>()) = windows::Win32::Media::MediaFoundation::PIN_CATEGORY_CAPTURE;
+            if !pcbreturned.is_null() {
+                *pcbreturned = size_of::<GUID>() as u32;
+            }
+        }
+        Ok(())
+    }
+
+    fn QuerySupported(&self, guidpropset: *const GUID, dwpropid: u32) -> Result<u32> {
+        crate::vlog!("pin KsPropertySet::QuerySupported id={dwpropid}");
+        if !guidpropset.is_null()
+            && unsafe { *guidpropset } == AMPROPSETID_Pin
+            && dwpropid == 0
+        {
+            // KSPROPERTY_SUPPORT_GET
+            return Ok(1);
+        }
+        Err(windows::Win32::Foundation::E_NOTIMPL.into())
     }
 }
 

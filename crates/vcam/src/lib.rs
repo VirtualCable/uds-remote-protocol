@@ -35,6 +35,8 @@ mod filter;
 #[cfg(windows)]
 mod globals;
 #[cfg(windows)]
+pub mod log;
+#[cfg(windows)]
 mod media;
 #[cfg(windows)]
 mod pin;
@@ -70,7 +72,9 @@ mod imp {
             unsafe {
                 let _ = DisableThreadLibraryCalls(hinst_dll.into());
             }
+            crate::vlog!("process attach");
         } else if fdw_reason == DLL_PROCESS_DETACH {
+            crate::vlog!("process detach");
         }
         BOOL::from(true)
     }
@@ -99,6 +103,7 @@ mod imp {
             if *rclsid != globals::CLSID_UDS_VCAM {
                 return CLASS_E_CLASSNOTAVAILABLE;
             }
+            crate::vlog!("DllGetClassObject");
             let factory: IClassFactory = classfactory::ClassFactory::new().into();
             factory.query(riid, ppv)
         }
