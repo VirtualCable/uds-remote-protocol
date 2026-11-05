@@ -182,6 +182,9 @@ fn parse_args() -> Result<Args> {
             if !config.stats_csv.is_empty() {
                 args.stats_csv = Some(config.stats_csv.into());
             }
+            if !config.cam_sink.is_empty() {
+                args.cam_sink = config.cam_sink;
+            }
             args.allow_lock = config.allow_lock;
             args.wallpaper_off = config.wallpaper_off;
             args.handoff = config.handoff;
@@ -296,6 +299,9 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
             .map(server::config::AdaptiveFpsTuning::to_wire)
             .unwrap_or_default();
         args.stats_csv = standalone.stats_csv.as_ref().map(std::path::PathBuf::from);
+        if let Some(cam_sink) = &standalone.cam_sink {
+            args.cam_sink.clone_from(cam_sink);
+        }
         args.audio = standalone.channels.audio;
         args.allow_lock = standalone.channels.lock;
         args.wallpaper_off = standalone.wallpaper_off;

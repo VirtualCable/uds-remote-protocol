@@ -290,6 +290,7 @@ pub(crate) async fn complete_session(
             ladder: standalone.ladder.clone(),
             fps_adapt: standalone.fps_adapt.clone(),
             stats_csv: standalone.stats_csv.clone(),
+            cam_sink: standalone.cam_sink.clone(),
             fixed_resolution: standalone.fixed_resolution.unwrap_or((0, 0)),
             allow_lock: standalone.allow_lock,
             wallpaper_off: standalone.wallpaper_off,
@@ -319,6 +320,8 @@ pub(crate) async fn complete_session(
                     .and_then(|video| video.adaptive_fps)
                     .unwrap_or_default(),
                 stats_csv: String::new(),
+                // §18.57: the broker payload has no webcam policy yet; off.
+                cam_sink: String::new(),
                 // §18.37: a fixed display policy in the ticket wins over the
                 // client's preference; otherwise the agent approaches it.
                 fixed_resolution: grant

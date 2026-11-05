@@ -220,6 +220,7 @@ fn legacy_config() -> service_proto::AgentConfig {
         ladder: String::new(),
         fps_adapt: String::new(),
         stats_csv: String::new(),
+        cam_sink: String::new(),
         fixed_resolution: (0, 0),
         allow_lock: false,
         wallpaper_off: false,

@@ -47,6 +47,8 @@ pub struct StandaloneRuntime {
     pub fps_adapt: String,
     /// Per-session telemetry CSV path (empty = disabled).
     pub stats_csv: String,
+    /// Webcam sink for the agent (§18.57; empty/`null` = redirection off).
+    pub cam_sink: String,
     /// Server-fixed console resolution (§18.37); `None` lets the agent
     /// approach the client's preferred mode.
     pub fixed_resolution: Option<(u32, u32)>,
@@ -174,6 +176,7 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
             .map(server_config::AdaptiveFpsTuning::to_wire)
             .unwrap_or_default(),
         stats_csv: standalone.stats_csv.clone().unwrap_or_default(),
+        cam_sink: standalone.cam_sink.clone().unwrap_or_default(),
         fixed_resolution: standalone
             .resolution
             .as_deref()

@@ -188,6 +188,9 @@ pub struct StandaloneConfig {
     pub adaptive_fps: Option<AdaptiveFpsTuning>,
     /// Per-session telemetry CSV path; `None` keeps telemetry log-only.
     pub stats_csv: Option<String>,
+    /// Webcam sink for the session agent (§18.57): `None`/`null` keeps
+    /// webcam redirection off; `raw:PATH` records decoded frames (E2E).
+    pub cam_sink: Option<String>,
     /// Console-conflict policy (§18.53): another user owns the console.
     pub console_conflict: ConsoleConflictPolicy,
     /// Whether the `ask` conflict message may reveal the console owner's
@@ -366,6 +369,7 @@ impl Default for StandaloneConfig {
             ladder: LadderTuning::default(),
             adaptive_fps: None,
             stats_csv: None,
+            cam_sink: None,
             console_conflict: ConsoleConflictPolicy::default(),
             console_conflict_reveal_user: false,
             console_conflict_timeout_secs: DEFAULT_CONFLICT_TIMEOUT_SECS,
