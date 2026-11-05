@@ -54,9 +54,31 @@ Copy-Item C:\Users\dkmaster\uds-rp-server-agent.exe $bin\server.exe -Force
 Copy-Item C:\Users\dkmaster\udscredprov.dll $bin -Force
 Copy-Item C:\Users\dkmaster\vcam.dll $bin -Force
 # Register the "UDS Webcam" DirectShow source filter (DllRegisterServer
-# writes HKCR\CLSID + the video-input-category instance entry).
-& regsvr32 /s "$bin\vcam.dll"
-if ($LASTEXITCODE -ne 0) { throw "regsvr32 vcam.dll failed: $LASTEXITCODE" }
+# writes HKCR\CLSID + the video-input-category instance entry). regsvr32
+# leaves $LASTEXITCODE unset under ssh (false failure), so we P/Invoke the
+# export directly.
+$regSrc = @'
+using System;
+using System.Runtime.InteropServices;
+public static class VcamReg {
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    public delegate int DllRegDelegate();
+    [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern IntPtr LoadLibrary(string path);
+    [DllImport("kernel32", SetLastError=true, CharSet=CharSet.Ansi)]
+    public static extern IntPtr GetProcAddress(IntPtr h, string name);
+    public static int Call(string path) {
+        IntPtr h = LoadLibrary(path);
+        if (h == IntPtr.Zero) return -1;
+        IntPtr p = GetProcAddress(h, "DllRegisterServer");
+        if (p == IntPtr.Zero) return -2;
+        return ((DllRegDelegate)Marshal.GetDelegateForFunctionPointer(p, typeof(DllRegDelegate)))();
+    }
+}
+'@
+Add-Type -TypeDefinition $regSrc
+$hr = [VcamReg]::Call("$bin\vcam.dll")
+if ($hr -ne 0) { throw ("vcam DllRegisterServer failed: 0x{0:X8}" -f $hr) }
 # The credential provider COM registration must point at the deployed DLL.
 # (Lesson of 2026-11-03: the registration was left pointing at the old
 # in-tree debug build; when that tree was cleaned, LogonUI silently stopped
