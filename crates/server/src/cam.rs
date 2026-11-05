@@ -224,7 +224,7 @@ impl CamPump {
                     .expect("cam sink")
                     .write_frame(&decoded, frame.capture_ts_ms);
             }
-            Err(e) => warn!("webcam decode failed: {e}"),
+            Err(e) => warn!(len = packet.data.len(), "webcam decode failed: {e}"),
         }
     }
 

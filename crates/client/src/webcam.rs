@@ -42,6 +42,13 @@ pub struct CamSpec {
     pub bitrate_kbps: u32,
 }
 
+/// Datagram queue between the cam thread and the session loop. Sized like
+/// the display queue (2048): a noisy 720p VP9 keyframe is ~70+ fragments
+/// and the whole burst must fit, otherwise `try_send` drops its tail and
+/// the frame arrives permanently incomplete (lab-confirmed: a 64-deep
+/// queue made every keyframe undeecodable, poisoning the whole stream).
+const CAM_QUEUE_DGRAMS: usize = 2048;
+
 /// Client webcam endpoint: owns the capture+encode thread while streaming.
 pub struct CamClient {
     /// The capture source; `None` while streaming (moved into the thread)
@@ -136,7 +143,7 @@ impl CamClient {
         }
         #[cfg(feature = "vp9")]
         {
-            let (tx, rx) = mpsc::channel(64);
+            let (tx, rx) = mpsc::channel(CAM_QUEUE_DGRAMS);
             let keyframe = Arc::clone(&self.keyframe);
             let handle = std::thread::spawn(move || run(source, encoder, spec, &tx, &keyframe));
             self.thread = Some(handle);
