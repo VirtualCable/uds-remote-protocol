@@ -112,6 +112,9 @@ impl PinState {
 impl UdsCamPin {
     /// Creates the pin on the shared filter state.
     pub fn new(shared: Arc<Shared>) -> Self {
+        // The pin is a standalone COM object: keep the DLL loaded while
+        // any consumer holds it (see UdsCamFilter::create).
+        crate::globals::dll_add_ref();
         *shared.pin.lock().unwrap() = PinState::new();
         Self { shared }
     }
@@ -168,6 +171,7 @@ impl Drop for UdsCamPin {
     fn drop(&mut self) {
         // Break the construction-time reference cycle (see filter.rs).
         self.shared.pin.lock().unwrap().this_pin = None;
+        crate::globals::dll_release();
     }
 }
 

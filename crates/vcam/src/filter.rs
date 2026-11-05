@@ -33,6 +33,9 @@ impl UdsCamFilter {
     /// shared state. Returns the `IBaseFilter` plus the shared `Arc` so the
     /// class factory can complete the wiring (`filter_this`).
     pub fn create() -> (IBaseFilter, Arc<Shared>) {
+        // Keep the DLL loaded while any filter instance is alive:
+        // DllCanUnloadNow must not report S_OK until every object is gone.
+        globals::dll_add_ref();
         let shared = Shared::new();
         let pin: IPin = UdsCamPin::new(shared.clone()).into();
         shared.pin.lock().unwrap().this_pin = Some(pin);
@@ -48,6 +51,7 @@ impl Drop for UdsCamFilter {
         // own IPin; dropping the filter releases it. The pin clears
         // `filter_this` on its own Drop.
         self.shared.pin.lock().unwrap().this_pin = None;
+        globals::dll_release();
     }
 }
 
