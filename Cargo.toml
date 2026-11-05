@@ -122,3 +122,7 @@ pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 doc_markdown = "allow"
+
+# Temporary: symbols in the vcam release build to resolve OBS crash offsets.
+[profile.release.package.vcam]
+debug = true
