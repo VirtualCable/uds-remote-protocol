@@ -289,22 +289,28 @@ impl IPin_Impl for UdsCamPin_Impl {
         let (format, width, height) = if pmt.is_null() {
             (pin.format, pin.width, pin.height)
         } else {
+            crate::vlog!("pin Connect: validating requested media type");
             match unsafe { acceptable(pmt) } {
                 Some(f) => f,
                 None => return Err(E_INVALIDARG.into()),
             }
         };
+        crate::vlog!("pin Connect: chosen {format:?} {width}x{height}");
         // Build the concrete media type and hand the connection to the
         // downstream input pin (baseclasses contract).
         let mt = unsafe { media::make_media_type(format, width, height, pin.fps) }
             .ok_or(E_UNEXPECTED)?;
         let this = pin.this_pin.clone().ok_or(E_UNEXPECTED)?;
+        crate::vlog!("pin Connect: ReceiveConnection");
         let result = unsafe { receive.ReceiveConnection(&this, mt) };
         unsafe { media::free_media_type(mt) };
+        crate::vlog!("pin Connect: ReceiveConnection -> {result:?}");
         result?;
 
+        crate::vlog!("pin Connect: cast IMemInputPin");
         let mem_input: IMemInputPin = receive.cast()?;
         // Prefer the downstream allocator; fall back to the stock one.
+        crate::vlog!("pin Connect: GetAllocator");
         let allocator = unsafe { mem_input.GetAllocator() }.or_else(|_| unsafe {
             CoCreateInstance(&CLSID_MemoryAllocator, None, CLSCTX_INPROC_SERVER)
         })?;
@@ -314,6 +320,7 @@ impl IPin_Impl for UdsCamPin_Impl {
             cbAlign: 1,
             cbPrefix: 0,
         };
+        crate::vlog!("pin Connect: SetProperties/NotifyAllocator/Commit");
         unsafe {
             allocator.SetProperties(&props)?;
             mem_input.NotifyAllocator(&allocator, false)?;
@@ -348,6 +355,7 @@ impl IPin_Impl for UdsCamPin_Impl {
     }
 
     fn ConnectionMediaType(&self, pmt: *mut AM_MEDIA_TYPE) -> Result<()> {
+        crate::vlog!("pin ConnectionMediaType connected={}", self.shared.pin.lock().unwrap().connected.is_some());
         let pin = self.shared.pin.lock().unwrap();
         if pin.connected.is_none() {
             return Err(VFW_E_NOT_CONNECTED.into());
@@ -374,6 +382,7 @@ impl IPin_Impl for UdsCamPin_Impl {
     }
 
     fn QueryPinInfo(&self, pinfo: *mut PIN_INFO) -> Result<()> {
+        crate::vlog!("pin QueryPinInfo");
         if pinfo.is_null() {
             return Err(E_POINTER.into());
         }
@@ -388,10 +397,12 @@ impl IPin_Impl for UdsCamPin_Impl {
     }
 
     fn QueryDirection(&self) -> Result<PIN_DIRECTION> {
+        crate::vlog!("pin QueryDirection");
         Ok(PINDIR_OUTPUT)
     }
 
     fn QueryId(&self) -> Result<PWSTR> {
+        crate::vlog!("pin QueryId");
         let name: Vec<u16> = "UDS Cam Out\0".encode_utf16().collect();
         unsafe {
             let buf = CoTaskMemAlloc(name.len() * 2).cast::<u16>();

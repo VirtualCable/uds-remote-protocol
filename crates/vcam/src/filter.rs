@@ -137,6 +137,7 @@ impl IBaseFilter_Impl for UdsCamFilter_Impl {
     }
 
     fn QueryFilterInfo(&self, pinfo: *mut FILTER_INFO) -> Result<()> {
+        crate::vlog!("filter QueryFilterInfo enter");
         if pinfo.is_null() {
             return Err(E_POINTER.into());
         }
@@ -149,6 +150,7 @@ impl IBaseFilter_Impl for UdsCamFilter_Impl {
             info.achName[..n].copy_from_slice(&name[..n]);
             info.pGraph = std::mem::ManuallyDrop::new(self.shared.graph.lock().unwrap().clone());
         }
+        crate::vlog!("filter QueryFilterInfo ok");
         Ok(())
     }
 
@@ -192,6 +194,7 @@ struct UdsEnumPins {
 #[allow(non_snake_case)]
 impl IEnumPins_Impl for UdsEnumPins_Impl {
     fn Next(&self, cpins: u32, pppins: *mut Option<IPin>, pcfetched: *mut u32) -> HRESULT {
+        crate::vlog!("enum-pins Next({cpins})");
         if pppins.is_null() {
             return E_POINTER;
         }
