@@ -20,7 +20,8 @@ use crate::globals;
 const VIDEO_INPUT_CATEGORY: &str = "{860BB310-5D01-11D0-BD3B-00A0C911CE86}";
 
 fn clsid_string() -> String {
-    format!("{:?}", globals::CLSID_UDS_VCAM) // GUID Debug prints {XXXXXXXX-...}
+    // GUID Debug prints the bare hex form; COM lookups require braces.
+    format!("{{{:?}}}", globals::CLSID_UDS_VCAM)
 }
 
 /// Path of this DLL (for `InprocServer32`).
