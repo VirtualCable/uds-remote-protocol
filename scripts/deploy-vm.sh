@@ -36,7 +36,7 @@ if (Test-Path '$EXPORT_DIR') {
 New-Item -ItemType Directory -Force '$EXPORT_DIR' | Out-Null
 tar -xf C:\Users\builder\udsrp-master.tar -C '$EXPORT_DIR'
 New-Item -ItemType Directory -Force '$EXPORT_DIR\target-windows' | Out-Null
-docker run --rm -v ${EXPORT_DIR}:c:\crate -v ${EXPORT_DIR}\target-windows:c:\out -w /crate $IMAGE cargo build --release -p service -p server -p udscredprov --features '$FEATURES'
+docker run --rm -v ${EXPORT_DIR}:c:\crate -v ${EXPORT_DIR}\target-windows:c:\out -w /crate $IMAGE cargo build --release -p service -p server -p udscredprov -p vcam --features '$FEATURES'
 if (\$LASTEXITCODE -ne 0) { exit \$LASTEXITCODE }
 EOF
 
@@ -52,6 +52,11 @@ Stop-Service UdsRpService -Force
 Copy-Item C:\Users\dkmaster\udsrp-service.exe $bin -Force
 Copy-Item C:\Users\dkmaster\uds-rp-server-agent.exe $bin\server.exe -Force
 Copy-Item C:\Users\dkmaster\udscredprov.dll $bin -Force
+Copy-Item C:\Users\dkmaster\vcam.dll $bin -Force
+# Register the "UDS Webcam" DirectShow source filter (DllRegisterServer
+# writes HKCR\CLSID + the video-input-category instance entry).
+& regsvr32 /s "$bin\vcam.dll"
+if ($LASTEXITCODE -ne 0) { throw "regsvr32 vcam.dll failed: $LASTEXITCODE" }
 # The credential provider COM registration must point at the deployed DLL.
 # (Lesson of 2026-11-03: the registration was left pointing at the old
 # in-tree debug build; when that tree was cleaned, LogonUI silently stopped
@@ -96,9 +101,10 @@ echo "== 2/4 fetch binaries"
 scp -q "$BUILDER:C:/Users/builder/udsrp-export/target-windows/release/udsrp-service.exe" /tmp/udsrp-service.exe
 scp -q "$BUILDER:C:/Users/builder/udsrp-export/target-windows/release/server.exe" /tmp/uds-rp-server-agent.exe
 scp -q "$BUILDER:C:/Users/builder/udsrp-export/target-windows/release/udscredprov.dll" /tmp/udscredprov.dll
+scp -q "$BUILDER:C:/Users/builder/udsrp-export/target-windows/release/vcam.dll" /tmp/vcam.dll
 
 echo "== 3/4 upload to $VM_HOST"
-scp -q /tmp/udsrp-service.exe /tmp/uds-rp-server-agent.exe /tmp/udscredprov.dll "$VM_HOST:C:/Users/dkmaster/"
+scp -q /tmp/udsrp-service.exe /tmp/uds-rp-server-agent.exe /tmp/udscredprov.dll /tmp/vcam.dll "$VM_HOST:C:/Users/dkmaster/"
 
 echo "== 4/4 swap binaries + restart"
 scp -q "$VM_PS1" "$VM_HOST:C:/Users/dkmaster/udsrp-install.ps1"
