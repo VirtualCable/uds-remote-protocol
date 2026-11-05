@@ -1,0 +1,30 @@
+[package]
+name = "vcam"
+description = "DirectShow virtual camera source filter: serves UDS RP webcam frames (shared memory) to Windows applications"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vcam-ipc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+anyhow.workspace = true
+vcam-ipc = { workspace = true, features = ["ipc"] }
+windows-core = "0.62"
+windows = { workspace = true, features = [
+    "Win32_Media_DirectShow",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_System_Diagnostics_Debug",
+] }
+
+[dev-dependencies]

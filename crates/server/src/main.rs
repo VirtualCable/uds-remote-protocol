@@ -1747,6 +1747,20 @@ fn setup_cam(args: &Args) -> Option<CamEndpoint> {
                 return None;
             }
         }
+    } else if args.cam_sink == "vcam" {
+        #[cfg(all(windows, feature = "windows-capture"))]
+        match server::cam_vcam::VcamSink::create() {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                warn!("cannot open vcam sink: {e:#}");
+                return None;
+            }
+        }
+        #[cfg(not(all(windows, feature = "windows-capture")))]
+        {
+            warn!("cam sink 'vcam' requires windows-capture; webcam disabled");
+            return None;
+        }
     } else {
         warn!(sink = %args.cam_sink, "unknown --cam-sink; webcam disabled");
         return None;

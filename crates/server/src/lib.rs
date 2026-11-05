@@ -21,6 +21,8 @@ pub mod audio_uds;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod audio_wasapi;
 pub mod cam;
+#[cfg(all(windows, feature = "windows-capture"))]
+pub mod cam_vcam;
 pub mod capture;
 pub mod clipboard;
 pub mod display_mode;

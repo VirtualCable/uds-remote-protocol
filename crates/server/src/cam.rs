@@ -19,10 +19,10 @@
 //! asks the session loop for a `WebcamRequestKeyframe` (rate-limited there,
 //! same as the display path).
 //!
-//! The [`CamSink`] trait is the stability seam (§18.57): today [`NullSink`]
-//! (defensive discard) and [`RawSink`] (deterministic, hardware-free E2E
-//! verification); the Media Foundation Virtual Camera sink plugs in here
-//! later (F4.6).
+//! The [`CamSink`] trait is the stability seam (§18.57): [`NullSink`]
+//! (defensive discard), [`RawSink`] (deterministic, hardware-free E2E
+//! verification) and, on Windows, `cam_vcam::VcamSink` publishing to the
+//! "UDS Webcam" DirectShow filter through the `vcam-ipc` shared slot.
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
