@@ -129,9 +129,55 @@ pub fn bgra_to_rgb24_bottom_up(bgra: &[u8], width: u32, height: u32, out: &mut [
     }
 }
 
+/// Nearest-neighbor rescale of a tight BGRA frame into a new tight buffer.
+///
+/// Used when the consumer negotiates a geometry different from the
+/// producer's: the shared slot carries the native webcam frame and the
+/// filter serves whatever size the application asked for.
+#[must_use]
+pub fn scale_bgra_nearest(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
+    let (sw, sh, dw, dh) = (sw as usize, sh as usize, dw as usize, dh as usize);
+    debug_assert!(src.len() >= sw * sh * 4);
+    let mut out = vec![0u8; dw * dh * 4];
+    for y in 0..dh {
+        let sy = (y * sh / dh).min(sh - 1);
+        for x in 0..dw {
+            let sx = (x * sw / dw).min(sw - 1);
+            let (s, d) = ((sy * sw + sx) * 4, (y * dw + x) * 4);
+            out[d..d + 4].copy_from_slice(&src[s..s + 4]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_nearest_downsamples() {
+        // 4x4 with each quadrant a solid color: B=10 (TL), B=20 (TR),
+        // B=30 (BL), B=40 (BR).
+        let mut src = vec![0u8; 4 * 4 * 4];
+        for y in 0..4 {
+            for x in 0..4 {
+                let v = 10 * (1 + x / 2 + 2 * (y / 2)) as u8;
+                src[(y * 4 + x) * 4] = v;
+            }
+        }
+        let out = scale_bgra_nearest(&src, 4, 4, 2, 2);
+        assert_eq!(out[0], 10); // TL
+        assert_eq!(out[4], 20); // TR
+        assert_eq!(out[8], 30); // BL
+        assert_eq!(out[12], 40); // BR
+    }
+
+    #[test]
+    fn scale_nearest_identity() {
+        let src: Vec<u8> = (0..16).collect();
+        let out = scale_bgra_nearest(&src, 2, 2, 2, 2);
+        assert_eq!(out, src);
+    }
 
     #[test]
     fn nv12_len_matches_planes() {

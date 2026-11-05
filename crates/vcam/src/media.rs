@@ -34,6 +34,32 @@ use windows::core::GUID;
 
 use crate::pixel;
 
+/// Standard geometries the filter offers, in ascending order. Consumers
+/// (browsers) typically SetFormat one of these before connecting.
+pub const GEOMETRIES: [(u32, u32); 6] =
+    [(320, 240), (640, 480), (800, 600), (1280, 720), (1600, 900), (1920, 1080)];
+
+/// One enumerated offer: format + geometry.
+#[must_use]
+pub fn offer(index: usize) -> Option<(CamFormat, u32, u32)> {
+    let (fi, gi) = (index % CamFormat::ALL.len(), index / CamFormat::ALL.len());
+    let &(w, h) = GEOMETRIES.get(gi)?;
+    Some((CamFormat::ALL[fi], w, h))
+}
+
+/// Total number of offers (formats × geometries).
+#[must_use]
+pub fn offer_count() -> usize {
+    CamFormat::ALL.len() * GEOMETRIES.len()
+}
+
+/// Acceptable negotiated geometry: even dimensions inside sane bounds
+/// (NV12 chroma subsampling requires even sizes).
+#[must_use]
+pub fn valid_geometry(w: u32, h: u32) -> bool {
+    w % 2 == 0 && h % 2 == 0 && (160..=1920).contains(&w) && (120..=1080).contains(&h)
+}
+
 /// FourCC "NV12" for `biCompression`.
 const BI_NV12: u32 = 0x3256_564E;
 

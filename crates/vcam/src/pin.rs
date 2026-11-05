@@ -103,10 +103,6 @@ impl PinState {
         }
         s
     }
-
-    fn frame_bytes(&self) -> usize {
-        self.format.frame_bytes(self.width, self.height)
-    }
 }
 
 impl UdsCamPin {
@@ -240,11 +236,17 @@ fn stream_loop(
             }
             let out = std::slice::from_raw_parts_mut(buf, frame_bytes);
             match reader.as_mut().and_then(|r| r.read_frame(&mut bgra)) {
-                Some((w, h, _ts)) if w == width && h == height => match format {
-                    CamFormat::Nv12 => pixel::bgra_to_nv12(&bgra, width, height, out),
-                    CamFormat::Rgb24 => pixel::bgra_to_rgb24_bottom_up(&bgra, width, height, out),
-                },
-                _ => match format {
+                Some((sw, sh, _ts)) => {
+                    // Scale when the consumer negotiated a different geometry.
+                    if sw != width || sh != height {
+                        bgra = pixel::scale_bgra_nearest(&bgra, sw, sh, width, height);
+                    }
+                    match format {
+                        CamFormat::Nv12 => pixel::bgra_to_nv12(&bgra, width, height, out),
+                        CamFormat::Rgb24 => pixel::bgra_to_rgb24_bottom_up(&bgra, width, height, out),
+                    }
+                }
+                None => match format {
                     CamFormat::Nv12 => pixel::nv12_black(width, height, out),
                     CamFormat::Rgb24 => pixel::rgb24_black(width, height, out),
                 },
@@ -263,13 +265,13 @@ fn stream_loop(
 }
 
 /// Validates an incoming media type against the offered format list;
-/// returns the parsed offer when acceptable.
+/// returns the parsed (format, width, height) when acceptable.
 ///
 /// # Safety
 /// `mt` follows the DirectShow media type contract.
-unsafe fn acceptable(mt: *const AM_MEDIA_TYPE, width: u32, height: u32) -> Option<CamFormat> {
+unsafe fn acceptable(mt: *const AM_MEDIA_TYPE) -> Option<(CamFormat, u32, u32)> {
     let (format, w, h, _fps) = unsafe { media::parse_media_type(mt) }?;
-    (w == width && h == height).then_some(format)
+    media::valid_geometry(w, h).then_some((format, w, h))
 }
 
 #[allow(non_snake_case)]
@@ -282,18 +284,19 @@ impl IPin_Impl for UdsCamPin_Impl {
             crate::vlog!("pin Connect: already connected");
             return Err(VFW_E_ALREADY_CONNECTED.into());
         }
-        // Pick the offered format (or validate the requested one).
-        let format = if pmt.is_null() {
-            pin.format
+        // Pick the current selection, or honor the requested media type
+        // (format AND geometry — browsers SetFormat before connecting).
+        let (format, width, height) = if pmt.is_null() {
+            (pin.format, pin.width, pin.height)
         } else {
-            match unsafe { acceptable(pmt, pin.width, pin.height) } {
+            match unsafe { acceptable(pmt) } {
                 Some(f) => f,
                 None => return Err(E_INVALIDARG.into()),
             }
         };
         // Build the concrete media type and hand the connection to the
         // downstream input pin (baseclasses contract).
-        let mt = unsafe { media::make_media_type(format, pin.width, pin.height, pin.fps) }
+        let mt = unsafe { media::make_media_type(format, width, height, pin.fps) }
             .ok_or(E_UNEXPECTED)?;
         let this = pin.this_pin.clone().ok_or(E_UNEXPECTED)?;
         let result = unsafe { receive.ReceiveConnection(&this, mt) };
@@ -307,7 +310,7 @@ impl IPin_Impl for UdsCamPin_Impl {
         })?;
         let props = ALLOCATOR_PROPERTIES {
             cBuffers: 4,
-            cbBuffer: pin.frame_bytes() as i32,
+            cbBuffer: format.frame_bytes(width, height) as i32,
             cbAlign: 1,
             cbPrefix: 0,
         };
@@ -317,10 +320,12 @@ impl IPin_Impl for UdsCamPin_Impl {
             allocator.Commit()?;
         }
         pin.format = format;
+        pin.width = width;
+        pin.height = height;
         pin.connected = Some(receive.clone());
         pin.mem_input = Some(mem_input);
         pin.allocator = Some(allocator);
-        crate::vlog!("pin connected fmt={format:?} {width}x{height}", width = pin.width, height = pin.height);
+        crate::vlog!("pin connected fmt={format:?} {width}x{height}");
         Ok(())
     }
 
@@ -399,8 +404,7 @@ impl IPin_Impl for UdsCamPin_Impl {
     }
 
     fn QueryAccept(&self, pmt: *const AM_MEDIA_TYPE) -> HRESULT {
-        let pin = self.shared.pin.lock().unwrap();
-        match unsafe { acceptable(pmt, pin.width, pin.height) } {
+        match unsafe { acceptable(pmt) } {
             Some(_) => S_OK,
             None => S_FALSE,
         }
@@ -408,7 +412,7 @@ impl IPin_Impl for UdsCamPin_Impl {
 
     fn EnumMediaTypes(&self) -> Result<IEnumMediaTypes> {
         let pin = self.shared.pin.lock().unwrap();
-        Ok(UdsEnumMediaTypes::new(pin.width, pin.height, pin.fps).into())
+        Ok(UdsEnumMediaTypes::new(pin.fps).into())
     }
 
     fn QueryInternalConnections(&self, _appin: OutRef<IPin>, npin: *mut u32) -> Result<()> {
@@ -444,8 +448,10 @@ impl IAMStreamConfig_Impl for UdsCamPin_Impl {
         if pin.connected.is_some() {
             return Err(VFW_E_ALREADY_CONNECTED.into());
         }
-        let format = unsafe { acceptable(pmt, pin.width, pin.height) }.ok_or(E_INVALIDARG)?;
+        let (format, width, height) = unsafe { acceptable(pmt) }.ok_or(E_INVALIDARG)?;
         pin.format = format;
+        pin.width = width;
+        pin.height = height;
         Ok(())
     }
 
@@ -460,7 +466,7 @@ impl IAMStreamConfig_Impl for UdsCamPin_Impl {
             return Err(E_POINTER.into());
         }
         unsafe {
-            *picount = CamFormat::ALL.len() as i32;
+            *picount = media::offer_count() as i32;
             *pisize = size_of::<windows::Win32::Media::DirectShow::VIDEO_STREAM_CONFIG_CAPS>() as i32;
         }
         Ok(())
@@ -471,13 +477,12 @@ impl IAMStreamConfig_Impl for UdsCamPin_Impl {
             return Err(E_POINTER.into());
         }
         let pin = self.shared.pin.lock().unwrap();
-        let Some(&format) = CamFormat::ALL.get(usize::try_from(iindex).unwrap_or(usize::MAX)) else {
+        let Some((format, w, h)) = media::offer(usize::try_from(iindex).unwrap_or(usize::MAX)) else {
             return Err(S_FALSE.into());
         };
         unsafe {
-            *ppmt = media::make_media_type(format, pin.width, pin.height, pin.fps)
-                .ok_or(E_UNEXPECTED)?;
-            media::fill_stream_caps(pscc, pin.width, pin.height, pin.fps);
+            *ppmt = media::make_media_type(format, w, h, pin.fps).ok_or(E_UNEXPECTED)?;
+            media::fill_stream_caps(pscc, w, h, pin.fps);
         }
         Ok(())
     }
@@ -540,18 +545,16 @@ impl IKsPropertySet_Impl for UdsCamPin_Impl {
     }
 }
 
-/// `IEnumMediaTypes` over the offered formats (NV12, RGB24).
+/// `IEnumMediaTypes` over the offered formats × geometries.
 #[implement(IEnumMediaTypes)]
 struct UdsEnumMediaTypes {
-    width: u32,
-    height: u32,
     fps: u32,
     index: Mutex<usize>,
 }
 
 impl UdsEnumMediaTypes {
-    fn new(width: u32, height: u32, fps: u32) -> Self {
-        Self { width, height, fps, index: Mutex::new(0) }
+    fn new(fps: u32) -> Self {
+        Self { fps, index: Mutex::new(0) }
     }
 }
 
@@ -570,8 +573,8 @@ impl IEnumMediaTypes_Impl for UdsEnumMediaTypes_Impl {
         {
             let mut index = self.index.lock().unwrap();
             while fetched < cmediatypes {
-                let Some(&format) = CamFormat::ALL.get(*index) else { break };
-                let mt = unsafe { media::make_media_type(format, self.width, self.height, self.fps) };
+                let Some((format, w, h)) = media::offer(*index) else { break };
+                let mt = unsafe { media::make_media_type(format, w, h, self.fps) };
                 match mt {
                     Some(mt) => {
                         unsafe { *ppmediatypes.add(fetched as usize) = mt };
@@ -590,8 +593,8 @@ impl IEnumMediaTypes_Impl for UdsEnumMediaTypes_Impl {
 
     fn Skip(&self, cmediatypes: u32) -> Result<()> {
         let mut index = self.index.lock().unwrap();
-        *index = (*index + cmediatypes as usize).min(CamFormat::ALL.len());
-        if *index == CamFormat::ALL.len() && cmediatypes > 0 {
+        *index = (*index + cmediatypes as usize).min(media::offer_count());
+        if *index == media::offer_count() && cmediatypes > 0 {
             return Err(S_FALSE.into());
         }
         Ok(())
@@ -603,7 +606,7 @@ impl IEnumMediaTypes_Impl for UdsEnumMediaTypes_Impl {
     }
 
     fn Clone(&self) -> Result<IEnumMediaTypes> {
-        let cloned = UdsEnumMediaTypes::new(self.width, self.height, self.fps);
+        let cloned = UdsEnumMediaTypes::new(self.fps);
         *cloned.index.lock().unwrap() = *self.index.lock().unwrap();
         Ok(cloned.into())
     }
