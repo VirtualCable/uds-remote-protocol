@@ -11,7 +11,7 @@
 //!                 [--preset NAME] [--bitrate KBPS]
 //!                 [--width N] [--height N] [--fps N] [--max-frames N]
 //!                 [--audio-preset NAME] [--audio-source auto|synthetic|uds-loopback|wasapi]
-//!                 [--no-audio] [--mic-sink null|wav:PATH] [--allow-lock]`
+//!                 [--no-audio] [--mic-sink null|wav:PATH] [--cam-sink null|raw:PATH] [--allow-lock]`
 //!
 //! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`,
 //! `vp8-low-latency`); VP8/VP9 presets require the crate features
@@ -41,6 +41,9 @@
 //! Audio-in (§9.2): `--mic-sink wav:PATH` records the client microphone to a
 //! WAV file (48 kHz mono) and announces audio-in support to the client; the
 //! default `null` keeps audio-in off (no announcement, packets discarded).
+//! Webcam (§18.57): `--cam-sink raw:PATH` records decoded client camera
+//! frames as raw BGRA; the default `null` keeps webcam redirection off (the
+//! client's caps are logged and ignored, no stream ever starts).
 //!
 //! Privacy screen (M7): the client may negotiate `FLAG_PRIVACY_SCREEN`
 //! (testclient `--privacy`). In console-mirror mode the request is logged
@@ -93,6 +96,9 @@ struct Args {
     audio_preset: String,
     audio_source: String,
     mic_sink: String,
+    /// Webcam sink (§18.57): `null` (default, redirection off) or
+    /// `raw:PATH` (decoded BGRA frames to a file, E2E verification).
+    cam_sink: String,
     /// Storage spool directory (M8); defaults to the per-user spool.
     spool: Option<std::path::PathBuf>,
     /// Per-session telemetry CSV (§12.8); `None` keeps telemetry log-only.
@@ -130,6 +136,7 @@ fn parse_args() -> Result<Args> {
         audio_preset: "opus-music".to_string(),
         audio_source: "auto".to_string(),
         mic_sink: "null".to_string(),
+        cam_sink: "null".to_string(),
         spool: None,
         stats_csv: None,
         allow_lock: false,
@@ -225,6 +232,7 @@ fn parse_args() -> Result<Args> {
             "--audio-preset" => args.audio_preset = value,
             "--audio-source" => args.audio_source = value,
             "--mic-sink" => args.mic_sink = value,
+            "--cam-sink" => args.cam_sink = value,
             "--spool" => args.spool = Some(value.into()),
             "--stats-csv" => args.stats_csv = Some(value.into()),
             other => bail!("unknown argument: {other}"),
@@ -1708,6 +1716,128 @@ fn forward_mic(tx: &mut Option<std::sync::mpsc::Sender<Vec<u8>>>, payload: &[u8]
     }
 }
 
+/// Server webcam endpoint for one session (§18.57): the sender that
+/// incoming `WEBCAM` fragments are forwarded to, plus the signals the cam
+/// thread raises (keyframe-needed on fragment loss, frame counters).
+struct CamEndpoint {
+    tx: std::sync::mpsc::Sender<Vec<u8>>,
+    signals: std::sync::Arc<server::cam::CamSignals>,
+}
+
+/// Builds the webcam receive pipeline from `--cam-sink`. Returns `None` —
+/// webcam redirection off, incoming fragments dropped, no `WebcamConfig`
+/// ever sent — when the sink is `null`, unknown, or the VP9 decoder is not
+/// compiled in.
+fn setup_cam(args: &Args) -> Option<CamEndpoint> {
+    if args.cam_sink == "null" {
+        return None;
+    }
+    let sink: Box<dyn server::cam::CamSink> = if let Some(path) = args.cam_sink.strip_prefix("raw:")
+    {
+        match server::cam::RawSink::create(path) {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                warn!("cannot open cam sink: {e:#}");
+                return None;
+            }
+        }
+    } else {
+        warn!(sink = %args.cam_sink, "unknown --cam-sink; webcam disabled");
+        return None;
+    };
+    let (tx, signals) = server::cam::spawn_cam(sink)?;
+    info!(sink = %args.cam_sink, "webcam redirection announced");
+    Some(CamEndpoint { tx, signals })
+}
+
+/// Forwards one `WEBCAM` fragment to the cam thread (same semantics as
+/// [`forward_mic`]).
+fn forward_cam(cam: &mut Option<CamEndpoint>, payload: &[u8]) {
+    let Some(c) = cam else { return };
+    if c.tx.send(payload.to_vec()).is_err() {
+        warn!("cam thread ended; webcam redirection disabled for this session");
+        *cam = None;
+    }
+}
+
+/// Sends `WebcamRequestKeyframe` when the cam thread reported fragment
+/// loss, rate-limited to one per 500 ms like the display path (§12.2,
+/// riesgos §2.1): while throttled the flag stays set so the request is not
+/// lost, only deferred.
+async fn maybe_request_cam_keyframe<T: ReliableTransport>(
+    legs: &mut Legs<T>,
+    ctl: &mut ControlState,
+    cam: Option<&CamEndpoint>,
+) {
+    let Some(c) = cam else { return };
+    if !c.signals.keyframe_needed.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    if ctl
+        .last_cam_key_req
+        .is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+    {
+        c.signals.keyframe_needed.store(true, Ordering::Relaxed);
+        return;
+    }
+    info!("webcam keyframe requested (fragment loss)");
+    match ControlMessage::WebcamRequestKeyframe.encode() {
+        Ok(msg) => {
+            if let Err(e) = legs.send_control(&msg).await {
+                warn!("cannot send webcam keyframe request: {e}");
+            } else {
+                ctl.last_cam_key_req = Some(Instant::now());
+            }
+        }
+        Err(e) => warn!("cannot encode webcam keyframe request: {e}"),
+    }
+}
+
+/// Answers a client's `WebcamCaps` with `WebcamConfig` + `WebcamStart`
+/// (§18.57): the server clamps its preferred defaults to the client caps
+/// (Server > Client). No-op without a cam sink (`cam` is `None`) or when
+/// the client offers no VP9.
+async fn start_webcam<T: ReliableTransport>(
+    legs: &mut Legs<T>,
+    cam: Option<&CamEndpoint>,
+    caps: (u32, u32, u8, Vec<u16>),
+) {
+    let (max_width, max_height, max_fps, codecs) = caps;
+    let Some(_) = cam else {
+        info!(max_width, max_height, max_fps, "webcam caps ignored: no cam sink configured");
+        return;
+    };
+    let vp9 = codec::VideoCodecType::Vp9.wire_id();
+    if !codecs.contains(&vp9) {
+        warn!(?codecs, "client offers no usable webcam codec; webcam off");
+        return;
+    }
+    let config = ControlMessage::WebcamConfig {
+        codec: vp9,
+        width: protocol::webcam::DEFAULT_WIDTH.min(max_width),
+        height: protocol::webcam::DEFAULT_HEIGHT.min(max_height),
+        fps: protocol::webcam::DEFAULT_FPS.min(max_fps).max(1),
+        bitrate_kbps: protocol::webcam::DEFAULT_BITRATE_KBPS,
+    };
+    info!(?config, "webcam configured");
+    let Ok(cfg) = config.encode() else {
+        warn!("cannot encode webcam config");
+        return;
+    };
+    if let Err(e) = legs.send_control(&cfg).await {
+        warn!("cannot send webcam config: {e}");
+        return;
+    }
+    match ControlMessage::WebcamStart.encode() {
+        Ok(start) => {
+            if let Err(e) = legs.send_control(&start).await {
+                warn!("cannot send webcam start: {e}");
+            }
+        }
+        Err(e) => warn!("cannot encode webcam start: {e}"),
+    }
+}
+
 async fn serve<T: ReliableTransport>(
     raw: T,
     ticket: &[u8; protocol::TICKET_LENGTH],
@@ -1922,6 +2052,12 @@ async fn serve_stream<T: ReliableTransport>(
         announce_mic(&mut legs).await?;
     }
 
+    // Webcam (§18.57): client camera → server sink. Nothing is announced
+    // here: when the client's `WebcamCaps` arrives, the loop answers with
+    // `WebcamConfig` + `WebcamStart`. Without a sink the caps are logged
+    // and ignored, so the client never streams into the void.
+    let mut cam = setup_cam(args);
+
     // Clipboard (M8): OS bridge + wire session state. Best-effort — when the
     // platform has no backend the channel simply stays silent.
     let mut clipboard = server::clipboard::spawn();
@@ -1997,6 +2133,8 @@ async fn serve_stream<T: ReliableTransport>(
         // §18.42: the pipe acceptor waits for the service-spawned SYSTEM
         // injector; in manual/dev runs nobody connects and input stays local.
         injector_input: Some(spawn_injector_pipe(session_id)),
+        cam_caps: None,
+        last_cam_key_req: None,
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -2163,6 +2301,9 @@ async fn serve_stream<T: ReliableTransport>(
                     legs.send_control(&ack.encode()).await?;
                 } else if ch == channel::AUDIO_IN {
                     forward_mic(&mut mic_tx, &udp_buf[..n]);
+                } else if ch == channel::WEBCAM {
+                    forward_cam(&mut cam, &udp_buf[..n]);
+                    maybe_request_cam_keyframe(&mut legs, &mut ctl, cam.as_ref()).await;
                 }
             }
             res = legs.stream.recv_into(&mut ctrl_buf) => {
@@ -2184,8 +2325,18 @@ async fn serve_stream<T: ReliableTransport>(
                     handle_storage_packet(&mut legs, &mut spool, &ctrl_buf[..n]).await;
                 } else if ch == channel::SMARTCARD {
                     scard_router.handle_packet(&ctrl_buf[..n]);
+                } else if ch == channel::WEBCAM {
+                    // Lossy channel on the reliable leg: TCP fallback when
+                    // there is no UDP (same as the display path).
+                    forward_cam(&mut cam, &ctrl_buf[..n]);
+                    maybe_request_cam_keyframe(&mut legs, &mut ctl, cam.as_ref()).await;
                 } else {
                     handle_stream_packet(&mut ctl, &mut encoder, ch, &ctrl_buf[..n]);
+                }
+                // A WebcamCaps (handled above, sync) is answered here with
+                // the async config/start pair.
+                if let Some(caps) = ctl.cam_caps.take() {
+                    start_webcam(&mut legs, cam.as_ref(), caps).await;
                 }
             }
             _ = storage_tick.tick(), if spool.as_ref().is_some_and(server::storage::Spool::has_pending) => {
@@ -2554,6 +2705,13 @@ struct ControlState {
     /// forwarded to the helper on the Winlogon desktop instead of the local
     /// injector (the inner `Option` is `None` until the helper connects).
     secure_input: Option<std::sync::Arc<std::sync::Mutex<Option<std::fs::File>>>>,
+    /// Client webcam capabilities pending an answer (§18.57): set by
+    /// `handle_stream_packet`, consumed by the session loop which sends the
+    /// `WebcamConfig`/`WebcamStart` pair (async, so not done in the sync
+    /// handler).
+    cam_caps: Option<(u32, u32, u8, Vec<u16>)>,
+    /// Webcam keyframe requests are rate-limited like display ones.
+    last_cam_key_req: Option<Instant>,
 }
 
 impl ControlState {
@@ -2671,6 +2829,10 @@ fn handle_stream_packet(
             } else {
                 debug!("lock request throttled (cycle still settling)");
             }
+        }
+        Ok(ControlMessage::WebcamCaps { max_width, max_height, max_fps, codecs }) => {
+            info!(max_width, max_height, max_fps, ?codecs, "client webcam capabilities");
+            ctl.cam_caps = Some((max_width, max_height, max_fps, codecs));
         }
         Ok(_) => {} // other control messages: not handled here yet
         Err(e) => warn!("undecodable control message: {e}"),

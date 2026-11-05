@@ -19,6 +19,9 @@
 //! - `capture_ts_ms` is the client's capture clock (ms); the server uses it
 //!   only for drop statistics, never for A/V sync (the webcam is a remote
 //!   input device, not part of the desktop mix).
+//! - Each reassembled element opens with the codec wire id (u16 BE, §8.5),
+//!   exactly like display frames: the per-frame tag, not the last
+//!   `WebcamConfig`, is authoritative for the server's decoder choice.
 //! - A missing fragment drops the whole frame ([`crate::fragment`]
 //!   semantics). The server's reassembly gap detector asks the client for a
 //!   keyframe with `ControlMessage::WebcamRequestKeyframe` — the same

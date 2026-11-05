@@ -232,9 +232,16 @@ fn run(
                         continue;
                     }
                 };
+                // §8.5: every frame opens with the codec wire id (u16 BE),
+                // exactly like display frames; the server strips it before
+                // decoding, so a config/race mismatch can never feed the
+                // wrong decoder.
+                let mut element = Vec::with_capacity(2 + packet.data.len());
+                element.extend_from_slice(&VideoCodecType::Vp9.wire_id().to_be_bytes());
+                element.extend_from_slice(&packet.data);
                 frame_id = frame_id.wrapping_add(1);
                 for dgram in
-                    Fragmenter::split(wc::STREAM_ID, frame_id, frame.timestamp_ms, &packet.data)
+                    Fragmenter::split(wc::STREAM_ID, frame_id, frame.timestamp_ms, &element)
                 {
                     if tx.try_send(dgram).is_err() {
                         // Channel full (consumer lagging) or closed (stop):
