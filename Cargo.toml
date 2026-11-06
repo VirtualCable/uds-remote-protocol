@@ -123,6 +123,9 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 doc_markdown = "allow"
 
-# Temporary: symbols in the vcam release build to resolve OBS crash offsets.
+# Keep symbols in the vcam release build: the DLL runs inside arbitrary
+# consumer processes (OBS, browsers) and the .pdb is what lets us resolve
+# crash offsets in the field. The DLL itself stays small; debug info goes
+# to the separate vcam.pdb.
 [profile.release.package.vcam]
 debug = true
