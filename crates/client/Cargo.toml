@@ -27,7 +27,6 @@ transport.workspace = true
 crypt.workspace = true
 codec.workspace = true
 smartcard = { workspace = true, features = ["pcsc-backend"] }
-webcam.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

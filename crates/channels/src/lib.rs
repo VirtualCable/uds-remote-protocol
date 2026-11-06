@@ -17,3 +17,4 @@
 
 pub mod clipboard;
 pub mod printer;
+pub mod webcam;

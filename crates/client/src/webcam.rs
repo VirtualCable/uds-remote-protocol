@@ -53,7 +53,7 @@ const CAM_QUEUE_DGRAMS: usize = 2048;
 pub struct CamClient {
     /// The capture source; `None` while streaming (moved into the thread)
     /// or when no camera is available.
-    source: Option<Box<dyn webcam::WebcamSource>>,
+    source: Option<Box<dyn channels::webcam::WebcamSource>>,
     /// Receives fragmented datagram payloads once the pipeline is running.
     rx: Option<mpsc::Receiver<Vec<u8>>>,
     /// Server-chosen parameters, kept to restart after a stop/start cycle.
@@ -62,14 +62,14 @@ pub struct CamClient {
     keyframe: Arc<AtomicBool>,
     /// Capture thread handle (joined on stop, so the camera is released
     /// deterministically); the thread hands the source back on exit.
-    thread: Option<JoinHandle<Box<dyn webcam::WebcamSource>>>,
+    thread: Option<JoinHandle<Box<dyn channels::webcam::WebcamSource>>>,
 }
 
 impl CamClient {
     /// Creates the endpoint with the probed source (or `None` when no
     /// camera/mock is available — webcam redirection is then not offered).
     #[must_use]
-    pub fn new(source: Option<Box<dyn webcam::WebcamSource>>) -> Self {
+    pub fn new(source: Option<Box<dyn channels::webcam::WebcamSource>>) -> Self {
         Self {
             source,
             rx: None,
@@ -205,12 +205,12 @@ impl Drop for CamClient {
 /// (channel closed) or the source ends.
 #[cfg(feature = "vp9")]
 fn run(
-    source: Box<dyn webcam::WebcamSource>,
+    source: Box<dyn channels::webcam::WebcamSource>,
     mut encoder: codec::Vp9Encoder,
     spec: CamSpec,
     tx: &mpsc::Sender<Vec<u8>>,
     keyframe: &AtomicBool,
-) -> Box<dyn webcam::WebcamSource> {
+) -> Box<dyn channels::webcam::WebcamSource> {
     match source.start(spec.width, spec.height, u32::from(spec.fps)) {
         Ok(frames) => {
             let mut frame_id = 0u32;

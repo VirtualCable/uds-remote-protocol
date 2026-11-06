@@ -490,6 +490,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clipboard-rs",
+ "flume 0.12.0",
+ "nokhwa",
  "tracing",
 ]
 
@@ -531,7 +533,6 @@ dependencies = [
  "tokio",
  "tracing",
  "transport",
- "webcam",
 ]
 
 [[package]]
@@ -5055,16 +5056,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "webcam"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "flume 0.12.0",
- "nokhwa",
- "tracing",
 ]
 
 [[package]]

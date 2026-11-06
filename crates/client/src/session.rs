@@ -164,7 +164,7 @@ impl Session {
         // Webcam (§18.57): the source is probed here so the flag reflects a
         // real capture capability, and passed down to the Core.
         let cam_source = if self.config.webcam {
-            ::webcam::default_source()
+            channels::webcam::default_source()
         } else {
             None
         };
@@ -1191,7 +1191,7 @@ impl Core {
         displays: Displays,
         config: &ClientConfig,
         clock_start: Instant,
-        cam_source: Option<Box<dyn ::webcam::WebcamSource>>,
+        cam_source: Option<Box<dyn channels::webcam::WebcamSource>>,
         printer: Option<crate::printer::PrinterJobs>,
     ) -> Self {
         let (scard_tx, scard_rx) = flume::unbounded();

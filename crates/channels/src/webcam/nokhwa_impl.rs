@@ -14,10 +14,25 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
-use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
+use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use tracing::{debug, info, warn};
 
 use super::{DEVICE_ENV, RawFrame, WebcamSource};
+
+/// How long to wait before trying to reopen a camera that failed to open
+/// or stopped delivering frames (uds-client capture_loop): Windows only
+/// releases the hardware once the previous instance is dropped, so the
+/// camera is dropped on failure and reacquired on this cadence for as long
+/// as the stream lasts — whatever was holding it (another app, a USB
+/// reset) usually lets go on its own.
+const CAMERA_REOPEN_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Next paced send instant: previous + interval, but never in the past
+/// (uds-client capture_loop) — after a stall we resume at the current
+/// cadence instead of bursting catch-up frames.
+fn next_deadline(previous: Instant, interval: Duration, now: Instant) -> Instant {
+    (previous + interval).max(now)
+}
 
 /// Real camera source.
 #[derive(Debug)]
@@ -167,23 +182,36 @@ impl WebcamSource for NokhwaSource {
         let running = Arc::clone(&self.running);
         let epoch = Instant::now();
         let handle = std::thread::spawn(move || {
-            let (mut cam, negotiated_fps) = match open_camera(&index, width, height, fps) {
-                Ok(ok) => ok,
-                Err(err) => {
-                    warn!("webcam: capture not started: {err:#}");
-                    running.store(false, Ordering::SeqCst);
-                    return;
+            let mut cam: Option<nokhwa::Camera> = None;
+            let mut reopen_at = Instant::now();
+            let mut fps = fps.max(1);
+            let mut frame_dur = Duration::from_secs_f64(1.0 / f64::from(fps));
+            let mut next = Instant::now();
+            while running.load(Ordering::Relaxed) {
+                if cam.is_none() {
+                    let now = Instant::now();
+                    if now < reopen_at {
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    match open_camera(&index, width, height, fps) {
+                        Ok((opened, negotiated_fps)) => {
+                            if negotiated_fps > 0 {
+                                fps = negotiated_fps;
+                                frame_dur = Duration::from_secs_f64(1.0 / f64::from(fps));
+                            }
+                            info!(width, height, fps, "webcam: capture started");
+                            next = Instant::now();
+                            cam = Some(opened);
+                        }
+                        Err(err) => {
+                            warn!("webcam: capture not started: {err:#}; retrying");
+                            reopen_at = Instant::now() + CAMERA_REOPEN_INTERVAL;
+                        }
+                    }
+                    continue;
                 }
-            };
-            let fps = if negotiated_fps > 0 { negotiated_fps } else { fps.max(1) };
-            info!(width, height, fps, "webcam: capture started");
-            let frame_dur = Duration::from_secs_f64(1.0 / f64::from(fps));
-            let mut tick = 0u32;
-            loop {
-                if !running.load(Ordering::Relaxed) {
-                    break;
-                }
-                match cam.frame() {
+                match cam.as_mut().expect("camera present").frame() {
                     Ok(buffer) => {
                         match buffer.decode_image::<nokhwa::pixel_format::RgbFormat>() {
                             Ok(image) => {
@@ -201,18 +229,23 @@ impl WebcamSource for NokhwaSource {
                         }
                     }
                     Err(err) => {
-                        warn!("webcam: capture failed: {err}");
-                        break;
+                        // Camera lost (USB reset, another app took it):
+                        // drop it and reacquire on the reopen cadence.
+                        warn!("webcam: capture failed: {err}; reopening the camera");
+                        drop(cam.take());
+                        reopen_at = Instant::now() + CAMERA_REOPEN_INTERVAL;
+                        continue;
                     }
                 }
-                tick = tick.wrapping_add(1);
-                let next = epoch + frame_dur * tick;
+                next = next_deadline(next, frame_dur, Instant::now());
                 let now = Instant::now();
                 if next > now {
                     std::thread::sleep(next - now);
                 }
             }
-            let _ = cam.stop_stream();
+            if let Some(mut c) = cam.take() {
+                let _ = c.stop_stream();
+            }
             debug!("webcam: capture stopped");
         });
         *self.thread.lock().expect("capture thread mutex") = Some(handle);
@@ -232,7 +265,3 @@ impl Drop for NokhwaSource {
         self.stop();
     }
 }
-
-// Resolution import is used in query_limits via CameraFormat::resolution().
-#[allow(unused_imports)]
-use Resolution as _ResolutionDoc;

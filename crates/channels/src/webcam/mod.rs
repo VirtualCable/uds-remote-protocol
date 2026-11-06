@@ -3,13 +3,15 @@
 // All rights reserved.
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-//! Client-side webcam capture for uds-rp (design doc §18.57).
+//! Client-side webcam capture for uds-rp (design doc §18.57), living in
+//! the channels crate: the camera is a device, the VP9 encoding is
+//! protocol and stays in `client`.
 //!
 //! The [`WebcamSource`] trait has the same *shape* as the
 //! `rdp::integrations::webcam::WebcamIntegration` trait used by uds-client
 //! (minus the RDP-channel-specific `channel_ptr`/`request_sample`/
-//! `push_frame` methods), so the future uds-client integration is a thin
-//! wrapper over the existing `WebcamHandle`.
+//! `push_frame` methods), so a future uds-client integration is a thin
+//! wrapper in whichever direction fits.
 //!
 //! Two implementations:
 //! - [`NokhwaSource`]: the real camera via nokhwa (multiplatform).

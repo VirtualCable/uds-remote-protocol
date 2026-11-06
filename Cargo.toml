@@ -25,7 +25,6 @@ members = [
     "crates/vcam-ipc",
     "crates/vcam",
     "crates/uds-rp-client",
-    "crates/webcam",
 ]
 # The Windows kernel audio driver lives in its own workspace (drivers/):
 # it needs panic="abort" profiles (workspace-wide setting), no_std, and a
@@ -47,7 +46,6 @@ smartcard = { path = "crates/smartcard" }
 transport = { path = "crates/transport" }
 crypt = { path = "crates/crypt" }
 codec = { path = "crates/codec" }
-webcam = { path = "crates/webcam" }
 vcam-ipc = { path = "crates/vcam-ipc" }
 vpx-sys = { path = "crates/vpx-sys" }
 server = { path = "crates/server" }
