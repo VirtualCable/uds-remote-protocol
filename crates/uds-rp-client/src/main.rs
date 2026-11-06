@@ -85,8 +85,33 @@ fn take(it: &mut std::iter::Skip<std::env::Args>, flag: &str) -> Result<String> 
 }
 
 /// Default destination for redirected print jobs: the user's Downloads
-/// folder, falling back to the temp dir.
+/// folder, falling back to the temp dir. Downloads is a *known folder* and
+/// may be redirected anywhere (another drive, a network path), so guessing
+/// `%USERPROFILE%\Downloads` is wrong — ask the shell for the real path.
+#[cfg(windows)]
 fn default_printer_dir() -> std::path::PathBuf {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Downloads, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+    unsafe {
+        if let Ok(path) = SHGetKnownFolderPath(&FOLDERID_Downloads, KF_FLAG_DEFAULT, None) {
+            let dir = path.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(path.as_ptr() as *const _));
+            if !dir.is_empty() {
+                return std::path::PathBuf::from(dir);
+            }
+        }
+    }
+    default_printer_dir_fallback()
+}
+
+/// Non-Windows fallback (and Windows fallback if the known-folder query
+/// fails): `$HOME/Downloads` if it exists, else the temp dir.
+#[cfg(not(windows))]
+fn default_printer_dir() -> std::path::PathBuf {
+    default_printer_dir_fallback()
+}
+
+fn default_printer_dir_fallback() -> std::path::PathBuf {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map_or_else(std::env::temp_dir, |home| {
