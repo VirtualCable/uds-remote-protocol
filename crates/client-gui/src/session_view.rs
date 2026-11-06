@@ -198,6 +198,10 @@ impl SessionView {
                 ClientEvent::Error(message) | ClientEvent::Status(message) => {
                     self.status = message;
                 }
+                ClientEvent::PrintJobDone { path, bytes } => {
+                    info!(path = %path.display(), bytes, "print job received");
+                    self.status = format!("printed: {} ({bytes} B)", path.display());
+                }
                 ClientEvent::Disconnected => {
                     self.disconnected = true;
                     self.status = "disconnected".to_string();

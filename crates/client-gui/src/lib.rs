@@ -60,6 +60,9 @@ pub struct SessionFlags {
     /// Lab aid: dump every decoded audio frame to this file as raw s16le
     /// PCM (diagnosing server-side capture noise vs client decode).
     pub audio_dump: Option<std::path::PathBuf>,
+    /// Accept redirected print jobs (§18.57): PDFs land in this directory
+    /// (the CLI passes the Downloads folder).
+    pub printer_save: Option<std::path::PathBuf>,
 }
 
 pub use server_config::ticket_bytes;
@@ -409,6 +412,7 @@ fn spawn_session(
         privacy_screen: flags.privacy_screen,
         smartcard: flags.smartcard,
         webcam: flags.webcam,
+        printer: flags.printer_save.clone(),
         pref_resolution,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);

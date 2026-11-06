@@ -29,6 +29,7 @@ mod command;
 mod events;
 mod framebuffer;
 pub mod mic;
+pub mod printer;
 mod session;
 pub mod smartcard;
 pub mod stats;

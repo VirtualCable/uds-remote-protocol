@@ -45,6 +45,7 @@ fn run() -> Result<()> {
         webcam: false,
         privacy_screen: false,
         audio_dump: None,
+        printer_save: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -53,6 +54,11 @@ fn run() -> Result<()> {
             "--smartcard" => flags.smartcard = true,
             "--webcam" => flags.webcam = true,
             "--privacy" => flags.privacy_screen = true,
+            // §18.57: received PDFs land in Downloads (or the given dir).
+            "--printer" => flags.printer_save = Some(default_printer_dir()),
+            "--printer-save" => {
+                flags.printer_save = Some(take(&mut it, "--printer-save")?.into());
+            }
             "--audio-dump" => flags.audio_dump = Some(take(&mut it, "--audio-dump")?.into()),
             "--addr" => form.addr = take(&mut it, "--addr")?,
             "--ticket" => form.ticket = take(&mut it, "--ticket")?,
@@ -76,6 +82,16 @@ fn run() -> Result<()> {
 
 fn take(it: &mut std::iter::Skip<std::env::Args>, flag: &str) -> Result<String> {
     it.next().context(format!("missing value for {flag}"))
+}
+
+/// Default destination for redirected print jobs: the user's Downloads
+/// folder, falling back to the temp dir.
+fn default_printer_dir() -> std::path::PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map_or_else(std::env::temp_dir, |home| {
+            std::path::PathBuf::from(home).join("Downloads")
+        })
 }
 
 /// Routes worker-thread panics into the tracing log: launched from the

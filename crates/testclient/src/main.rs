@@ -76,6 +76,9 @@ struct Args {
     /// Webcam redirection (§18.57): `--webcam` offers the channel in the
     /// HELLO (set `UDSRP_CAM_MOCK=1` for a camera-less E2E).
     webcam: bool,
+    /// Printer redirection (§18.57): `--printer-save DIR` accepts jobs and
+    /// drops the received PDFs in DIR.
+    printer_save: Option<std::path::PathBuf>,
     /// Console-conflict answer (§18.53): `--on-conflict take-over|deny`
     /// (default take-over, the consumer default).
     on_conflict_take_over: bool,
@@ -155,6 +158,7 @@ fn parse_args() -> Result<Args> {
         selftest_resize: None,
         smartcard: false,
         webcam: false,
+        printer_save: None,
         on_conflict_take_over: true,
     };
     let mut key_seen = false;
@@ -230,6 +234,7 @@ fn parse_args() -> Result<Args> {
                 ));
             }
             "--upload" => args.upload = Some(value.into()),
+            "--printer-save" => args.printer_save = Some(value.into()),
             "--download" => args.download = Some(value),
             "--on-conflict" => {
                 args.on_conflict_take_over = match value.as_str() {
@@ -771,6 +776,7 @@ async fn run() -> Result<()> {
         privacy_screen: args.privacy,
         smartcard: args.smartcard,
         webcam: args.webcam,
+        printer: args.printer_save.clone(),
         pref_resolution: args.pref_resolution,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);
@@ -899,6 +905,9 @@ async fn run() -> Result<()> {
                         });
                     }
                     ClientEvent::Status(msg) => info!("UDSRP-STATUS: {msg}"),
+                    ClientEvent::PrintJobDone { path, bytes } => {
+                        info!(path = %path.display(), bytes, "UDSRP-PRINT-OK");
+                    }
                     ClientEvent::Error(e) => warn!("session error: {e}"),
                     ClientEvent::Disconnected => {
                         info!("session disconnected");

@@ -100,6 +100,10 @@ pub struct ClientConfig {
     /// Offer webcam redirection (§18.57; `FLAG_WEBCAM`): when the server
     /// asks for it, stream the local camera VP9-encoded on `channel::WEBCAM`.
     pub webcam: bool,
+    /// Accept redirected print jobs (§18.57 phase 0; `FLAG_PRINTER`):
+    /// received PDFs are materialized in this directory and reported as
+    /// [`ClientEvent::PrintJobDone`]. `None` disables the channel.
+    pub printer: Option<std::path::PathBuf>,
     /// Preferred remote display resolution (§18.37), sent in the HELLO.
     /// `(0, 0)` means no preference: the server keeps its current mode or
     /// applies its own fixed `resolution` policy.
@@ -167,6 +171,20 @@ impl Session {
         if cam_source.is_some() {
             flags |= protocol::FLAG_WEBCAM;
         }
+        // Printer (§18.57): like the webcam, the flag must reflect a real
+        // capability, so the save directory is prepared before the HELLO.
+        let printer = self.config.printer.as_ref().and_then(|dir| {
+            match crate::printer::PrinterJobs::new(dir.clone()) {
+                Ok(jobs) => Some(jobs),
+                Err(e) => {
+                    warn!(dir = %dir.display(), "printer save dir unavailable: {e}");
+                    None
+                }
+            }
+        });
+        if printer.is_some() {
+            flags |= protocol::FLAG_PRINTER;
+        }
         let mut stream: EncryptedStream<Box<dyn ReliableTransport>> =
             EncryptedStream::client_handshake(
                 raw,
@@ -231,6 +249,7 @@ impl Session {
             &self.config,
             clock_start,
             cam_source,
+            printer,
         );
         core.stats.set_udp(leg.is_some());
         // Webcam capabilities (§18.57): the server answers with WebcamConfig
@@ -701,6 +720,11 @@ impl Session {
         for msg in core.scard_out.drain(..) {
             stream.send(channel::SMARTCARD, &msg.encode()).await?;
         }
+        if let Some(printer) = &mut core.printer {
+            for msg in printer.drain_out() {
+                stream.send(channel::PRINTER, &msg.encode()).await?;
+            }
+        }
         // Smartcard replies produced by the dispatcher threads since the
         // last flush (bounded by the presentation tick, ~8 ms of latency).
         while let Ok(msg) = core.scard_rx.try_recv() {
@@ -1156,6 +1180,9 @@ struct Core {
     /// Inline smartcard replies produced while the dispatcher is disabled
     /// (`SCARD_E_NO_SERVICE` — a request is never left unanswered).
     scard_out: Vec<protocol::SmartcardMessage>,
+    /// Printer job receiver (§18.57 phase 0); `None` while disabled (the
+    /// HELLO then carries no `FLAG_PRINTER` and the server stays quiet).
+    printer: Option<crate::printer::PrinterJobs>,
 }
 
 impl Core {
@@ -1165,6 +1192,7 @@ impl Core {
         config: &ClientConfig,
         clock_start: Instant,
         cam_source: Option<Box<dyn ::webcam::WebcamSource>>,
+        printer: Option<crate::printer::PrinterJobs>,
     ) -> Self {
         let (scard_tx, scard_rx) = flume::unbounded();
         let smartcard = config
@@ -1198,6 +1226,7 @@ impl Core {
             scard_tx,
             scard_rx,
             scard_out: Vec::new(),
+            printer,
         }
     }
 
@@ -1307,6 +1336,25 @@ impl Core {
                     }
                 }
                 Err(e) => warn!("bad storage message: {e}"),
+            }
+            return Ok(true);
+        }
+        if ch == channel::PRINTER {
+            // Printer (§18.57 phase 0): jobs are written to disk; replies
+            // queue in the receiver and are flushed by the loops.
+            match protocol::PrinterMessage::decode(packet) {
+                Ok(msg) => {
+                    if let Some(printer) = &mut self.printer {
+                        for ev in printer.handle(&msg) {
+                            if !emit(&self.events, ev) {
+                                return Ok(false);
+                            }
+                        }
+                    } else {
+                        warn!("printer job received with the channel disabled; dropped");
+                    }
+                }
+                Err(e) => warn!("bad printer message: {e}"),
             }
             return Ok(true);
         }

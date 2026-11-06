@@ -164,6 +164,15 @@ pub enum ClientEvent {
     /// broke and a keyframe was requested). Fatal errors end
     /// [`crate::Session::run`] with `Err` instead.
     Error(String),
+    /// A redirected print job (§18.57, phase 0) finished and its PDF was
+    /// materialized locally. The consumer decides what to do with it
+    /// (open it, offer a save-as dialog, spool it to a local printer).
+    PrintJobDone {
+        /// Local path of the received PDF.
+        path: std::path::PathBuf,
+        /// Bytes written.
+        bytes: u64,
+    },
     /// The session ended (peer close, [`crate::ClientCommand::Close`], or
     /// the command channel shut down). Always the last event.
     Disconnected,
@@ -249,6 +258,11 @@ impl std::fmt::Debug for ClientEvent {
                 .finish(),
             Self::Status(s) => f.debug_tuple("Status").field(s).finish(),
             Self::Error(e) => f.debug_tuple("Error").field(e).finish(),
+            Self::PrintJobDone { path, bytes } => f
+                .debug_struct("PrintJobDone")
+                .field("path", path)
+                .field("bytes", bytes)
+                .finish(),
             Self::Disconnected => f.debug_struct("Disconnected").finish(),
         }
     }

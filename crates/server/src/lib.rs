@@ -35,6 +35,7 @@ pub mod fps;
 pub mod input;
 pub mod mic;
 pub mod pacer;
+pub mod printer;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod session_mutex;
 pub mod sessionfx;

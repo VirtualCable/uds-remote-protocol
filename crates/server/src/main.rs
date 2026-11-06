@@ -101,6 +101,10 @@ struct Args {
     cam_sink: String,
     /// Storage spool directory (M8); defaults to the per-user spool.
     spool: Option<std::path::PathBuf>,
+    /// Printer redirection (§18.57 phase 0): directory the "UDS Printer"
+    /// port writes PDFs into. `None` disables the channel (`--no-printer`);
+    /// defaults to the platform spool dir.
+    printer_spool: Option<std::path::PathBuf>,
     /// Per-session telemetry CSV (§12.8); `None` keeps telemetry log-only.
     stats_csv: Option<std::path::PathBuf>,
     /// The client may ask to lock the remote console (`--allow-lock`,
@@ -138,6 +142,7 @@ fn parse_args() -> Result<Args> {
         mic_sink: "null".to_string(),
         cam_sink: "null".to_string(),
         spool: None,
+        printer_spool: Some(server::printer::PrinterSpool::default_dir()),
         stats_csv: None,
         allow_lock: false,
         wallpaper_off: false,
@@ -204,6 +209,10 @@ fn parse_args() -> Result<Args> {
             args.wallpaper_off = true;
             continue;
         }
+        if arg == "--no-printer" {
+            args.printer_spool = None;
+            continue;
+        }
         let value = it.next().context(format!("missing value for {arg}"))?;
         match arg.as_str() {
             "--bind" => args.bind = value.parse().context("bad --bind")?,
@@ -237,6 +246,7 @@ fn parse_args() -> Result<Args> {
             "--mic-sink" => args.mic_sink = value,
             "--cam-sink" => args.cam_sink = value,
             "--spool" => args.spool = Some(value.into()),
+            "--printer-spool" => args.printer_spool = Some(value.into()),
             "--stats-csv" => args.stats_csv = Some(value.into()),
             other => bail!("unknown argument: {other}"),
         }
@@ -2107,6 +2117,31 @@ async fn serve_stream<T: ReliableTransport>(
     // headroom; the stream's own backpressure throttles the real rate.
     let mut storage_tick = tokio::time::interval(Duration::from_millis(1));
 
+    // Printer (§18.57 phase 0): only when the client offered the channel in
+    // its HELLO — an unwilling client must never receive job data.
+    let mut printer = args.printer_spool.clone().and_then(|dir| {
+        let offered = legs
+            .stream
+            .peer_hello()
+            .is_some_and(|h| h.flags & protocol::FLAG_PRINTER != 0);
+        if !offered {
+            return None;
+        }
+        match server::printer::PrinterSpool::open(dir.clone()) {
+            Ok(s) => {
+                info!(dir = %dir.display(), "printer redirection active");
+                Some(s)
+            }
+            Err(e) => {
+                warn!("printer spool unavailable: {e}");
+                None
+            }
+        }
+    });
+    // Scan + pump tick: the watch file appears at job completion; 4 chunks
+    // per tick keeps the interleave fair with display/input.
+    let mut printer_tick = tokio::time::interval(Duration::from_millis(500));
+
     // Smartcard (§17): requests originate at the virtual smart card reader
     // driver (UMDF) through the pipe origin; the router resolves replies by
     // request_id. When the pipes cannot be hosted (non-Windows, or another
@@ -2345,6 +2380,15 @@ async fn serve_stream<T: ReliableTransport>(
                     handle_storage_packet(&mut legs, &mut spool, &ctrl_buf[..n]).await;
                 } else if ch == channel::SMARTCARD {
                     scard_router.handle_packet(&ctrl_buf[..n]);
+                } else if ch == channel::PRINTER {
+                    match protocol::PrinterMessage::decode(&ctrl_buf[..n]) {
+                        Ok(msg) => {
+                            if let Some(p) = &mut printer {
+                                p.on_reply(&msg);
+                            }
+                        }
+                        Err(e) => warn!("bad printer message: {e}"),
+                    }
                 } else if ch == channel::WEBCAM {
                     // Lossy channel on the reliable leg: TCP fallback when
                     // there is no UDP (same as the display path).
@@ -2364,6 +2408,16 @@ async fn serve_stream<T: ReliableTransport>(
                     for msg in s.pump(4) {
                         if let Err(e) = legs.stream.send(channel::STORAGE, &msg.encode()).await {
                             warn!("storage chunk send failed: {e}");
+                        }
+                    }
+                }
+            }
+            _ = printer_tick.tick(), if printer.is_some() => {
+                if let Some(p) = printer.as_mut() {
+                    p.scan();
+                    for msg in p.pump(4) {
+                        if let Err(e) = legs.stream.send(channel::PRINTER, &msg.encode()).await {
+                            warn!("printer chunk send failed: {e}");
                         }
                     }
                 }
