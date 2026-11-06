@@ -490,6 +490,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clipboard-rs",
+ "cpal",
  "flume 0.12.0",
  "nokhwa",
  "tracing",
@@ -524,7 +525,6 @@ dependencies = [
  "anyhow",
  "channels",
  "codec",
- "cpal",
  "crypt",
  "flume 0.12.0",
  "protocol",
@@ -3829,6 +3829,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "channels",
  "codec",
  "crypt",
  "getrandom 0.3.4",

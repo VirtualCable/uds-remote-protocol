@@ -248,17 +248,10 @@ impl DevicePipeline {
         in_rate: u32,
         out_channels: u8,
         out_rate: u32,
-    ) -> crate::Result<Self> {
-        use crate::CodecError;
-        if in_channels == 0 {
-            return Err(CodecError::InvalidConfig("device reports zero channels"));
-        }
-        if in_rate < 8000 {
-            return Err(CodecError::InvalidConfig("implausible device sample rate"));
-        }
-        if out_rate < 8000 {
-            return Err(CodecError::InvalidConfig("implausible output sample rate"));
-        }
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(in_channels > 0, "device reports zero channels");
+        anyhow::ensure!(in_rate >= 8000, "implausible device sample rate");
+        anyhow::ensure!(out_rate >= 8000, "implausible output sample rate");
         let resampler =
             (in_rate != out_rate).then(|| LinearResampler::new(in_rate, out_rate, out_channels));
         Ok(Self {

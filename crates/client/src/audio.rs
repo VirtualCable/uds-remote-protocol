@@ -25,20 +25,15 @@
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::jitter::{JitterBuffer, JitterOutput};use codec::{AudioCodecType, AudioPreset};
-use tracing::{info, warn};
+use channels::audio::dsp::LinearResampler;
+use channels::audio::output::{PlaybackStream, SharedBuffer, start_playback};
 
-/// Live device stream handle. Without the `audio` feature there is no cpal,
-/// so the type degenerates to `()` and playback is always the null sink.
-#[cfg(feature = "audio")]
-type DeviceStream = cpal::Stream;
-/// Live device stream handle. Without the `audio` feature there is no cpal,
-/// so the type degenerates to `()` and playback is always the null sink.
-#[cfg(not(feature = "audio"))]
-type DeviceStream = ();
+use crate::jitter::{JitterBuffer, JitterOutput};
+use codec::{AudioCodecType, AudioPreset};
+use tracing::{info, warn};
 
 /// No decodes for this long marks the audio clock unusable: the published
 /// cursor freezes at its last anchor, so the A/V sync must fall back to
@@ -144,127 +139,6 @@ impl AudioClient {
     }
 }
 
-/// Circular playback buffer between the network pump and the audio device
-/// callback (§9.1): overflow drains the oldest samples down to the target,
-/// underrun surfaces as silence (handled by the consumer side).
-///
-/// The buffer also tracks the absolute play position (samples consumed +
-/// drained + underrun silence) so the audio thread can map the playback
-/// cursor onto the server's capture clock for A/V lip-sync (§9.1).
-///
-/// Pure and synchronous: unit-tested without any audio device.
-#[derive(Debug)]
-pub struct PlaybackBuffer {
-    samples: VecDeque<i16>,
-    /// Buffered length above which the oldest samples are drained.
-    max_samples: usize,
-    /// Length the buffer is drained to on overflow (~1 jitter window).
-    target_samples: usize,
-    /// Samples actually consumed by the device callback (cumulative).
-    consumed_samples: u64,
-    /// Samples dropped by overflow drains (cumulative).
-    drained_samples: u64,
-    /// Samples the consumer asked for while the buffer was empty.
-    underrun_samples: u64,
-}
-
-/// Overflow threshold: 500 ms of buffered audio.
-const MAX_BUFFERED_MS: u32 = 500;
-/// Drain target after an overflow: 60 ms (~1 jitter window of 3 frames).
-const DRAIN_TARGET_MS: u32 = 60;
-
-impl PlaybackBuffer {
-    /// Creates a buffer with the default latency policy for the given stream
-    /// shape (§9.1).
-    #[must_use]
-    pub fn new(sample_rate: u32, channels: u8) -> Self {
-        let per_ms = sample_rate as usize * usize::from(channels) / 1000;
-        Self::with_limits(
-            per_ms * MAX_BUFFERED_MS as usize,
-            per_ms * DRAIN_TARGET_MS as usize,
-        )
-    }
-
-    /// Creates a buffer with explicit limits (tests).
-    #[must_use]
-    pub fn with_limits(max_samples: usize, target_samples: usize) -> Self {
-        Self {
-            samples: VecDeque::new(),
-            max_samples,
-            target_samples,
-            consumed_samples: 0,
-            drained_samples: 0,
-            underrun_samples: 0,
-        }
-    }
-
-    /// Buffered length in samples (interleaved).
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.samples.len()
-    }
-
-    /// True when no samples are buffered.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.samples.is_empty()
-    }
-
-    /// Absolute play position: samples already played, skipped by drains or
-    /// filled with underrun silence (§9.1). Advances in real time even
-    /// during underruns, so the A/V cursor never stalls.
-    #[must_use]
-    pub fn play_pos(&self) -> u64 {
-        self.consumed_samples + self.drained_samples + self.underrun_samples
-    }
-
-    /// Absolute position at which the next pushed sample is queued. When an
-    /// underrun overhang exists (the device played silence past the end),
-    /// newly pushed samples start playing at the play position instead —
-    /// timestamp anchors are registered at `max(push_pos, play_pos)`.
-    #[must_use]
-    pub fn push_pos(&self) -> u64 {
-        self.consumed_samples + self.drained_samples + self.samples.len() as u64
-    }
-
-    /// Samples dropped by overflow drains so far.
-    #[must_use]
-    pub fn drained_samples(&self) -> u64 {
-        self.drained_samples
-    }
-
-    /// Samples requested while empty so far (underrun accounting).
-    #[must_use]
-    pub fn underrun_samples(&self) -> u64 {
-        self.underrun_samples
-    }
-
-    /// Pushes one decoded frame; drains the oldest samples when the buffer
-    /// exceeds the overflow threshold (§9.1).
-    pub fn push(&mut self, frame: &[i16]) {
-        self.samples.extend(frame);
-        if self.samples.len() > self.max_samples {
-            let drop = self.samples.len() - self.target_samples;
-            self.samples.drain(..drop);
-            self.drained_samples += drop as u64;
-        }
-    }
-
-    /// Pops one sample for the device callback, or silence on underrun.
-    /// Allocation-free and wait-free on the buffer itself.
-    pub fn pop_or_silence(&mut self) -> i16 {
-        if let Some(s) = self.samples.pop_front() {
-            self.consumed_samples += 1;
-            return s;
-        }
-        self.underrun_samples += 1;
-        0
-    }
-}
-
-/// Shared handle between the pump thread and the cpal callback.
-type SharedBuffer = Arc<Mutex<PlaybackBuffer>>;
-
 /// One queued frame's anchor: the absolute play position at which its first
 /// sample will be heard, and the capture timestamp of that sample (§9.1).
 #[derive(Debug)]
@@ -341,6 +215,11 @@ struct ActiveStream {
     jitter: JitterBuffer,
     /// Device playback; `None` is the null sink (headless / no device).
     playback: Option<SharedBuffer>,
+    /// Pump-side resampler: Some when the output device could not do the
+    /// stream rate and opened at its own default rate (§9.1 refinement).
+    resampler: Option<LinearResampler>,
+    /// Scratch for one resampled frame (device rate).
+    resampled: Vec<i16>,
     /// Capture-clock mapping for A/V lip-sync (§9.1); `None` with the null
     /// sink — no device clock means no sync reference, and video presents
     /// immediately.
@@ -351,7 +230,7 @@ struct ActiveStream {
     /// `-1` until the clock is usable.
     now_ms: Arc<AtomicI64>,
     /// Keeps the device stream alive; dropped with the stream state.
-    _stream: Option<DeviceStream>,
+    _stream: Option<PlaybackStream>,
     /// Lab aid: every decoded frame is appended here as raw s16le PCM.
     dump: Option<std::io::BufWriter<std::fs::File>>,
     /// Scratch PCM buffer for one decoded frame (interleaved).
@@ -400,7 +279,15 @@ impl ActiveStream {
                 return None;
             }
         };
-        let (playback, stream) = start_playback(spec.sample_rate, spec.channels);
+        let playback_stream = start_playback(spec.sample_rate, spec.channels);
+        let playback = playback_stream.as_ref().map(|p| Arc::clone(&p.buffer));
+        // Resample at the pump when the device runs at another rate; the
+        // buffer and the clock map then work in device-rate samples.
+        let device_rate = playback_stream
+            .as_ref()
+            .map_or(spec.sample_rate, |p| p.sample_rate);
+        let resampler = (device_rate != spec.sample_rate)
+            .then(|| LinearResampler::new(spec.sample_rate, device_rate, spec.channels));
         let dump = dump_path.and_then(|path| match std::fs::File::create(path) {
             Ok(file) => {
                 info!(path = %path.display(), "dumping decoded audio as raw s16le PCM");
@@ -413,7 +300,7 @@ impl ActiveStream {
         });
         let clock_map = playback
             .is_some()
-            .then(|| AudioClockMap::new(spec.sample_rate, spec.channels));
+            .then(|| AudioClockMap::new(device_rate, spec.channels));
         info!(
             sample_rate = spec.sample_rate,
             channels = spec.channels,
@@ -426,10 +313,12 @@ impl ActiveStream {
             decoder,
             jitter: JitterBuffer::new(),
             playback,
+            resampler,
+            resampled: Vec::new(),
             clock_map,
             last_frame_ts: None,
             now_ms,
-            _stream: stream,
+            _stream: playback_stream,
             dump,
             pcm: vec![0i16; preset.frame_samples() * usize::from(spec.channels)],
             frame_ms: u32::from(spec.frame_ms),
@@ -463,6 +352,34 @@ impl ActiveStream {
         if clock_is_stale(self.last_decode_at, Instant::now()) {
             self.frames_since_stale = 0;
             self.now_ms.store(-1, Ordering::Relaxed);
+        }
+    }
+
+    /// Queues the decoded frame (resampling first when the device rate
+    /// differs from the stream rate) into the playback buffer, anchoring
+    /// the A/V clock at the position the frame will actually play (§9.1).
+    fn queue_frame(&mut self, frame_ts: u32) {
+        let Some(buf) = &self.playback else {
+            return;
+        };
+        let frame = match &mut self.resampler {
+            Some(rs) => {
+                self.resampled.clear();
+                rs.process(&self.pcm, &mut self.resampled);
+                &self.resampled
+            }
+            None => &self.pcm,
+        };
+        if let Ok(mut b) = buf.lock() {
+            // Anchor before the push: after an underrun overhang these
+            // samples play at the play position, not at the queue tail.
+            if let Some(clock) = &mut self.clock_map {
+                let pos = b.push_pos().max(b.play_pos());
+                clock.push_anchor(pos, frame_ts);
+            }
+            b.push(frame);
+        } else {
+            warn!("playback buffer poisoned; frame dropped");
         }
     }
 
@@ -516,20 +433,7 @@ impl ActiveStream {
                         }
                     }
                 }
-                if let Some(buf) = &self.playback {
-                    if let Ok(mut b) = buf.lock() {
-                        // Anchor before the push: after an underrun
-                        // overhang these samples play at the play
-                        // position, not at the queue tail (§9.1).
-                        if let Some(clock) = &mut self.clock_map {
-                            let pos = b.push_pos().max(b.play_pos());
-                            clock.push_anchor(pos, frame_ts);
-                        }
-                        b.push(&self.pcm);
-                    } else {
-                        warn!("playback buffer poisoned; frame dropped");
-                    }
-                }
+                self.queue_frame(frame_ts);
                 // Null sink: decoded and counted, discarded.
             }
             Err(e) => warn!("audio decode failed: {e}"),
@@ -638,213 +542,11 @@ fn apply(
     }
 }
 
-/// Starts device playback over the default output device. Returns the shared
-/// buffer plus the live stream, or `(None, None)` (null sink) when no device
-/// or no compatible config exists — the pipeline still decodes.
-#[cfg(feature = "audio")]
-fn start_playback(sample_rate: u32, channels: u8) -> (Option<SharedBuffer>, Option<cpal::Stream>) {
-    use cpal::traits::{DeviceTrait as _, HostTrait as _, StreamTrait as _};
-
-    let host = cpal::default_host();
-    let Some(device) = host.default_output_device() else {
-        warn!("no audio output device; using null sink");
-        return (None, None);
-    };
-    let Some(config) = select_config(
-        device.default_output_config().ok(),
-        &device
-            .supported_output_configs()
-            .map_or_else(|_| Vec::new(), Iterator::collect),
-        sample_rate,
-        channels,
-    ) else {
-        warn!(sample_rate, channels, "no compatible output config; using null sink");
-        return (None, None);
-    };
-    let shared: SharedBuffer = Arc::new(Mutex::new(PlaybackBuffer::new(sample_rate, channels)));
-    let stream = match build_output_stream(&device, &config, Arc::clone(&shared)) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!("cannot open audio output stream: {e}; using null sink");
-            return (None, None);
-        }
-    };
-    if let Err(e) = stream.play() {
-        warn!("cannot start audio output: {e}; using null sink");
-        return (None, None);
-    }
-    (Some(shared), Some(stream))
-}
-
-/// Null sink without the `audio` feature.
-#[cfg(not(feature = "audio"))]
-fn start_playback(_sample_rate: u32, _channels: u8) -> (Option<SharedBuffer>, Option<DeviceStream>) {
-    (None, None)
-}
-
-/// Picks an output config: the device default when it already matches the
-/// stream shape (WASAPI shared mode only opens at the mix format), else a
-/// supported range that covers the stream's sample rate with the same
-/// channel count. No resampling and no channel remix in the PoC (§9.1 lists
-/// resampling as a later refinement), so an exact-rate candidate is required.
-#[cfg(feature = "audio")]
-fn select_config(
-    default: Option<cpal::SupportedStreamConfig>,
-    supported: &[cpal::SupportedStreamConfigRange],
-    sample_rate: u32,
-    channels: u8,
-) -> Option<cpal::SupportedStreamConfig> {
-    if let Some(cfg) = default
-        && cfg.sample_rate() == sample_rate
-        && cfg.channels() == u16::from(channels)
-    {
-        return Some(cfg);
-    }
-    supported
-        .iter()
-        .find(|r| {
-            r.channels() == u16::from(channels)
-                && r.min_sample_rate() <= sample_rate
-                && sample_rate <= r.max_sample_rate()
-        })
-        .and_then(|r| r.try_with_sample_rate(sample_rate))
-}
-
-/// Builds an output stream typed to the config's sample format, converting
-/// our i16 buffer on the fly. The callback is allocation-free and degrades
-/// to silence on underrun or a contended/poisoned lock (§9.1).
-#[cfg(feature = "audio")]
-fn build_output_stream_typed<T>(
-    device: &cpal::Device,
-    config: cpal::StreamConfig,
-    buffer: SharedBuffer,
-) -> Result<cpal::Stream, cpal::Error>
-where
-    T: cpal::SizedSample + cpal::FromSample<i16> + Send + 'static,
-{
-    use cpal::traits::DeviceTrait as _;
-
-    // Device errors can fire once per callback (hundreds per second on
-    // a misbehaving driver); log the first and then every 500th.
-    let mut errors = 0u64;
-    device.build_output_stream(
-        config,
-        move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-            if let Ok(mut buf) = buffer.lock() {
-                for sample in data.iter_mut() {
-                    *sample = T::from_sample(buf.pop_or_silence());
-                }
-            } else {
-                // Poisoned lock: silence, never panic in the callback.
-                data.fill(T::from_sample(0i16));
-            }
-        },
-        move |err| {
-            if errors == 0 || errors.is_multiple_of(500) {
-                warn!("audio stream error: {err}");
-            }
-            errors += 1;
-        },
-        None,
-    )
-}
-
-#[cfg(feature = "audio")]
-fn build_output_stream(
-    device: &cpal::Device,
-    config: &cpal::SupportedStreamConfig,
-    buffer: SharedBuffer,
-) -> Result<cpal::Stream, cpal::Error> {
-    use cpal::SampleFormat;
-    let stream_config = config.config();
-    match config.sample_format() {
-        SampleFormat::F32 => build_output_stream_typed::<f32>(device, stream_config, buffer),
-        SampleFormat::I16 => build_output_stream_typed::<i16>(device, stream_config, buffer),
-        SampleFormat::I32 => build_output_stream_typed::<i32>(device, stream_config, buffer),
-        SampleFormat::U8 => build_output_stream_typed::<u8>(device, stream_config, buffer),
-        SampleFormat::U16 => build_output_stream_typed::<u16>(device, stream_config, buffer),
-        SampleFormat::F64 => build_output_stream_typed::<f64>(device, stream_config, buffer),
-        other => Err(cpal::Error::with_message(
-            cpal::ErrorKind::UnsupportedConfig,
-            format!("unsupported sample format {other:?}"),
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn push_then_pop_in_order() {
-        let mut buf = PlaybackBuffer::with_limits(100, 50);
-        buf.push(&[1, 2, 3]);
-        assert_eq!(buf.pop_or_silence(), 1);
-        assert_eq!(buf.pop_or_silence(), 2);
-        assert_eq!(buf.len(), 1);
-    }
-
-    #[test]
-    fn underrun_is_silence_and_counted() {
-        let mut buf = PlaybackBuffer::with_limits(100, 50);
-        buf.push(&[7]);
-        assert_eq!(buf.pop_or_silence(), 7);
-        assert_eq!(buf.pop_or_silence(), 0);
-        assert_eq!(buf.pop_or_silence(), 0);
-        assert_eq!(buf.underrun_samples(), 2);
-    }
-
-    #[test]
-    fn overflow_drains_oldest_down_to_target() {
-        let mut buf = PlaybackBuffer::with_limits(10, 4);
-        for _ in 0..11 {
-            buf.push(&[1]);
-        }
-        // After the 11th push: 11 > 10 → drain to 4 samples.
-        assert_eq!(buf.len(), 4);
-        assert_eq!(buf.drained_samples(), 7);
-    }
-
-    #[test]
-    fn no_drain_below_threshold() {
-        let mut buf = PlaybackBuffer::with_limits(10, 4);
-        for _ in 0..10 {
-            buf.push(&[5]);
-        }
-        assert_eq!(buf.len(), 10);
-        assert_eq!(buf.drained_samples(), 0);
-    }
-
-    #[test]
-    fn default_policy_scales_with_shape() {
-        let buf = PlaybackBuffer::new(48_000, 2);
-        assert_eq!(buf.max_samples, 48_000 * 2 * 500 / 1000);
-        assert_eq!(buf.target_samples, 48_000 * 2 * 60 / 1000);
-    }
-
-    #[test]
-    fn play_pos_tracks_consumed_drained_and_underrun() {
-        let mut buf = PlaybackBuffer::with_limits(10, 4);
-        assert_eq!(buf.play_pos(), 0);
-        assert_eq!(buf.push_pos(), 0);
-        buf.push(&[1, 2, 3]);
-        assert_eq!(buf.push_pos(), 3, "queued samples count as pushed");
-        assert_eq!(buf.pop_or_silence(), 1);
-        assert_eq!(buf.play_pos(), 1, "consumed sample advances the cursor");
-        // Drain: 12 pushed > 10 max → drains to 4, skipping 8-4=... : 12-4=8? No:
-        // 3+9=12 pushed total, drain 12-4=8 oldest, consumed 1 of them.
-        buf.push(&[0; 9]);
-        let drained = buf.drained_samples();
-        assert!(drained > 0);
-        assert_eq!(buf.play_pos(), 1 + drained, "drained samples skip the cursor");
-        // Underrun: empty the buffer, then pop silence.
-        while !buf.is_empty() {
-            buf.pop_or_silence();
-        }
-        let pos = buf.play_pos();
-        assert_eq!(buf.pop_or_silence(), 0);
-        assert_eq!(buf.play_pos(), pos + 1, "underrun advances the cursor in real time");
-    }
+    #[cfg(feature = "audio")]
+    use channels::audio::output::PlaybackBuffer;
 
     #[test]
     fn clock_staleness_tracks_decode_activity() {
@@ -933,7 +635,8 @@ mod tests {
         .unwrap();
         // Headless CI has no output device; attach a buffer manually to
         // exercise the clock mapping (the pump logic is device-independent).
-        let buf: SharedBuffer = Arc::new(Mutex::new(PlaybackBuffer::new(48_000, 2)));
+        let buf: SharedBuffer =
+            Arc::new(std::sync::Mutex::new(PlaybackBuffer::new(48_000, 2)));
         st.playback = Some(Arc::clone(&buf));
         st.clock_map = Some(AudioClockMap::new(48_000, 2));
 
@@ -1106,51 +809,5 @@ mod tests {
         let (decoded, plc) = worker.join().unwrap();
         assert_eq!(decoded, 5);
         assert_eq!(plc, 1);
-    }
-
-    #[cfg(feature = "audio")]
-    mod config_selection {
-        use super::*;
-        use cpal::{SampleFormat, SupportedBufferSize, SupportedStreamConfig};
-
-        fn range(channels: u16, min: u32, max: u32) -> cpal::SupportedStreamConfigRange {
-            cpal::SupportedStreamConfigRange::new(
-                channels,
-                min,
-                max,
-                SupportedBufferSize::Unknown,
-                SampleFormat::F32,
-            )
-        }
-
-        fn config(channels: u16, rate: u32) -> SupportedStreamConfig {
-            range(channels, rate, rate).try_with_sample_rate(rate).unwrap()
-        }
-
-        #[test]
-        fn matching_default_wins() {
-            let cfg = select_config(Some(config(2, 48_000)), &[], 48_000, 2).unwrap();
-            assert_eq!(cfg.sample_rate(), 48_000);
-        }
-
-        #[test]
-        fn wrong_rate_default_falls_back_to_supported_range() {
-            let supported = [range(2, 44_100, 48_000)];
-            let cfg =
-                select_config(Some(config(2, 44_100)), &supported, 48_000, 2).unwrap();
-            assert_eq!(cfg.sample_rate(), 48_000);
-        }
-
-        #[test]
-        fn channel_mismatch_is_rejected() {
-            let supported = [range(6, 44_100, 48_000)];
-            assert!(select_config(Some(config(6, 48_000)), &supported, 48_000, 2).is_none());
-        }
-
-        #[test]
-        fn no_compatible_config_is_none() {
-            let supported = [range(2, 8_000, 44_100)];
-            assert!(select_config(None, &supported, 48_000, 2).is_none());
-        }
     }
 }

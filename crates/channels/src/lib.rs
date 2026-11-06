@@ -15,6 +15,7 @@
 //! `rdp::integrations::*` that a future uds-client integration is a thin
 //! wrapper in whichever direction is convenient per channel.
 
+pub mod audio;
 pub mod clipboard;
 pub mod printer;
 pub mod webcam;

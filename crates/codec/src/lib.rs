@@ -34,7 +34,6 @@ mod vpx;
 
 /// Audio format adaptation between device shapes and the wire format:
 /// f32→i16 conversion, channel remix, linear resampling, capture ring (§9).
-pub mod audio_dsp;
 /// BGRA → I420 color conversion (scalar Rust; libyuv SIMD later, behind a
 /// feature, with the same API).
 pub mod color;

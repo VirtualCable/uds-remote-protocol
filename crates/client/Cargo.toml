@@ -14,7 +14,7 @@ default = ["smartcard"]
 vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
 jpeg = ["codec/codec-jpeg"]
-audio = ["codec/codec-opus", "dep:cpal"]
+audio = ["codec/codec-opus", "channels/audio"]
 # Build the real PC/SC backend into the smartcard dispatcher (§17). The
 # dispatcher itself always compiles: without this feature (or without a
 # PC/SC subsystem at runtime) requests are answered SCARD_E_NO_SERVICE.
@@ -31,7 +31,6 @@ anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 flume.workspace = true
-cpal = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
