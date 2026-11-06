@@ -203,7 +203,9 @@ impl IEnumPins_Impl for UdsEnumPins_Impl {
             let mut index = self.index.lock().unwrap();
             while fetched < cpins && *index == 0 {
                 if let Some(pin) = &self.pin {
-                    unsafe { *pppins.add(fetched as usize) = Some(pin.clone()) };
+                    // ptr::write: plain assignment through a raw pointer would
+                    // Drop the caller's UNINITIALIZED slot (garbage ComPtr → AV).
+                    unsafe { pppins.add(fetched as usize).write(Some(pin.clone())) };
                     fetched += 1;
                 }
                 *index += 1;
