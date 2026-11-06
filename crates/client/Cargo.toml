@@ -22,6 +22,7 @@ smartcard = []
 
 [dependencies]
 protocol.workspace = true
+channels.workspace = true
 transport.workspace = true
 crypt.workspace = true
 codec.workspace = true

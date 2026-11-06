@@ -520,6 +520,7 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "channels",
  "codec",
  "cpal",
  "crypt",

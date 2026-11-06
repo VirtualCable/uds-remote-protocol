@@ -16,3 +16,4 @@
 //! wrapper in whichever direction is convenient per channel.
 
 pub mod clipboard;
+pub mod printer;

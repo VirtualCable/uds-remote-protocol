@@ -146,7 +146,7 @@ impl Session {
     /// fatal error). Always emits [`ClientEvent::Disconnected`] as the last
     /// event (unless the consumer is already gone).
     pub async fn run(mut self) -> Result<()> {
-        let result = self.run_inner().await;
+        let result = Box::pin(self.run_inner()).await;
         let _ = self.events.try_send(ClientEvent::Disconnected);
         result
     }
