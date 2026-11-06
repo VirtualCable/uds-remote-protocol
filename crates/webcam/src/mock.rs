@@ -9,6 +9,9 @@
 //! requested rate, paced by an absolute schedule. Used for E2E tests and
 //! on machines without a camera (`UDSRP_CAM_MOCK=1`).
 
+// Synthetic-pattern math uses small fixed-range casts and short names.
+#![allow(clippy::cast_possible_truncation, clippy::many_single_char_names)]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -34,29 +37,43 @@ impl MockSource {
         Self::default()
     }
 
-    /// Builds one synthetic frame (moving 1/4 block + LCG noise, same
-    /// pattern as the codec bench so encoded sizes are representative).
+    /// Builds one synthetic, fully describable frame:
+    ///
+    /// - Background: R grows left→right (0..255 across the width),
+    ///   G grows top→bottom (0..255 across the height), B fixed at 96.
+    ///   So the top-left corner is dark blue-ish, the right edge goes
+    ///   red, the bottom edge goes green.
+    /// - Foreground: a pure white square, side = width/8, sweeping
+    ///   horizontally left→right across the vertical center, wrapping
+    ///   around. With `fps` frames per sweep of ~4 s at 30 fps.
+    ///
+    /// Any conversion bug (channel swap, stride, row flip) shows up as
+    /// an immediately describable distortion of this pattern.
     fn frame(width: u32, height: u32, tick: u32) -> RawFrame {
         let (w, h) = (width as usize, height as usize);
         let mut rgb = vec![0u8; w * h * 3];
-        let bw = width / 4;
-        let bh = height / 4;
-        let x0 = (tick * 7) % (width - bw);
-        let y0 = (tick * 3) % (height - bh);
+        let side = (width / 8).max(2);
+        // Sweep: one full left→right pass every 128 ticks (~4 s @30fps).
+        let span = width + side;
+        let x0 = ((tick % 128) as usize * span as usize / 128) as u32;
+        let x0 = x0.saturating_sub(side); // starts fully off-screen at the left
+        let y0 = height / 2 - side / 2;
         for y in 0..height {
+            let g = (y * 255 / height.max(1)) as u8;
             for x in 0..width {
                 let i = (y as usize * w + x as usize) * 3;
-                let n = (x
-                    .wrapping_mul(1_664_525)
-                    .wrapping_add(y)
-                    .wrapping_mul(2_143_223)
-                    .wrapping_add(tick.wrapping_mul(1_013_904_223))
-                    >> 24) as u8;
-                let in_block = x >= x0 && x < x0 + bw && y >= y0 && y < y0 + bh;
-                let base = if in_block { 200u8 } else { 60 };
-                rgb[i] = base.wrapping_add(n & 0x3F);
-                rgb[i + 1] = base.wrapping_add((n >> 2) & 0x3F);
-                rgb[i + 2] = base.wrapping_add((n >> 4) & 0x3F);
+                let r = (x * 255 / width.max(1)) as u8;
+                let in_square =
+                    x >= x0 && x < x0 + side && y >= y0 && y < y0 + side;
+                if in_square {
+                    rgb[i] = 255;
+                    rgb[i + 1] = 255;
+                    rgb[i + 2] = 255;
+                } else {
+                    rgb[i] = r;
+                    rgb[i + 1] = g;
+                    rgb[i + 2] = 96;
+                }
             }
         }
         RawFrame {
