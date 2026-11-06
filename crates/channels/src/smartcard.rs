@@ -604,7 +604,7 @@ impl Dispatcher {
 /// the `smartcard` feature, `None` (→ `SCARD_E_NO_SERVICE` replies)
 /// otherwise or when the subsystem is unavailable.
 #[cfg(feature = "smartcard")]
-pub(crate) fn default_backend() -> Option<Arc<dyn SmartcardIntegration>> {
+pub fn default_backend() -> Option<Arc<dyn SmartcardIntegration>> {
     let backend = smartcard::PcscBackend::new();
     if backend.is_available() {
         Some(Arc::new(backend))
@@ -617,6 +617,6 @@ pub(crate) fn default_backend() -> Option<Arc<dyn SmartcardIntegration>> {
 /// Without the `smartcard` feature there is no backend: requests are
 /// answered with `SCARD_E_NO_SERVICE`.
 #[cfg(not(feature = "smartcard"))]
-pub(crate) fn default_backend() -> Option<Arc<dyn SmartcardIntegration>> {
+pub fn default_backend() -> Option<Arc<dyn SmartcardIntegration>> {
     None
 }

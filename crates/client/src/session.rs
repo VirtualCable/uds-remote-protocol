@@ -1172,7 +1172,7 @@ struct Core {
     /// by the receive loops like `clip_out`.
     storage: crate::storage::StorageClient,
     /// Smartcard request dispatcher (§17); `None` while disabled.
-    smartcard: Option<crate::smartcard::SmartcardService>,
+    smartcard: Option<channels::smartcard::SmartcardService>,
     /// Reply channel of the smartcard dispatcher (replies are drained by
     /// `flush_out` onto the reliable stream).
     scard_tx: flume::Sender<protocol::SmartcardMessage>,
@@ -1197,7 +1197,7 @@ impl Core {
         let (scard_tx, scard_rx) = flume::unbounded();
         let smartcard = config
             .smartcard
-            .then(|| crate::smartcard::SmartcardService::start(crate::smartcard::default_backend(), scard_tx.clone()));
+            .then(|| channels::smartcard::SmartcardService::start(channels::smartcard::default_backend(), scard_tx.clone()));
         let stats = std::sync::Arc::new(crate::stats::SessionStats::default());
         let audio = AudioClient::new(config.audio, config.audio_dump.clone(), std::sync::Arc::clone(&stats));
         let (decode_tx, decode_ctl_tx, recovery_awaiting) = DecodeWorker::spawn(
@@ -1237,8 +1237,8 @@ impl Core {
         match (on, self.smartcard.is_some()) {
             (true, false) => {
                 info!("smartcard redirection enabled");
-                self.smartcard = Some(crate::smartcard::SmartcardService::start(
-                    crate::smartcard::default_backend(),
+                self.smartcard = Some(channels::smartcard::SmartcardService::start(
+                    channels::smartcard::default_backend(),
                     self.scard_tx.clone(),
                 ));
             }

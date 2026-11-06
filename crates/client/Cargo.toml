@@ -18,7 +18,7 @@ audio = ["codec/codec-opus", "channels/audio"]
 # Build the real PC/SC backend into the smartcard dispatcher (§17). The
 # dispatcher itself always compiles: without this feature (or without a
 # PC/SC subsystem at runtime) requests are answered SCARD_E_NO_SERVICE.
-smartcard = []
+smartcard = ["channels/smartcard"]
 
 [dependencies]
 protocol.workspace = true
@@ -26,7 +26,7 @@ channels.workspace = true
 transport.workspace = true
 crypt.workspace = true
 codec.workspace = true
-smartcard = { workspace = true, features = ["pcsc-backend"] }
+smartcard.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

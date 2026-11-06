@@ -11,11 +11,14 @@ workspace = true
 
 [features]
 audio = ["dep:cpal"]
+smartcard = ["smartcard/pcsc-backend"]
 
 [dependencies]
 anyhow.workspace = true
 clipboard-rs.workspace = true
 flume.workspace = true
 nokhwa.workspace = true
+protocol.workspace = true
+smartcard.workspace = true
 tracing.workspace = true
 cpal = { workspace = true, optional = true }

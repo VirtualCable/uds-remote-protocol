@@ -18,4 +18,5 @@
 pub mod audio;
 pub mod clipboard;
 pub mod printer;
+pub mod smartcard;
 pub mod webcam;
