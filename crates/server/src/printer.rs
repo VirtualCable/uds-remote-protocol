@@ -72,6 +72,10 @@ pub struct PrinterSpool {
     current: Option<SendJob>,
     /// Next wire job id.
     next_job_id: u32,
+    /// Size seen on the previous scan: a job is only taken when its size is
+    /// non-zero and stable across two consecutive scans (guards slow
+    /// writers on platforms without an exclusive-open check).
+    last_size: Option<u64>,
 }
 
 impl PrinterSpool {
@@ -83,6 +87,7 @@ impl PrinterSpool {
             queue: VecDeque::new(),
             current: None,
             next_job_id: 1,
+            last_size: None,
         })
     }
 
@@ -103,17 +108,29 @@ impl PrinterSpool {
         self.current.is_some() || !self.queue.is_empty()
     }
 
-    /// Polls the watch file: when the spooler has finished a job the rename
-    /// succeeds (an open handle makes it fail on Windows) and the file is
-    /// queued under a unique name.
+    /// Polls the watch file. A job is taken only when the spooler has
+    /// finished with it, which is decided by two gates:
+    ///
+    /// 1. On Windows, an exclusive open (share mode 0) must succeed — while
+    ///    the spooler holds the file the open fails. (A plain rename is NOT
+    ///    enough: localmon opens the file allowing delete-sharing, so a
+    ///    rename succeeds mid-write and wrecks the job. Learned the hard
+    ///    way, E2E 2026-11-06.)
+    /// 2. The size must be non-zero and unchanged since the previous scan
+    ///    (guards slow writers everywhere, including non-Windows).
     pub fn scan(&mut self) {
         let watch = self.dir.join(PORT_FILE_NAME);
         if !watch.exists() {
+            self.last_size = None;
             return;
         }
         let size = fs::metadata(&watch).map_or(0, |m| m.len());
-        if size == 0 {
-            return; // Created but not written yet.
+        if size == 0 || self.last_size != Some(size) {
+            self.last_size = Some(size);
+            return; // New, growing, or just appeared: wait one more tick.
+        }
+        if !file_is_free(&watch) {
+            return;
         }
         let dest = self.dir.join(format!(
             "job-{}-{}.pdf",
@@ -252,6 +269,54 @@ pub fn spool_present(dir: &Path) -> bool {
     dir.is_dir()
 }
 
+/// Exclusive-open probe: true only when nothing else holds `path` open.
+/// Windows only; elsewhere the size-stability gate in `scan` does the work.
+#[cfg(all(windows, feature = "windows-capture"))]
+fn file_is_free(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_MODE, OPEN_EXISTING,
+    };
+    use windows::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
+    use windows::core::PCWSTR;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is NUL-terminated; share mode 0 = exclusive probe.
+    let handle = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+            FILE_SHARE_MODE(0),
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    };
+    match handle {
+        Ok(h) => {
+            // SAFETY: we own the probe handle.
+            unsafe {
+                let _ = CloseHandle(h);
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Non-Windows builds: no exclusive-open probe (the size-stability gate in
+/// `scan` is the guard there).
+#[cfg(not(all(windows, feature = "windows-capture")))]
+fn file_is_free(_path: &Path) -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,7 +332,9 @@ mod tests {
     fn scan_queues_and_pump_streams() {
         let (dir, mut spool) = spool("stream");
         fs::write(dir.join(PORT_FILE_NAME), b"%PDF-1.4 test payload").expect("write");
-        spool.scan();
+        spool.scan(); // First sighting: size recorded only.
+        assert!(!spool.has_pending());
+        spool.scan(); // Stable size: taken.
         assert!(spool.has_pending());
         assert!(!dir.join(PORT_FILE_NAME).exists());
 
@@ -294,6 +361,7 @@ mod tests {
     fn refused_job_aborts() {
         let (dir, mut spool) = spool("abort");
         fs::write(dir.join(PORT_FILE_NAME), b"%PDF-x").expect("write");
+        spool.scan();
         spool.scan();
         let msgs = spool.pump(1); // CreateJob only.
         let Some(PrinterMessage::CreateJob { job_id, .. }) = msgs.first() else {
