@@ -36,7 +36,7 @@ pub struct SessionView {
     udp: bool,
     status: String,
     disconnected: bool,
-    clipboard: Option<arboard::Clipboard>,
+    clipboard: Option<channels::clipboard::ClipboardHandle>,
     pointer: (f64, f64),
     /// One scratch buffer for rect copies (hot path: no per-frame alloc).
     scratch: Vec<u8>,
@@ -64,6 +64,19 @@ struct Texture {
     view: wgpu::TextureView,
 }
 
+/// Announces local clipboard text to the remote session (channels watcher
+/// callback → session command).
+struct ClipboardAnnounce {
+    commands: CommandSender,
+}
+
+impl channels::clipboard::ClipboardCallback for ClipboardAnnounce {
+    fn text_available(&self, text: String) {
+        info!(len = text.len(), "local clipboard changed");
+        let _ = self.commands.try_send(ClientCommand::ClipboardChanged(text));
+    }
+}
+
 /// Stats overlay geometry (top-right corner).
 const STATS_PANEL_W: f32 = 322.0;
 /// Stats overlay height: 5 lines × 16 px + padding.
@@ -84,6 +97,22 @@ impl SessionView {
         events: flume::Receiver<ClientEvent>,
         displays: Displays,
     ) -> Self {
+        // Local clipboard: event-driven watcher (channels crate); every new
+        // local text is announced to the remote. The handle's echo
+        // suppression keeps remote-applied text from bouncing back.
+        let clipboard = channels::clipboard::ClipboardHandle::new()
+            .map_err(|e| warn!("clipboard unavailable ({e}); clipboard sync disabled"))
+            .ok()
+            .and_then(|handle| {
+                let announce = ClipboardAnnounce {
+                    commands: commands.clone(),
+                };
+                handle
+                    .start(std::sync::Arc::new(announce))
+                    .map_err(|e| warn!("clipboard watcher failed ({e}); clipboard sync disabled"))
+                    .ok()?;
+                Some(handle)
+            });
         Self {
             commands,
             events,
@@ -94,7 +123,7 @@ impl SessionView {
             udp: false,
             status: "connecting…".to_string(),
             disconnected: false,
-            clipboard: arboard::Clipboard::new().ok(),
+            clipboard,
             pointer: (0.0, 0.0),
             scratch: Vec::new(),
             stats: None,
@@ -184,8 +213,8 @@ impl SessionView {
                     Self::apply_cursor(event_loop, window, width, height, hot_x, hot_y, &rgba);
                 }
                 ClientEvent::ClipboardData { text } => {
-                    if let Some(clipboard) = &mut self.clipboard
-                        && let Err(e) = clipboard.set_text(text)
+                    if let Some(clipboard) = &self.clipboard
+                        && let Err(e) = clipboard.set_text(&text)
                     {
                         warn!("setting the local clipboard: {e}");
                     }
@@ -380,16 +409,6 @@ impl SessionView {
                     delta: v,
                     hdelta: h,
                 }));
-        }
-    }
-
-    /// Publishes local clipboard text changes to the remote. Call on focus.
-    pub fn sync_clipboard(&mut self) {
-        if let Some(clipboard) = &mut self.clipboard
-            && let Ok(text) = clipboard.get_text()
-            && !text.is_empty()
-        {
-            let _ = self.commands.try_send(ClientCommand::ClipboardChanged(text));
         }
     }
 

@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/uds-rp",
+    "crates/channels",
     "crates/protocol",
     "crates/transport",
     "crates/crypt",
@@ -53,6 +54,7 @@ server = { path = "crates/server" }
 server-config = { path = "crates/server-config" }
 client = { path = "crates/client" }
 client-gui = { path = "crates/client-gui" }
+channels = { path = "crates/channels" }
 
 # Common external dependencies
 tokio = { version = "1.53", features = ["full"] }
@@ -111,7 +113,7 @@ winit = "0.30"
 wgpu = "30"
 wgpu_text = "30"
 bytemuck = { version = "1", features = ["derive"] }
-arboard = "3"
+clipboard-rs = "0.3"
 
 [workspace.lints.rust]
 missing_docs = "warn"

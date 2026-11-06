@@ -1,0 +1,15 @@
+[package]
+name = "channels"
+description = "Device-side channel handles for uds-rp (clipboard, printer, webcam, audio, smartcard) — transport-agnostic, uds-client channels model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clipboard-rs.workspace = true
+tracing.workspace = true

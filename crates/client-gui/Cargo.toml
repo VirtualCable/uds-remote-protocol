@@ -23,4 +23,4 @@ winit.workspace = true
 wgpu.workspace = true
 wgpu_text.workspace = true
 bytemuck.workspace = true
-arboard.workspace = true
+channels.workspace = true

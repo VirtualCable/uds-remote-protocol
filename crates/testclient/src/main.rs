@@ -252,87 +252,16 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-/// Clipboard watcher (M8): owns the `arboard` clipboard on a dedicated
-/// thread (the handle is not `Sync`), polls for local changes and applies
-/// remote ones. Anti-echo: text we set ourselves is remembered and not
-/// re-announced.
-struct ClipboardWatcher {
-    /// Remote texts to apply locally.
-    set_tx: std::sync::mpsc::Sender<String>,
+/// Announces local clipboard text to the session (channels watcher
+/// callback → session command). Echo suppression lives in the handle.
+struct ClipboardAnnounce {
+    commands: CommandSender,
 }
 
-impl ClipboardWatcher {
-    /// Poll interval for local clipboard changes.
-    const POLL: Duration = Duration::from_millis(500);
-
-    /// Spawns the watcher thread; `None` when no clipboard is available
-    /// (headless box without X11/Wayland, logged).
-    fn spawn(commands: CommandSender) -> Option<Self> {
-        let (set_tx, set_rx) = std::sync::mpsc::channel::<String>();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<bool>();
-        std::thread::spawn(move || {
-            let mut board = match arboard::Clipboard::new() {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!("clipboard unavailable ({e}); clipboard sync disabled");
-                    ready_tx.send(false).ok();
-                    return;
-                }
-            };
-            ready_tx.send(true).ok();
-            // Last text we set ourselves (echo suppression), and last text
-            // we announced (change detection).
-            let mut last_set: Option<String> = None;
-            let mut last_seen: Option<String> = None;
-            loop {
-                // Remote sets first: they are rare and latency-sensitive.
-                while let Ok(text) = set_rx.try_recv() {
-                    if let Err(e) = board.set_text(&text) {
-                        warn!("clipboard set failed: {e}");
-                    } else {
-                        info!(len = text.len(), "remote clipboard applied locally");
-                        last_set = Some(text.clone());
-                        last_seen = Some(text);
-                    }
-                }
-                match board.get_text() {
-                    Ok(text) => {
-                        let fresh = last_seen.as_deref() != Some(text.as_str());
-                        let echo = last_set.as_deref() == Some(text.as_str());
-                        if fresh && !echo {
-                            info!(len = text.len(), "local clipboard changed");
-                            if commands
-                                .try_send(ClientCommand::ClipboardChanged(text.clone()))
-                                .is_err()
-                            {
-                                return; // session gone
-                            }
-                            last_seen = Some(text);
-                        }
-                    }
-                    Err(arboard::Error::ContentNotAvailable) => {
-                        // No text on the clipboard right now (e.g. an image
-                        // was copied): nothing to announce.
-                    }
-                    Err(e) => {
-                        warn!("clipboard read failed: {e}");
-                        return;
-                    }
-                }
-                std::thread::sleep(Self::POLL);
-            }
-        });
-        match ready_rx.recv() {
-            Ok(true) => Some(Self { set_tx }),
-            _ => None,
-        }
-    }
-
-    /// Applies remote clipboard text locally.
-    fn set_local(&self, text: String) {
-        if self.set_tx.send(text).is_err() {
-            warn!("clipboard watcher gone");
-        }
+impl channels::clipboard::ClipboardCallback for ClipboardAnnounce {
+    fn text_available(&self, text: String) {
+        info!(len = text.len(), "local clipboard changed");
+        let _ = self.commands.try_send(ClientCommand::ClipboardChanged(text));
     }
 }
 
@@ -787,10 +716,18 @@ async fn run() -> Result<()> {
     let mut cursor = ClientCursor::new();
     let mut input = InputPoll::new();
     let mut selftest = args.selftest_input.then(SelfTest::new);
-    // Clipboard sync (M8): watcher thread owns the OS clipboard; the
+    // Clipboard sync (M8): channels watcher owns the OS clipboard; the
     // selftest announces its text once, ~3 s in.
     let clipboard = if args.clipboard {
-        ClipboardWatcher::spawn(commands.clone())
+        channels::clipboard::ClipboardHandle::new()
+            .and_then(|handle| {
+                handle.start(std::sync::Arc::new(ClipboardAnnounce {
+                    commands: commands.clone(),
+                }))?;
+                Ok(handle)
+            })
+            .map_err(|e| warn!("clipboard unavailable ({e}); clipboard sync disabled"))
+            .ok()
     } else {
         None
     };
@@ -862,8 +799,11 @@ async fn run() -> Result<()> {
                     }
                     ClientEvent::ClipboardData { text } => {
                         info!(len = text.len(), "remote clipboard data");
-                        if let Some(watcher) = &clipboard {
-                            watcher.set_local(text);
+                        if let Some(handle) = &clipboard {
+                            match handle.set_text(&text) {
+                                Ok(()) => info!(len = text.len(), "remote clipboard applied locally"),
+                                Err(e) => warn!("clipboard set failed: {e}"),
+                            }
                         }
                     }
                     ClientEvent::StorageList { entries } => {

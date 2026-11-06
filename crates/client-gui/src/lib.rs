@@ -341,11 +341,6 @@ impl ApplicationHandler for App {
                     view.handle_wheel(delta);
                 }
             }
-            WindowEvent::Focused(true) => {
-                if let Mode::Session(view, _) = &mut self.mode {
-                    view.sync_clipboard();
-                }
-            }
             WindowEvent::Focused(false) => {
                 // The key-up events of any held keys go to the newly focused
                 // window, not to us: release them all or they stick remotely.
