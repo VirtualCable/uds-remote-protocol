@@ -827,6 +827,9 @@ async fn run() -> Result<()> {
                             let _ = commands.try_send(ClientCommand::Close);
                         }
                     }
+                    ClientEvent::TransferProgress { direction, done_bytes, total_bytes, .. } => {
+                        info!(?direction, done_bytes, ?total_bytes, "transfer progress");
+                    }
                     ClientEvent::TransferError { transfer_id, message } => {
                         warn!(transfer_id, message, "UDSRP-TRANSFER-ERR");
                         transfers_in_flight = transfers_in_flight.saturating_sub(1);

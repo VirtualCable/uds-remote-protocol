@@ -131,6 +131,21 @@ pub enum ClientEvent {
         /// Human-readable detail.
         message: String,
     },
+    /// Progress of an active storage transfer (M8), throttled to one
+    /// event per `storage::PROGRESS_INTERVAL` per transfer. This is the
+    /// trigger an integration (uds-client GUI) drives its progress UI
+    /// from; completion and failure keep their own events.
+    TransferProgress {
+        /// Transfer identifier.
+        transfer_id: u32,
+        /// Upload (local → server spool) or download (spool → local).
+        direction: TransferDirection,
+        /// Bytes transferred so far.
+        done_bytes: u64,
+        /// Total bytes when known (always for uploads; for downloads only
+        /// if a previous `StorageList` covered the name).
+        total_bytes: Option<u64>,
+    },
     /// Live session statistics snapshot (§15.3 debug aid), emitted once
     /// per second; diff consecutive snapshots for per-second rates.
     Stats(crate::stats::StatsSnapshot),
@@ -245,6 +260,18 @@ impl std::fmt::Debug for ClientEvent {
                 .debug_struct("TransferError")
                 .field("transfer_id", transfer_id)
                 .field("message", message)
+                .finish(),
+            Self::TransferProgress {
+                transfer_id,
+                direction,
+                done_bytes,
+                total_bytes,
+            } => f
+                .debug_struct("TransferProgress")
+                .field("transfer_id", transfer_id)
+                .field("direction", direction)
+                .field("done_bytes", done_bytes)
+                .field("total_bytes", total_bytes)
                 .finish(),
             Self::Stats(snap) => f.debug_tuple("Stats").field(snap).finish(),
             Self::SecureDesktop { active } => f

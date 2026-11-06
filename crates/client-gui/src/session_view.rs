@@ -249,7 +249,8 @@ impl SessionView {
                 }
                 ClientEvent::StorageList { .. }
                 | ClientEvent::TransferDone { .. }
-                | ClientEvent::TransferError { .. } => {}
+                | ClientEvent::TransferError { .. }
+                | ClientEvent::TransferProgress { .. } => {}
             }
         }
         true

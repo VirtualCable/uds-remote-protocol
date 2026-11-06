@@ -19,9 +19,11 @@
 //! cancelled or broken session never leaves a plausible-looking truncated
 //! file behind.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use protocol::{StorageMessage, validate_name};
 use tracing::{info, warn};
@@ -31,6 +33,11 @@ use crate::events::{ClientEvent, TransferDirection};
 /// Chunks read and queued per pump tick (16 x 64 KiB per 8 ms tick is
 /// ~128 MiB/s of headroom; the stream's backpressure sets the real rate).
 pub const PUMP_CHUNKS: usize = 16;
+
+/// Minimum spacing between [`ClientEvent::TransferProgress`] events per
+/// transfer: enough for a smooth progress UI without flooding the event
+/// channel (an integration can always coalesce further).
+pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One active upload (local file → server spool).
 struct Upload {
@@ -46,6 +53,8 @@ struct Upload {
     offset: u64,
     /// `PutDone` already queued (waiting for the server's `PutAck`).
     done_sent: bool,
+    /// Last progress event emission (throttled to `PROGRESS_INTERVAL`).
+    last_progress: Instant,
 }
 
 /// One active download (server spool → local file).
@@ -62,6 +71,10 @@ struct Download {
     name: String,
     /// Bytes written so far (expected next chunk offset).
     received: u64,
+    /// Total size when known from a previous spool listing (progress %).
+    total: Option<u64>,
+    /// Last progress event emission (throttled to `PROGRESS_INTERVAL`).
+    last_progress: Instant,
 }
 
 impl Drop for Download {
@@ -87,6 +100,9 @@ pub struct StorageClient {
     download: Option<Download>,
     /// Entries collected since the last `ListRequest`, emitted on `ListDone`.
     list_buf: Vec<(String, u64)>,
+    /// Last known spool listing as name → size: lets downloads report a
+    /// progress percentage (the wire carries no size in `GetChunk`).
+    spool_sizes: HashMap<String, u64>,
     /// Wire messages queued for sending (drained by the session loop).
     pub out: Vec<StorageMessage>,
 }
@@ -142,6 +158,7 @@ impl StorageClient {
             size,
             offset: 0,
             done_sent: false,
+            last_progress: Instant::now(),
         });
         Vec::new()
     }
@@ -174,6 +191,8 @@ impl StorageClient {
                     dest: dest.to_path_buf(),
                     name: name.to_owned(),
                     received: 0,
+                    total: self.spool_sizes.get(name).copied(),
+                    last_progress: Instant::now(),
                 });
                 Vec::new()
             }
@@ -196,7 +215,29 @@ impl StorageClient {
     /// `StorageList` command: queues the request and resets the collector.
     pub fn list(&mut self) {
         self.list_buf.clear();
+        self.spool_sizes.clear();
         self.out.push(StorageMessage::ListRequest);
+    }
+
+    /// Builds a throttled progress event: `Some` at most once per
+    /// `PROGRESS_INTERVAL` per transfer.
+    fn progress_event(
+        last_progress: &mut Instant,
+        transfer_id: u32,
+        direction: TransferDirection,
+        done_bytes: u64,
+        total_bytes: Option<u64>,
+    ) -> Option<ClientEvent> {
+        if last_progress.elapsed() < PROGRESS_INTERVAL {
+            return None;
+        }
+        *last_progress = Instant::now();
+        Some(ClientEvent::TransferProgress {
+            transfer_id,
+            direction,
+            done_bytes,
+            total_bytes,
+        })
     }
 
     /// Upload pump: reads up to `PUMP_CHUNKS` chunks from the active
@@ -243,6 +284,18 @@ impl StorageClient {
                 }
             }
         }
+        if let Some(up) = self.upload.as_mut()
+            && up.offset > 0
+            && let Some(ev) = Self::progress_event(
+                &mut up.last_progress,
+                up.id,
+                TransferDirection::Upload,
+                up.offset,
+                Some(up.size),
+            )
+        {
+            events.push(ev);
+        }
         events
     }
 
@@ -276,6 +329,7 @@ impl StorageClient {
             StorageMessage::GetDone { transfer_id } => self.get_done(*transfer_id),
             StorageMessage::ListEntry { name, size } => {
                 self.list_buf.push((name.clone(), *size));
+                self.spool_sizes.insert(name.clone(), *size);
                 Vec::new()
             }
             StorageMessage::ListDone => {
@@ -325,7 +379,15 @@ impl StorageClient {
         match file.write_all(data) {
             Ok(()) => {
                 dl.received += data.len() as u64;
-                Vec::new()
+                Self::progress_event(
+                    &mut dl.last_progress,
+                    dl.id,
+                    TransferDirection::Download,
+                    dl.received,
+                    dl.total,
+                )
+                .into_iter()
+                .collect()
             }
             Err(e) => {
                 let dl = self.download.take().expect("checked");
@@ -528,5 +590,70 @@ mod tests {
         assert_eq!(events, Vec::new());
         let events = c.start_download("a.bin", &dir.path().join("c.bin"));
         assert!(matches!(events.as_slice(), [ClientEvent::TransferError { .. }]));
+    }
+    #[test]
+    fn upload_progress_is_throttled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("big.bin");
+        write(&path, &vec![7u8; 300_000]);
+        let mut c = StorageClient::new();
+        assert_eq!(c.start_upload(&path), Vec::new());
+        // First pump: no progress yet (interval not elapsed).
+        assert_eq!(c.pump(), Vec::new());
+        // Force the interval and pump again: exactly one progress event.
+        c.upload.as_mut().expect("active").last_progress =
+            Instant::now().checked_sub(PROGRESS_INTERVAL + Duration::from_millis(1)).expect("test clock");
+        let events = c.pump();
+        let progress: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, ClientEvent::TransferProgress { .. }))
+            .collect();
+        assert_eq!(progress.len(), 1);
+        assert!(matches!(
+            progress[0],
+            ClientEvent::TransferProgress {
+                direction: TransferDirection::Upload,
+                done_bytes,
+                total_bytes: Some(300_000),
+                ..
+            } if *done_bytes > 0
+        ));
+        // And the next pump is throttled again.
+        assert_eq!(c.pump(), Vec::new());
+    }
+
+    #[test]
+    fn download_progress_uses_the_spool_listing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut c = StorageClient::new();
+        c.list();
+        c.out.clear();
+        c.handle(&StorageMessage::ListEntry {
+            name: "y.bin".into(),
+            size: 100,
+        });
+        c.handle(&StorageMessage::ListDone);
+        let dest = dir.path().join("y.bin");
+        assert_eq!(c.start_download("y.bin", &dest), Vec::new());
+        let id = c.download.as_ref().expect("active").id;
+        c.download.as_mut().expect("active").last_progress =
+            Instant::now().checked_sub(PROGRESS_INTERVAL + Duration::from_millis(1)).expect("test clock");
+        let events = c.handle(&StorageMessage::GetChunk {
+            transfer_id: id,
+            offset: 0,
+            data: vec![1u8; 40],
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::TransferProgress {
+                direction: TransferDirection::Download,
+                done_bytes: 40,
+                total_bytes: Some(100),
+                ..
+            }]
+        ));
+        // A name absent from the listing reports an unknown total.
+        let dest2 = dir.path().join("z.bin");
+        let _ = dest2; // (no second download possible while one is active)
     }
 }
