@@ -6,7 +6,7 @@
 //! Reference standalone client for the UDS remote protocol.
 //!
 //! Usage: `uds-rp-client [--addr host:port] [--ticket STR] [--key HEX]
-//!         [--no-audio] [--smartcard] [--webcam] [--privacy]`
+//!         [--no-audio] [--smartcard] [--webcam] [--privacy] [--mic|--mic-tone HZ]`
 //!
 //! Without parameters the connect dialog asks for them; with all three of
 //! `--addr`/`--ticket`/`--key` the client connects immediately. The ticket
@@ -46,6 +46,7 @@ fn run() -> Result<()> {
         privacy_screen: false,
         audio_dump: None,
         printer_save: None,
+        mic: client_gui::MicMode::Off,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -60,6 +61,15 @@ fn run() -> Result<()> {
                 flags.printer_save = Some(take(&mut it, "--printer-save")?.into());
             }
             "--audio-dump" => flags.audio_dump = Some(take(&mut it, "--audio-dump")?.into()),
+            // §9.2: capture the default input device.
+            "--mic" => flags.mic = client_gui::MicMode::Device,
+            // Lab aid: synthetic sine instead of a real device (Hz).
+            "--mic-tone" => {
+                let hz: f64 = take(&mut it, "--mic-tone")?
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("bad --mic-tone frequency (Hz)"))?;
+                flags.mic = client_gui::MicMode::Tone(hz);
+            }
             "--addr" => form.addr = take(&mut it, "--addr")?,
             "--ticket" => form.ticket = take(&mut it, "--ticket")?,
             "--key" => form.key_hex = take(&mut it, "--key")?,

@@ -25,10 +25,11 @@ use tracing::{info, warn};
 
 use crate::audio::AudioSpec;
 
-/// Mic mode from the CLI (`--mic` / `--mic-test-tone`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Mic mode from the CLI (`--mic` / `--mic-tone`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum MicMode {
     /// No mic (default: never hot-mic the user by surprise).
+    #[default]
     Off,
     /// Capture the default input device.
     Device,

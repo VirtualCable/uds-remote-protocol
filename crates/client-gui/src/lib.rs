@@ -25,7 +25,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use client::{ClientConfig, Session};
-use client::mic::MicMode;
 use tracing::{error, warn};
 use wgpu_text::glyph_brush::{OwnedSection, OwnedText};
 use winit::application::ApplicationHandler;
@@ -33,6 +32,7 @@ use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+pub use client::mic::MicMode;
 pub use connect::ConnectForm;
 use connect::ConnectDialog;
 use gpu::Gpu;
@@ -63,6 +63,9 @@ pub struct SessionFlags {
     /// Accept redirected print jobs (§18.57): PDFs land in this directory
     /// (the CLI passes the Downloads folder).
     pub printer_save: Option<std::path::PathBuf>,
+    /// Microphone capture mode (§9.2). Off by default: never hot-mic the
+    /// user by surprise.
+    pub mic: MicMode,
 }
 
 pub use server_config::ticket_bytes;
@@ -403,7 +406,7 @@ fn spawn_session(
         key,
         audio: flags.audio,
         audio_dump: flags.audio_dump.clone(),
-        mic: MicMode::Off,
+        mic: flags.mic,
         privacy_screen: flags.privacy_screen,
         smartcard: flags.smartcard,
         webcam: flags.webcam,
