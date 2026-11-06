@@ -191,6 +191,9 @@ pub struct StandaloneConfig {
     /// Webcam sink for the session agent (§18.57): `None`/`null` keeps
     /// webcam redirection off; `raw:PATH` records decoded frames (E2E).
     pub cam_sink: Option<String>,
+    /// Audio-in sink for the agent (§9.2; empty/`null` = mic off, "uds" =
+    /// the udsaudio virtual microphone, "wav:PATH" = E2E file).
+    pub mic_sink: Option<String>,
     /// Console-conflict policy (§18.53): another user owns the console.
     pub console_conflict: ConsoleConflictPolicy,
     /// Whether the `ask` conflict message may reveal the console owner's
@@ -370,6 +373,7 @@ impl Default for StandaloneConfig {
             adaptive_fps: None,
             stats_csv: None,
             cam_sink: None,
+            mic_sink: None,
             console_conflict: ConsoleConflictPolicy::default(),
             console_conflict_reveal_user: false,
             console_conflict_timeout_secs: DEFAULT_CONFLICT_TIMEOUT_SECS,

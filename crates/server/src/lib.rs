@@ -34,6 +34,8 @@ pub mod dxgi;
 pub mod fps;
 pub mod input;
 pub mod mic;
+#[cfg(all(windows, feature = "windows-capture"))]
+pub mod mic_uds;
 pub mod pacer;
 pub mod printer;
 #[cfg(all(windows, feature = "windows-capture"))]

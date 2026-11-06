@@ -23,6 +23,8 @@
 //!          u16   adaptive-fps overrides ("k=v,..."; empty = disabled)
 //!          u16   stats CSV path (empty = telemetry to the log only)
 //!          u16   webcam sink ("null"/"" = off, "raw:PATH" = E2E file)
+//!          u16   audio-in sink ("null"/"" = off, "uds" = driver mic,
+//!                "wav:PATH" = E2E file)
 //!          u32   fixed resolution width  (0 = approach the client's mode)
 //!          u32   fixed resolution height
 //!          u8    flags (bit0 = allow_lock: client may lock the console,
@@ -37,7 +39,7 @@
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 10;
+pub const AGENT_CONFIG_VERSION: u8 = 11;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -99,6 +101,10 @@ pub struct AgentConfig {
     /// Webcam sink (§18.57): empty or "null" keeps webcam redirection off;
     /// "raw:PATH" records decoded frames for E2E verification.
     pub cam_sink: String,
+    /// Audio-in sink (§9.2): empty or "null" keeps the client microphone
+    /// off; "uds" feeds the udsaudio driver's virtual microphone, "wav:PATH"
+    /// records decoded PCM for E2E verification.
+    pub mic_sink: String,
     /// Server-fixed console resolution (§18.37); `(0, 0)` means the agent
     /// approaches the client's preferred mode instead.
     pub fixed_resolution: (u32, u32),
@@ -153,7 +159,8 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
             + config.ladder.len()
             + config.fps_adapt.len()
             + config.stats_csv.len()
-            + config.cam_sink.len(),
+            + config.cam_sink.len()
+            + config.mic_sink.len(),
     );
     out.push(AGENT_CONFIG_VERSION);
     out.extend_from_slice(&config.key);
@@ -166,6 +173,7 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
         &config.fps_adapt,
         &config.stats_csv,
         &config.cam_sink,
+        &config.mic_sink,
     ] {
         let len = u16::try_from(s.len()).expect("string fields are bounded well below u16::MAX");
         out.extend_from_slice(&len.to_le_bytes());
@@ -209,7 +217,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     ticket.copy_from_slice(&buf[1 + KEY_LEN..1 + KEY_LEN + TICKET_LEN]);
 
     let mut rest = &buf[STRINGS_OFF..];
-    let mut strings = ["", "", "", "", "", "", ""];
+    let mut strings = ["", "", "", "", "", "", "", ""];
     for slot in &mut strings {
         let len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
         rest = &rest[2..];
@@ -270,7 +278,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         }
         _ => return Err(DecodeError::BadLength),
     };
-    let [bind, output_name, preset, ladder, fps_adapt, stats_csv, cam_sink] = strings;
+    let [bind, output_name, preset, ladder, fps_adapt, stats_csv, cam_sink, mic_sink] = strings;
     Ok(AgentConfig {
         key,
         ticket,
@@ -281,6 +289,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         fps_adapt: fps_adapt.to_owned(),
         stats_csv: stats_csv.to_owned(),
         cam_sink: cam_sink.to_owned(),
+        mic_sink: mic_sink.to_owned(),
         fixed_resolution,
         allow_lock,
         wallpaper_off,
@@ -303,6 +312,7 @@ mod tests {
             fps_adapt: "min_fps=8".to_owned(),
             stats_csv: String::new(),
             cam_sink: String::new(),
+            mic_sink: String::new(),
             fixed_resolution: (1280, 720),
             allow_lock: true,
             wallpaper_off: false,

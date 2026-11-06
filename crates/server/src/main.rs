@@ -11,7 +11,7 @@
 //!                 [--preset NAME] [--bitrate KBPS]
 //!                 [--width N] [--height N] [--fps N] [--max-frames N]
 //!                 [--audio-preset NAME] [--audio-source auto|synthetic|uds-loopback|wasapi]
-//!                 [--no-audio] [--mic-sink null|wav:PATH] [--cam-sink null|raw:PATH] [--allow-lock]`
+//!                 [--no-audio] [--mic-sink null|uds|wav:PATH] [--cam-sink null|raw:PATH] [--allow-lock]`
 //!
 //! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`,
 //! `vp8-low-latency`); VP8/VP9 presets require the crate features
@@ -38,7 +38,8 @@
 //! The session ticket is printed on startup when not given; pass it to the
 //! test client with `--ticket`.
 //!
-//! Audio-in (§9.2): `--mic-sink wav:PATH` records the client microphone to a
+//! Audio-in (§9.2): `--mic-sink uds` feeds the udsaudio virtual microphone,
+//! `--mic-sink wav:PATH` records the client microphone to a
 //! WAV file (48 kHz mono) and announces audio-in support to the client; the
 //! default `null` keeps audio-in off (no announcement, packets discarded).
 //! Webcam (§18.57): `--cam-sink raw:PATH` records decoded client camera
@@ -190,6 +191,9 @@ fn parse_args() -> Result<Args> {
             if !config.cam_sink.is_empty() {
                 args.cam_sink = config.cam_sink;
             }
+            if !config.mic_sink.is_empty() {
+                args.mic_sink = config.mic_sink;
+            }
             args.allow_lock = config.allow_lock;
             args.wallpaper_off = config.wallpaper_off;
             args.handoff = config.handoff;
@@ -311,6 +315,9 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
         args.stats_csv = standalone.stats_csv.as_ref().map(std::path::PathBuf::from);
         if let Some(cam_sink) = &standalone.cam_sink {
             args.cam_sink.clone_from(cam_sink);
+        }
+        if let Some(mic_sink) = &standalone.mic_sink {
+            args.mic_sink.clone_from(mic_sink);
         }
         args.audio = standalone.channels.audio;
         args.allow_lock = standalone.channels.lock;
@@ -1683,8 +1690,17 @@ fn setup_mic(args: &Args) -> Option<std::sync::mpsc::Sender<Vec<u8>>> {
     if args.mic_sink == "null" {
         return None;
     }
-    let sink: Box<dyn server::mic::MicSink> = if let Some(path) = args.mic_sink.strip_prefix("wav:")
-    {
+    let sink: Box<dyn server::mic::MicSink> = if args.mic_sink == "uds" {
+        #[cfg(all(windows, feature = "windows-capture"))]
+        {
+            Box::new(server::mic_uds::UdsMicSink::new())
+        }
+        #[cfg(not(all(windows, feature = "windows-capture")))]
+        {
+            warn!("--mic-sink uds needs the udsaudio driver (Windows); audio-in disabled");
+            return None;
+        }
+    } else if let Some(path) = args.mic_sink.strip_prefix("wav:") {
         match server::mic::WavSink::create(path) {
             Ok(s) => Box::new(s),
             Err(e) => {

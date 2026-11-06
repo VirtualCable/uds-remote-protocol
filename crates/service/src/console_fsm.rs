@@ -221,6 +221,7 @@ fn legacy_config() -> service_proto::AgentConfig {
         fps_adapt: String::new(),
         stats_csv: String::new(),
         cam_sink: String::new(),
+        mic_sink: String::new(),
         fixed_resolution: (0, 0),
         allow_lock: false,
         wallpaper_off: false,

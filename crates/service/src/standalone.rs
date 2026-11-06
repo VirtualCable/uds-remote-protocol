@@ -49,6 +49,8 @@ pub struct StandaloneRuntime {
     pub stats_csv: String,
     /// Webcam sink for the agent (§18.57; empty/`null` = redirection off).
     pub cam_sink: String,
+    /// Audio-in sink for the agent (§9.2; empty/`null` = mic off).
+    pub mic_sink: String,
     /// Server-fixed console resolution (§18.37); `None` lets the agent
     /// approach the client's preferred mode.
     pub fixed_resolution: Option<(u32, u32)>,
@@ -177,6 +179,7 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
             .unwrap_or_default(),
         stats_csv: standalone.stats_csv.clone().unwrap_or_default(),
         cam_sink: standalone.cam_sink.clone().unwrap_or_default(),
+        mic_sink: standalone.mic_sink.clone().unwrap_or_default(),
         fixed_resolution: standalone
             .resolution
             .as_deref()
