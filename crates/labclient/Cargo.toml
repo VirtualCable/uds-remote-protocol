@@ -1,0 +1,47 @@
+[package]
+name = "labclient"
+description = "Laboratory clients for the uds-rp protocol: testclient + reference GUI client (not reusable by integrators)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# The reference client ships with every codec so it can evaluate any server
+# preset out of the box.
+[features]
+default = ["vp9", "vp8", "jpeg", "audio"]
+vp9 = ["client/vp9"]
+vp8 = ["client/vp8"]
+jpeg = ["client/jpeg"]
+audio = ["client/audio", "channels/audio"]
+
+[dependencies]
+client.workspace = true
+channels.workspace = true
+codec.workspace = true
+protocol.workspace = true
+server-config.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+flume.workspace = true
+minifb = "0.28"
+winit.workspace = true
+wgpu.workspace = true
+wgpu_text.workspace = true
+bytemuck.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
+[[bin]]
+name = "testclient"
+path = "src/bin/testclient.rs"
+
+[[bin]]
+name = "uds-rp-client"
+path = "src/bin/uds-rp-client.rs"

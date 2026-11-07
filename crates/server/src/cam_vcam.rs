@@ -7,7 +7,7 @@
 //! (`vcam-ipc`), which the "UDS Webcam" DirectShow filter (`vcam` crate)
 //! serves to applications. Latest-frame-wins by design (§18.57).
 
-use vcam_ipc::CamSharedWriter;
+use vcam::ipc::CamSharedWriter;
 
 use crate::cam::CamSink;
 

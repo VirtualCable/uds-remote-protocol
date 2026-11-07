@@ -1371,7 +1371,7 @@ impl Core {
                     } else {
                         self.scard_out.push(protocol::SmartcardMessage::Error {
                             request_id: msg.request_id(),
-                            code: smartcard::SCARD_E_NO_SERVICE,
+                            code: channels::smartcard::SCARD_E_NO_SERVICE,
                         });
                     }
                 }

@@ -36,6 +36,7 @@ mod vpx;
 /// f32→i16 conversion, channel remix, linear resampling, capture ring (§9).
 /// BGRA → I420 color conversion (scalar Rust; libyuv SIMD later, behind a
 /// feature, with the same API).
+pub mod audio_dsp;
 pub mod color;
 /// Codec ladder state machine: decides when to switch codec regime (§8.5).
 pub mod ladder;

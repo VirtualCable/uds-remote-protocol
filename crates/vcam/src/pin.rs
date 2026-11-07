@@ -32,7 +32,7 @@ use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTask
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::core::*;
 
-use vcam_ipc::CamSharedReader;
+use crate::ipc::CamSharedReader;
 
 use crate::media::{self, CamFormat};
 use crate::pixel;

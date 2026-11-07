@@ -46,7 +46,7 @@ use windows::Win32::System::Com::{
 };
 
 use super::audio::AudioSource;
-use channels::audio::dsp::{CaptureRing, DevicePipeline, SampleFormat};
+use codec::audio_dsp::{CaptureRing, DevicePipeline, SampleFormat};
 
 /// `wFormatTag` values (u16 in `WAVEFORMATEX`; the windows crate exposes
 /// them as u32 constants, so local copies keep the compares literal).

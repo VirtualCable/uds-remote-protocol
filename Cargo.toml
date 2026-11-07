@@ -10,21 +10,15 @@ members = [
     "crates/server",
     "crates/server-config",
     "crates/client",
-    "crates/testclient",
     "crates/vpx-sys",
-    "crates/udsaudio-ctl",
     "crates/udscredprov",
-    "crates/udscredprov-ctl",
     "crates/service",
     "crates/service-proto",
     "crates/broker",
-    "crates/smartcard",
     "crates/udsscard-proto",
-    "crates/udsscard-ctl",
-    "crates/client-gui",
-    "crates/vcam-ipc",
     "crates/vcam",
-    "crates/uds-rp-client",
+    "crates/labclient",
+    "crates/labtools",
 ]
 # The Windows kernel audio driver lives in its own workspace (drivers/):
 # it needs panic="abort" profiles (workspace-wide setting), no_std, and a
@@ -42,16 +36,13 @@ repository = "https://github.com/VirtualCable/uds-remote-protocol"
 # Internal dependencies
 protocol = { path = "crates/protocol" }
 service-proto = { path = "crates/service-proto" }
-smartcard = { path = "crates/smartcard" }
 transport = { path = "crates/transport" }
 crypt = { path = "crates/crypt" }
 codec = { path = "crates/codec" }
-vcam-ipc = { path = "crates/vcam-ipc" }
 vpx-sys = { path = "crates/vpx-sys" }
 server = { path = "crates/server" }
 server-config = { path = "crates/server-config" }
 client = { path = "crates/client" }
-client-gui = { path = "crates/client-gui" }
 channels = { path = "crates/channels" }
 
 # Common external dependencies

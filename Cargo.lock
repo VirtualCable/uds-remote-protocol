@@ -490,11 +490,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clipboard-rs",
+ "codec",
  "cpal",
  "flume 0.12.0",
  "nokhwa",
+ "pcsc",
  "protocol",
- "smartcard",
  "tracing",
 ]
 
@@ -530,30 +531,10 @@ dependencies = [
  "crypt",
  "flume 0.12.0",
  "protocol",
- "smartcard",
  "tempfile",
  "tokio",
  "tracing",
  "transport",
-]
-
-[[package]]
-name = "client-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "channels",
- "client",
- "codec",
- "flume 0.12.0",
- "protocol",
- "server-config",
- "tokio",
- "tracing",
- "wgpu",
- "wgpu_text",
- "winit",
 ]
 
 [[package]]
@@ -638,6 +619,7 @@ dependencies = [
 name = "codec"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "opus",
  "thiserror 2.0.21",
  "turbojpeg",
@@ -2001,6 +1983,39 @@ name = "khronos_api"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
+
+[[package]]
+name = "labclient"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "channels",
+ "client",
+ "codec",
+ "flume 0.12.0",
+ "minifb",
+ "protocol",
+ "server-config",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wgpu",
+ "wgpu_text",
+ "windows 0.62.2",
+ "winit",
+]
+
+[[package]]
+name = "labtools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "udscredprov",
+ "udsscard-proto",
+ "widestring",
+ "windows 0.62.2",
+]
 
 [[package]]
 name = "lazy_static"
@@ -3849,7 +3864,7 @@ dependencies = [
  "transport",
  "turbojpeg",
  "udsscard-proto",
- "vcam-ipc",
+ "vcam",
  "webp",
  "windows 0.62.2",
 ]
@@ -3976,14 +3991,6 @@ name = "smallvec"
 version = "1.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9395f0f0eee849a9b707b2f06bb92a6a422090e2123bb2ef8e87a0e61892a8e"
-
-[[package]]
-name = "smartcard"
-version = "0.1.0"
-dependencies = [
- "pcsc",
- "tracing",
-]
 
 [[package]]
 name = "smithay-client-toolkit"
@@ -4133,21 +4140,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "testclient"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "channels",
- "client",
- "flume 0.12.0",
- "minifb",
- "protocol",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -4566,27 +4558,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "uds-rp-client"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "client",
- "client-gui",
- "protocol",
- "tracing",
- "tracing-subscriber",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "udsaudio-ctl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "windows 0.62.2",
-]
-
-[[package]]
 name = "udscredprov"
 version = "0.1.0"
 dependencies = [
@@ -4599,25 +4570,6 @@ dependencies = [
  "windows-core 0.62.2",
  "winres",
  "zeroize",
-]
-
-[[package]]
-name = "udscredprov-ctl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "udscredprov",
- "widestring",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "udsscard-ctl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "udsscard-proto",
- "windows 0.62.2",
 ]
 
 [[package]]
@@ -4727,17 +4679,8 @@ name = "vcam"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "vcam-ipc",
  "windows 0.62.2",
  "windows-core 0.62.2",
-]
-
-[[package]]
-name = "vcam-ipc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "windows 0.62.2",
 ]
 
 [[package]]

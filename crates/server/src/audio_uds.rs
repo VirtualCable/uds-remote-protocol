@@ -40,7 +40,7 @@ use windows::core::PCWSTR;
 use windows::core::w;
 
 use super::audio::AudioSource;
-use channels::audio::dsp::CaptureRing;
+use codec::audio_dsp::CaptureRing;
 
 /// `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)`.
 /// Must match `logic::IOCTL_READ_LOOPBACK` in the driver.

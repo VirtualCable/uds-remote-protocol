@@ -9,7 +9,7 @@
 //! backends: [`SyntheticSource`] (two-tone generator, every platform) and
 //! `audio_wasapi::WasapiLoopbackSource` (real desktop loopback, Windows with
 //! the `windows-capture` feature). The format adaptation they share (f32→i16
-//! conversion, remix, resampling, capture ring) lives in `channels::audio::dsp`.
+//! conversion, remix, resampling, capture ring) lives in `codec::audio_dsp`.
 //!
 //! [`SilenceGate`] implements the PoC-level DTX policy (§9.1): frames that
 //! are exact digital silence go out only as a clean silence onset (optional

@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = ["opus"]
-windows-capture = ["dep:windows", "dep:image", "dep:udsscard-proto", "dep:vcam-ipc"]
+windows-capture = ["dep:windows", "dep:image", "dep:udsscard-proto", "dep:vcam"]
 vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
 jpeg = ["codec/codec-jpeg"]
@@ -47,7 +47,7 @@ windows = { workspace = true, optional = true, features = [
     "Win32_Security_Authorization",
     "Win32_Networking_WinSock",
 ] }
-vcam-ipc = { workspace = true, optional = true, features = ["ipc"] }
+vcam = { path = "../vcam", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 udsscard-proto = { path = "../udsscard-proto", optional = true }
 

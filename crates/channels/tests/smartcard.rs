@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use channels::smartcard::SmartcardService;
 use protocol::{ReaderState, SCOPE_USER, SmartcardMessage};
-use smartcard::dummy::{DUMMY_ATR, DUMMY_READER};
-use smartcard::{
+use channels::smartcard::dummy::{DUMMY_ATR, DUMMY_READER};
+use channels::smartcard::{
     DummyBackend, SCARD_E_CANCELLED, SCARD_E_NO_SERVICE, SCARD_PROTOCOL_T1, SCARD_SHARE_SHARED,
     SCARD_STATE_PRESENT, SmartcardIntegration,
 };

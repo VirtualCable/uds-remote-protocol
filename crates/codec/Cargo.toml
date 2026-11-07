@@ -19,6 +19,7 @@ codec-opus = ["dep:opus"]
 
 [dependencies]
 thiserror.workspace = true
+anyhow.workspace = true
 vpx-sys = { workspace = true, optional = true }
 turbojpeg = { workspace = true, optional = true }
 opus = { workspace = true, optional = true }

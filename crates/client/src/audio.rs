@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use channels::audio::dsp::LinearResampler;
+use codec::audio_dsp::LinearResampler;
 use channels::audio::output::{PlaybackStream, SharedBuffer, start_playback};
 
 use crate::jitter::{JitterBuffer, JitterOutput};

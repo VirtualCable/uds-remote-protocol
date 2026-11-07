@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
 #[cfg(feature = "audio")]
-use super::dsp::{CaptureRing, DevicePipeline, SampleFormat};
+use codec::audio_dsp::{CaptureRing, DevicePipeline, SampleFormat};
 
 /// A source of mic frames: interleaved signed 16-bit mono PCM, exactly
 /// `frame_samples` samples per frame (the audio-in wire shape, §9.2).

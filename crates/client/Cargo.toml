@@ -26,7 +26,6 @@ channels.workspace = true
 transport.workspace = true
 crypt.workspace = true
 codec.workspace = true
-smartcard.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

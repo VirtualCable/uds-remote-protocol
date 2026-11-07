@@ -159,7 +159,7 @@ pub struct PlaybackStream {
     pub stream: DeviceStream,
     /// Sample rate of the opened stream: the requested rate when the device
     /// supports it, else the device default (the pump MUST resample decoded
-    /// frames to this rate — `channels::audio::dsp::LinearResampler`).
+    /// frames to this rate — `codec::audio_dsp::LinearResampler`).
     pub sample_rate: u32,
     /// Channel count of the opened stream.
     pub channels: u8,

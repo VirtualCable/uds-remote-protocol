@@ -7,9 +7,8 @@
 //! microphone capture (input.rs). The protocol side of audio (jitter
 //! buffer, Opus, wire pacing, A/V clock mapping) stays in `client`; the
 //! pure DSP helpers (format conversion, remix, resampling, capture ring)
-//! live in [`dsp`] and are shared with the server's capture side.
+//! live in `codec::audio_dsp`, shared with the server's capture side.
 
-pub mod dsp;
 pub mod input;
 pub mod output;
 

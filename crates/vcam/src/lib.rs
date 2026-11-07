@@ -26,6 +26,7 @@
     clippy::trivially_copy_pass_by_ref
 )]
 
+pub mod ipc;
 pub mod pixel;
 
 #[cfg(windows)]
