@@ -834,8 +834,12 @@ struct PresentQueue {
     frames: VecDeque<HeldFrame>,
 }
 
-/// Maximum frames waiting for presentation (§9.1: "a couple of frames").
-const MAX_HELD_FRAMES: usize = 3;
+/// Maximum frames waiting for presentation. Must cover `MAX_HOLD_MS` at the
+/// session frame rate (200 ms at 25 fps ≈ 5 frames) with margin: a shorter
+/// queue evicts every held frame right BEFORE its due time once the audio
+/// lag exceeds the capacity — the queue churns and video collapses to near
+/// zero fps while audio plays on (the 4K-fullscreen freeze).
+const MAX_HELD_FRAMES: usize = 8;
 
 impl PresentQueue {
     fn new() -> Self {
@@ -844,19 +848,28 @@ impl PresentQueue {
         }
     }
 
-    /// Holds a frame until the audio clock reaches `hold_until`.
-    fn hold(&mut self, display_id: u8, hold_until: u32, frame: codec::DecodedFrame, stats: &mut SyncStats, live: &crate::stats::SessionStats) {
+    /// Holds a frame until the audio clock reaches `hold_until`. On overflow
+    /// the oldest (most due) frame is EVICTED AND RETURNED so the caller
+    /// presents it immediately: presenting the most-due frame slightly early
+    /// is imperceptible, while dropping it collapses the frame rate (these
+    /// are decoded frames — dropping presentation never breaks the codec's
+    /// predictive chain).
+    fn hold(&mut self, display_id: u8, hold_until: u32, frame: codec::DecodedFrame, stats: &mut SyncStats, live: &crate::stats::SessionStats) -> Option<HeldFrame> {
         stats.record_hold();
-        if self.frames.len() >= MAX_HELD_FRAMES {
-            self.frames.pop_front();
+        let evicted = if self.frames.len() >= MAX_HELD_FRAMES {
+            let old = self.frames.pop_front();
             stats.record_overflow_drop();
             live.record_overflow_drop();
-        }
+            old
+        } else {
+            None
+        };
         self.frames.push_back(HeldFrame {
             display_id,
             hold_until,
             frame,
         });
+        evicted
     }
 }
 
@@ -1127,8 +1140,14 @@ impl DecodeWorker {
             }
             avsync::PresentDecision::HoldUntil(ts) => {
                 self.stats.record_hold();
-                self.present_queue
-                    .hold(display_id, ts, frame, &mut self.avsync_stats, &self.stats);
+                if let Some(evicted) = self
+                    .present_queue
+                    .hold(display_id, ts, frame, &mut self.avsync_stats, &self.stats)
+                {
+                    // Queue full: the evicted frame is the most due — present
+                    // it now rather than dropping it (see PresentQueue::hold).
+                    let _ = self.present(evicted.display_id, &evicted.frame);
+                }
             }
             avsync::PresentDecision::Drop => {
                 self.avsync_stats.record_stale_drop();
