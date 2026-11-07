@@ -184,6 +184,14 @@ impl Drop for WavSink {
     }
 }
 
+/// Jitter depth for the mic upstream (§9.2): 8 × 20 ms = 160 ms. The mic is
+/// a one-way voice feed — nobody hears their own voice, so latency is
+/// inaudible — while a network burst (display traffic competing with the
+/// uplink) turns into robotic PLC and resync gaps with the shallow 60 ms
+/// playback-oriented default. Measured on the lab: a ~25 s burst produced
+/// 320 PLC frames with depth 3; depth 8 rides it out.
+const MIC_JITTER_DEPTH_FRAMES: usize = 8;
+
 /// The mic receive pipeline state, thread-independent for testability: feed
 /// raw `AUDIO_IN` payloads with [`MicPump::push_payload`], call
 /// [`MicPump::tick`] once per frame duration.
@@ -204,7 +212,7 @@ impl MicPump {
         let decoder = codec::build_audio_decoder(&preset)?;
         Ok(Self {
             decoder,
-            jitter: JitterBuffer::new(),
+            jitter: JitterBuffer::with_depth(MIC_JITTER_DEPTH_FRAMES),
             sink,
             pcm: vec![0i16; preset.frame_samples()],
             decoded_frames: 0,
@@ -381,8 +389,8 @@ mod tests {
         let mut encoder = codec::build_audio_encoder(&preset).unwrap();
         let pcm = vec![500i16; preset.frame_samples()];
         let mut packet = Vec::new();
-        // seq 0, 1, 2 prime the jitter buffer; seq 4 skips 3 (one PLC).
-        for seq in [0u32, 1, 2, 4] {
+        // seq 0..8 prime the jitter buffer (depth 8); seq 9 skips 8 (one PLC).
+        for seq in 0u32..8 {
             packet.clear();
             encoder.encode(&pcm, &mut packet).unwrap();
             pump.push_payload(&encode(
@@ -393,12 +401,21 @@ mod tests {
                 &packet,
             ));
         }
-        for _ in 0..5 {
+        packet.clear();
+        encoder.encode(&pcm, &mut packet).unwrap();
+        pump.push_payload(&encode(
+            AudioHeader {
+                seq: 9,
+                capture_ts_ms: 9 * 20,
+            },
+            &packet,
+        ));
+        for _ in 0..10 {
             pump.tick();
         }
-        assert_eq!(pump.decoded_frames, 5);
+        assert_eq!(pump.decoded_frames, 10);
         assert_eq!(pump.plc_frames, 1);
         // One write per decoded frame, 960 mono samples each.
-        assert_eq!(written.load(Ordering::Relaxed), 5 * 960);
+        assert_eq!(written.load(Ordering::Relaxed), 10 * 960);
     }
 }

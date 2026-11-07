@@ -28,14 +28,18 @@
 
 use std::collections::BTreeMap;
 
-/// Default target depth in frames (3 × 20 ms = 60 ms, §9.1).
+/// Default target depth in frames (3 × 20 ms = 60 ms, §9.1). Used by the
+/// latency-sensitive playback side (audio-out).
 pub const DEFAULT_TARGET_DEPTH: usize = 3;
 
 /// Minimum configurable target depth (frames).
 pub const MIN_TARGET_DEPTH: usize = 2;
 
-/// Maximum configurable target depth (frames).
-pub const MAX_TARGET_DEPTH: usize = 4;
+/// Maximum configurable target depth (frames). The mic upstream tolerates
+/// much more latency than playback (nobody hears their own mic), so the
+/// server uses a deeper buffer to ride out network bursts that compete with
+/// the display traffic.
+pub const MAX_TARGET_DEPTH: usize = 12;
 
 /// Cap on consecutive PLC frames before the buffer resyncs (§9.1).
 pub const MAX_CONSECUTIVE_PLC: usize = 5;
@@ -91,7 +95,7 @@ impl JitterBuffer {
     }
 
     /// Creates a buffer with a custom target depth, clamped to
-    /// [`MIN_TARGET_DEPTH`]..=[`MAX_TARGET_DEPTH`] (§9.1: 2-4 frames).
+    /// [`MIN_TARGET_DEPTH`]..=[`MAX_TARGET_DEPTH`].
     #[must_use]
     pub fn with_depth(target_depth: usize) -> Self {
         Self {
@@ -347,8 +351,11 @@ mod tests {
     fn target_depth_is_clamped_to_the_design_range() {
         assert_eq!(JitterBuffer::with_depth(0).target_depth(), MIN_TARGET_DEPTH);
         assert_eq!(JitterBuffer::with_depth(1).target_depth(), MIN_TARGET_DEPTH);
-        assert_eq!(JitterBuffer::with_depth(4).target_depth(), MAX_TARGET_DEPTH);
-        assert_eq!(JitterBuffer::with_depth(9).target_depth(), MAX_TARGET_DEPTH);
+        assert_eq!(JitterBuffer::with_depth(4).target_depth(), 4);
+        assert_eq!(
+            JitterBuffer::with_depth(MAX_TARGET_DEPTH + 5).target_depth(),
+            MAX_TARGET_DEPTH
+        );
     }
 
     #[test]
