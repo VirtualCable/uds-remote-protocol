@@ -85,6 +85,26 @@ pub struct AudioClient {
     now_ms: Arc<AtomicI64>,
 }
 
+/// Raises the current thread's scheduling priority one notch (Windows:
+/// `THREAD_PRIORITY_ABOVE_NORMAL`); a no-op elsewhere. See the spawn site
+/// for why (device-buffer underruns during process-wide CPU bursts).
+#[cfg(windows)]
+fn raise_current_thread_priority() {
+    use windows::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL,
+    };
+    // SAFETY: GetCurrentThread returns a pseudo-handle to the calling
+    // thread, always valid for SetThreadPriority.
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    }
+}
+
+/// No-op outside Windows (lab diagnostics showed no starvation there; the
+/// platform-specific knob can be added when it does).
+#[cfg(not(windows))]
+fn raise_current_thread_priority() {}
+
 impl AudioClient {
     /// Creates the client; when `enabled` is false, packets are counted and
     /// dropped without decoding. With `dump`, every decoded frame is also
@@ -103,7 +123,16 @@ impl AudioClient {
         }
         let (tx, rx) = channel();
         let shared = Arc::clone(&now_ms);
-        std::thread::spawn(move || run(&rx, &shared, dump.as_deref(), &stats, output_factory));
+        std::thread::spawn(move || {
+            // The pump feeds the device buffer; a CPU burst elsewhere in the
+            // process (wgpu surface recreate on fullscreen, §18.66) can
+            // starve it past the buffer depth and the device plays silence
+            // (the "petardazo"). One notch above normal wins the ties
+            // against the GUI/GPU workers without starving anything — this
+            // is not HIGHEST/TIME_CRITICAL, the scheduler still preempts us.
+            raise_current_thread_priority();
+            run(&rx, &shared, dump.as_deref(), &stats, output_factory);
+        });
         Self {
             tx: Some(tx),
             now_ms,
@@ -326,7 +355,13 @@ impl ActiveStream {
         );
         Some(Self {
             decoder,
-            jitter: JitterBuffer::new(),
+            // 6 frames = 120 ms (double the §9.1 default): the playback
+            // buffer mirrors this depth, and process-wide CPU bursts (wgpu
+            // surface recreate on fullscreen, §18.66) were measured stalling
+            // the pump past 60 ms — the device played silence while the
+            // jitter had audio ready. The A/V clock maps the real cursor,
+            // so the extra latency is compensated in lip-sync, not added.
+            jitter: JitterBuffer::with_depth(6),
             playback,
             resampler,
             resampled: Vec::new(),

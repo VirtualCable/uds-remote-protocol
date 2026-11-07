@@ -25,5 +25,8 @@ tokio.workspace = true
 tracing.workspace = true
 flume.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
 [dev-dependencies]
 tempfile = "3"
