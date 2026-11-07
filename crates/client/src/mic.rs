@@ -38,9 +38,7 @@ pub enum MicMode {
     Tone(f64),
 }
 
-use channels::audio::input::MicSource;
-#[cfg(feature = "audio")]
-use channels::audio::input::CpalMicSource;
+use crate::integrations::mic::{MicFactory, MicSource};
 
 /// Synthetic mic source: a single sine tone with continuous phase across
 /// frames (mono counterpart of the server's `SyntheticSource`).
@@ -93,6 +91,9 @@ impl MicSource for ToneSource {
 /// server announces audio-in support, drained by the session loop.
 pub struct MicClient {
     mode: MicMode,
+    /// Device factory injected by the consumer (`MicMode::Device`); `None`
+    /// keeps the device mode silent (no factory, no capture).
+    factory: Option<MicFactory>,
     clock_start: Instant,
     /// Receives encoded datagram payloads once the pipeline is running.
     rx: Option<mpsc::Receiver<Vec<u8>>>,
@@ -106,9 +107,10 @@ pub struct MicClient {
 impl MicClient {
     /// Creates the client; capture starts on [`MicClient::enable`].
     #[must_use]
-    pub fn new(mode: MicMode, clock_start: Instant) -> Self {
+    pub fn new(mode: MicMode, factory: Option<MicFactory>, clock_start: Instant) -> Self {
         Self {
             mode,
+            factory,
             clock_start,
             rx: None,
             spec: None,
@@ -149,15 +151,13 @@ impl MicClient {
             MicMode::Off => unreachable!("checked above"),
             MicMode::Tone(freq) => Box::new(ToneSource::new(freq, frame_samples)),
             MicMode::Device => {
-                #[cfg(feature = "audio")]
-                match CpalMicSource::new(frame_samples) {
-                    Some(s) => Box::new(s),
-                    None => return, // already warned
-                }
-                #[cfg(not(feature = "audio"))]
-                {
-                    warn!("mic capture needs the `audio` feature (cpal); mic disabled");
+                let Some(factory) = &self.factory else {
+                    warn!("no mic source factory injected; mic disabled");
                     return;
+                };
+                match factory(frame_samples) {
+                    Some(s) => s,
+                    None => return, // the factory already warned
                 }
             }
         };
@@ -312,7 +312,7 @@ mod tests {
     /// An off-mode client never produces packets, announced or not.
     #[test]
     fn off_mode_stays_off() {
-        let mut mic = MicClient::new(MicMode::Off, Instant::now());
+        let mut mic = MicClient::new(MicMode::Off, None, Instant::now());
         mic.enable(&AudioSpec {
             codec: AudioCodecType::Opus.wire_id(),
             sample_rate: 48_000,
@@ -329,7 +329,7 @@ mod tests {
     #[cfg(feature = "audio")]
     #[tokio::test]
     async fn tone_pipeline_produces_decodable_datagrams() {
-        let mut mic = MicClient::new(MicMode::Tone(440.0), Instant::now());
+        let mut mic = MicClient::new(MicMode::Tone(440.0), None, Instant::now());
         mic.enable(&AudioSpec {
             codec: AudioCodecType::Opus.wire_id(),
             sample_rate: 48_000,

@@ -24,7 +24,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::smartcard::consts::{SCARD_E_INVALID_HANDLE, SCARD_S_SUCCESS};
+use crate::integrations::smartcard::{SCARD_E_INVALID_HANDLE, SCARD_S_SUCCESS};
 
 /// Idle limit after which a held transaction is dropped (WinSCard limit).
 pub const TRANSACTION_IDLE_TIMEOUT: Duration = Duration::from_secs(5);

@@ -16,11 +16,11 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::smartcard::SmartcardIntegration;
-use crate::smartcard::consts::{
+use crate::smartcard::{
     SCARD_E_CANCELLED, SCARD_E_TIMEOUT, SCARD_E_UNSUPPORTED_FEATURE, SCARD_PROTOCOL_T1,
     SCARD_STATE_PRESENT,
 };
-use crate::smartcard::types::{
+use crate::smartcard::{
     ConnectResult, ReaderStateIn, ReaderStateOut, ScardContext, ScardHandle, ScardIORequest,
     ScardStatus, TransmitResult,
 };

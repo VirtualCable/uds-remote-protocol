@@ -24,11 +24,11 @@ use helpers::{
 };
 use registry::NativeRegistry;
 
-use crate::smartcard::consts::{
+use crate::smartcard::{
     SCARD_E_INVALID_HANDLE, SCARD_E_INVALID_PARAMETER, SCARD_E_TIMEOUT, SCARD_S_SUCCESS,
     SCARD_TRANSMIT_MAX,
 };
-use crate::smartcard::types::{
+use crate::smartcard::{
     ConnectResult, ReaderStateIn, ReaderStateOut, ScardContext, ScardHandle, ScardIORequest,
     ScardStatus, TransmitResult,
 };

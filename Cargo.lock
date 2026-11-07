@@ -489,6 +489,7 @@ name = "channels"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "client",
  "clipboard-rs",
  "codec",
  "cpal",
@@ -526,7 +527,6 @@ name = "client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "channels",
  "codec",
  "crypt",
  "flume 0.12.0",

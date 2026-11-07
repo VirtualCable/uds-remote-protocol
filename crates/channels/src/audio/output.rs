@@ -112,6 +112,37 @@ pub fn start_playback(_sample_rate: u32, _channels: u8) -> Option<PlaybackStream
     None
 }
 
+#[cfg(feature = "audio")]
+impl client::integrations::audio_out::AudioOutput for PlaybackStream {
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn channels(&self) -> u8 {
+        self.channels
+    }
+
+    fn buffer(&self) -> SharedBuffer {
+        Arc::clone(&self.buffer)
+    }
+}
+
+/// The default audio-output factory: opens the default output device via
+/// cpal (`None` = null sink). Injected into the client session as
+/// [`Integrations::audio_out`](client::integrations::Integrations).
+#[cfg(feature = "audio")]
+pub fn default_output_factory() -> client::integrations::audio_out::AudioOutputFactory {
+    Box::new(|rate, ch| {
+        start_playback(rate, ch).map(|s| Box::new(s) as Box<dyn client::integrations::audio_out::AudioOutput>)
+    })
+}
+
+/// Without the `audio` feature there is no device: the null-sink factory.
+#[cfg(not(feature = "audio"))]
+pub fn default_output_factory() -> client::integrations::audio_out::AudioOutputFactory {
+    Box::new(|_, _| None)
+}
+
 /// Picks an output config and its rate. Preference order (§9.1 + the
 /// uds-client headset lesson):
 /// 1. The device default when it already matches the stream shape.

@@ -3,13 +3,8 @@
 // All rights reserved.
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-//! Local printer sinks: the device side of printer redirection, wire-free.
-//!
-//! [`PrinterSink`] is shaped after uds-client's `PrinterIntegration` (same
-//! job lifecycle, same u32 error codes) with one deliberate difference:
-//! job ids are SERVER-assigned (our wire protocol works that way), so
-//! `create_job` takes the id instead of returning one. A future bridge to
-//! `PrinterIntegration` only has to mint ids.
+//! Local printer sinks: implementations of the
+//! [`PrinterSink`](client::integrations::printer::PrinterSink) contract.
 //!
 //! [`PdfToDirSink`] materializes jobs as PDF files in a local directory
 //! (atomic `.part` + rename) — the phase-0 backend. Real printing
@@ -23,23 +18,7 @@ use std::path::{Path, PathBuf};
 
 use tracing::{info, warn};
 
-/// The device side of printer redirection: receives finished-job lifecycle
-/// calls from the session (server-driven, ids server-assigned).
-pub trait PrinterSink: Send {
-    /// Opens a job under the server-assigned id.
-    fn create_job(&mut self, job_id: u32, printer_name: &str, document_name: &str)
-    -> Result<(), u32>;
-    /// Appends one chunk; returns the byte count accepted.
-    fn write_data(&mut self, job_id: u32, data: &[u8]) -> Result<usize, u32>;
-    /// Finalizes the job (commits it to the local output).
-    fn close_job(&mut self, job_id: u32) -> Result<(), u32>;
-    /// Cancels the job, dropping any partial output.
-    fn abort_job(&mut self, job_id: u32);
-}
-
-/// Generic backend failure (the wire maps raw OS errors to NTSTATUS-style
-/// codes; backends keep to the few values the session knows).
-pub const STATUS_FAILED: u32 = 0xC000_0022;
+pub use client::integrations::printer::{PrinterSink, STATUS_FAILED};
 
 /// One in-flight job being written to disk.
 struct OpenJob {
@@ -92,10 +71,6 @@ impl PdfToDirSink {
         })
     }
 
-    /// Drains the finished-job notifications since the last call.
-    pub fn drain_done(&mut self) -> impl Iterator<Item = (PathBuf, u64)> + '_ {
-        self.done.drain(..)
-    }
 }
 
 impl PrinterSink for PdfToDirSink {
@@ -182,6 +157,10 @@ impl PrinterSink for PdfToDirSink {
         }
     }
 
+    fn drain_done(&mut self) -> Vec<(PathBuf, u64)> {
+        std::mem::take(&mut self.done)
+    }
+
     fn abort_job(&mut self, job_id: u32) {
         if self.open.remove(&job_id).is_some() {
             info!(job_id, "print job aborted");
@@ -250,7 +229,7 @@ mod tests {
         sink.create_job(1, "UDS Printer", "test").unwrap();
         sink.write_data(1, b"%PDF-1.4 fake").unwrap();
         sink.close_job(1).unwrap();
-        let (path, bytes) = sink.drain_done().next().expect("done");
+        let (path, bytes) = sink.drain_done().into_iter().next().expect("done");
         assert_eq!(bytes, 13);
         assert_eq!(fs::read(&path).expect("read"), b"%PDF-1.4 fake");
         assert!(path.ends_with("test.pdf"));

@@ -11,7 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use channels::smartcard::SmartcardService;
+use client::smartcard::SmartcardService;
 use protocol::{ReaderState, SCOPE_USER, SmartcardMessage};
 use channels::smartcard::dummy::{DUMMY_ATR, DUMMY_READER};
 use channels::smartcard::{

@@ -703,9 +703,13 @@ async fn run() -> Result<()> {
         audio_dump: args.audio_dump,
         mic: args.mic,
         privacy_screen: args.privacy,
-        smartcard: args.smartcard,
-        webcam: args.webcam,
-        printer: args.printer_save.clone(),
+        integrations: labclient::build_integrations(
+            args.webcam,
+            args.printer_save.clone(),
+            matches!(args.mic, client::mic::MicMode::Device),
+            args.audio,
+            args.smartcard,
+        ),
         pref_resolution: args.pref_resolution,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);

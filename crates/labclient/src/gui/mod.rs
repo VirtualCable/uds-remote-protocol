@@ -408,9 +408,13 @@ fn spawn_session(
         audio_dump: flags.audio_dump.clone(),
         mic: flags.mic,
         privacy_screen: flags.privacy_screen,
-        smartcard: flags.smartcard,
-        webcam: flags.webcam,
-        printer: flags.printer_save.clone(),
+        integrations: crate::build_integrations(
+            flags.webcam,
+            flags.printer_save.clone(),
+            matches!(flags.mic, MicMode::Device),
+            flags.audio,
+            flags.smartcard,
+        ),
         pref_resolution,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);

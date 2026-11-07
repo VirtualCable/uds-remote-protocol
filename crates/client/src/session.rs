@@ -75,7 +75,7 @@ const SYNC_LOG_INTERVAL: Duration = Duration::from_secs(5);
 // A plain bag of independent switches the consumer fills; grouping them
 // into sub-structs would only add nesting at every call site.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClientConfig {
     /// Server address (direct, or the launcher's local tunnel endpoint).
     pub addr: SocketAddr,
@@ -93,21 +93,24 @@ pub struct ClientConfig {
     /// Ask the server to hide the physical console behind a privacy screen
     /// for the duration of the session (M7; `FLAG_PRIVACY_SCREEN`).
     pub privacy_screen: bool,
-    /// Offer smartcard redirection (§17; `FLAG_SMARTCARD`): the session
-    /// runs the request dispatcher against the local PC/SC backend (or
-    /// answers `SCARD_E_NO_SERVICE` when there is none).
-    pub smartcard: bool,
-    /// Offer webcam redirection (§18.57; `FLAG_WEBCAM`): when the server
-    /// asks for it, stream the local camera VP9-encoded on `channel::WEBCAM`.
-    pub webcam: bool,
-    /// Accept redirected print jobs (§18.57 phase 0; `FLAG_PRINTER`):
-    /// received PDFs are materialized in this directory and reported as
-    /// [`ClientEvent::PrintJobDone`]. `None` disables the channel.
-    pub printer: Option<std::path::PathBuf>,
+    /// Device integrations injected by the consumer (§15.3): webcam,
+    /// printer, mic, audio-out and smartcard backends. Each `Some` offers
+    /// its channel in the HELLO (§17, §18.57).
+    pub integrations: crate::integrations::Integrations,
     /// Preferred remote display resolution (§18.37), sent in the HELLO.
     /// `(0, 0)` means no preference: the server keeps its current mode or
     /// applies its own fixed `resolution` policy.
     pub pref_resolution: (u16, u16),
+}
+
+/// One client session (§15.3). Build with [`Session::new`], then drive it
+/// with [`Session::run`] on a dedicated task.
+impl ClientConfig {
+    /// The smartcard channel is offered when the consumer injected a
+    /// backend (§17).
+    fn smartcard_offered(&self) -> bool {
+        self.integrations.smartcard.is_some()
+    }
 }
 
 /// One client session (§15.3). Build with [`Session::new`], then drive it
@@ -158,30 +161,18 @@ impl Session {
         if self.config.privacy_screen {
             flags |= protocol::FLAG_PRIVACY_SCREEN;
         }
-        if self.config.smartcard {
+        if self.config.smartcard_offered() {
             flags |= protocol::FLAG_SMARTCARD;
         }
-        // Webcam (§18.57): the source is probed here so the flag reflects a
-        // real capture capability, and passed down to the Core.
-        let cam_source = if self.config.webcam {
-            channels::webcam::default_source()
-        } else {
-            None
-        };
+        // Webcam (§18.57): the consumer probes the source, so the flag
+        // reflects a real capture capability.
+        let cam_source = self.config.integrations.webcam.take();
         if cam_source.is_some() {
             flags |= protocol::FLAG_WEBCAM;
         }
-        // Printer (§18.57): like the webcam, the flag must reflect a real
-        // capability, so the save directory is prepared before the HELLO.
-        let printer = self.config.printer.as_ref().and_then(|dir| {
-            match crate::printer::PrinterJobs::new(dir.clone()) {
-                Ok(jobs) => Some(jobs),
-                Err(e) => {
-                    warn!(dir = %dir.display(), "printer save dir unavailable: {e}");
-                    None
-                }
-            }
-        });
+        // Printer (§18.57): like the webcam, the flag reflects a real
+        // capability (an injected sink).
+        let printer = self.config.integrations.printer.take().map(crate::printer::PrinterJobs::new);
         if printer.is_some() {
             flags |= protocol::FLAG_PRINTER;
         }
@@ -196,7 +187,7 @@ impl Session {
             .await?;
         info!(
             privacy_screen = self.config.privacy_screen,
-            smartcard = self.config.smartcard,
+            smartcard = self.config.smartcard_offered(),
             "handshake done"
         );
 
@@ -246,7 +237,7 @@ impl Session {
         let mut core = Core::new(
             self.events.clone(),
             self.displays.clone(),
-            &self.config,
+            &mut self.config,
             clock_start,
             cam_source,
             printer,
@@ -1172,7 +1163,10 @@ struct Core {
     /// by the receive loops like `clip_out`.
     storage: crate::storage::StorageClient,
     /// Smartcard request dispatcher (§17); `None` while disabled.
-    smartcard: Option<channels::smartcard::SmartcardService>,
+    smartcard: Option<crate::smartcard::SmartcardService>,
+    /// Injected PC/SC backend, kept to restart the dispatcher on
+    /// `ClientCommand::SmartcardEnable`.
+    smartcard_backend: Option<std::sync::Arc<dyn crate::integrations::smartcard::SmartcardIntegration>>,
     /// Reply channel of the smartcard dispatcher (replies are drained by
     /// `flush_out` onto the reliable stream).
     scard_tx: flume::Sender<protocol::SmartcardMessage>,
@@ -1189,17 +1183,23 @@ impl Core {
     fn new(
         events: flume::Sender<ClientEvent>,
         displays: Displays,
-        config: &ClientConfig,
+        config: &mut ClientConfig,
         clock_start: Instant,
-        cam_source: Option<Box<dyn channels::webcam::WebcamSource>>,
+        cam_source: Option<Box<dyn crate::integrations::webcam::WebcamSource>>,
         printer: Option<crate::printer::PrinterJobs>,
     ) -> Self {
         let (scard_tx, scard_rx) = flume::unbounded();
+        let smartcard_backend = config.integrations.smartcard.clone();
         let smartcard = config
-            .smartcard
-            .then(|| channels::smartcard::SmartcardService::start(channels::smartcard::default_backend(), scard_tx.clone()));
+            .smartcard_offered()
+            .then(|| crate::smartcard::SmartcardService::start(smartcard_backend.clone(), scard_tx.clone()));
         let stats = std::sync::Arc::new(crate::stats::SessionStats::default());
-        let audio = AudioClient::new(config.audio, config.audio_dump.clone(), std::sync::Arc::clone(&stats));
+        let audio = AudioClient::new(
+            config.audio,
+            config.audio_dump.clone(),
+            std::sync::Arc::clone(&stats),
+            config.integrations.audio_out.take(),
+        );
         let (decode_tx, decode_ctl_tx, recovery_awaiting) = DecodeWorker::spawn(
             events.clone(),
             displays.clone(),
@@ -1209,12 +1209,13 @@ impl Core {
         Self {
             events,
             displays,
+            smartcard_backend,
             reasm: Reassembler::new(),
             decode_tx,
             decode_ctl_tx,
             recovery_awaiting,
             audio,
-            mic: MicClient::new(config.mic, clock_start),
+            mic: MicClient::new(config.mic, config.integrations.mic.take(), clock_start),
             cam: CamClient::new(cam_source),
             stats,
             last_key_req: None,
@@ -1237,8 +1238,8 @@ impl Core {
         match (on, self.smartcard.is_some()) {
             (true, false) => {
                 info!("smartcard redirection enabled");
-                self.smartcard = Some(channels::smartcard::SmartcardService::start(
-                    channels::smartcard::default_backend(),
+                self.smartcard = Some(crate::smartcard::SmartcardService::start(
+                    self.smartcard_backend.clone(),
                     self.scard_tx.clone(),
                 ));
             }
@@ -1371,7 +1372,7 @@ impl Core {
                     } else {
                         self.scard_out.push(protocol::SmartcardMessage::Error {
                             request_id: msg.request_id(),
-                            code: channels::smartcard::SCARD_E_NO_SERVICE,
+                            code: crate::integrations::smartcard::SCARD_E_NO_SERVICE,
                         });
                     }
                 }

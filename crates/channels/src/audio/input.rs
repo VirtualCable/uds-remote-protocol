@@ -23,11 +23,13 @@ use tracing::{info, warn};
 #[cfg(feature = "audio")]
 use codec::audio_dsp::{CaptureRing, DevicePipeline, SampleFormat};
 
-/// A source of mic frames: interleaved signed 16-bit mono PCM, exactly
-/// `frame_samples` samples per frame (the audio-in wire shape, §9.2).
-pub trait MicSource: Send {
-    /// Fills `out` with the next frame; `out` holds exactly one frame.
-    fn fill_frame(&mut self, out: &mut [i16]) -> anyhow::Result<()>;
+pub use client::integrations::mic::{MicFactory, MicSource};
+
+/// The default mic factory: opens the default input device via cpal.
+/// Without the `audio` feature there is no capture device (always `None`).
+#[cfg(feature = "audio")]
+pub fn default_mic_factory() -> MicFactory {
+    Box::new(|frame_samples| CpalMicSource::new(frame_samples).map(|s| Box::new(s) as Box<dyn MicSource>))
 }
 
 /// cpal input-device source: the default input device through the DSP

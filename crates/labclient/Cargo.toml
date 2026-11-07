@@ -20,7 +20,7 @@ audio = ["client/audio", "channels/audio"]
 
 [dependencies]
 client.workspace = true
-channels.workspace = true
+channels = { workspace = true, features = ["pcsc-backend"] }
 codec.workspace = true
 protocol.workspace = true
 server-config.workspace = true

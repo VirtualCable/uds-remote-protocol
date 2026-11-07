@@ -17,6 +17,7 @@ smartcard = ["pcsc-backend"]
 [dependencies]
 anyhow.workspace = true
 clipboard-rs.workspace = true
+client.workspace = true
 codec.workspace = true
 flume.workspace = true
 nokhwa.workspace = true

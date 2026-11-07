@@ -9,34 +9,35 @@
 //! The server streams a finished PDF from the VM's "UDS Printer" queue
 //! (`CreateJob` → `JobData`* → `CloseJob`) on the reliable
 //! `channel::PRINTER`; this adapter translates those messages into
-//! [`channels::printer::PrinterSink`] calls and the replies back, and
-//! reports finished jobs as [`ClientEvent::PrintJobDone`]. All device-side
-//! work (files, atomic rename, naming) lives in the channels crate.
+//! the injected [`PrinterSink`](crate::integrations::printer::PrinterSink)
+//! calls and the replies back, and reports finished jobs as
+//! [`ClientEvent::PrintJobDone`]. All device-side work (files, real
+//! spoolers) lives behind the sink implementation.
 //!
 //! Synchronous `std::fs`: chunks are ≤ `MAX_JOB_CHUNK` and called from the
 //! session receive path, so blocking time is negligible.
 
-use std::path::PathBuf;
+use protocol::{JOB_FORMAT_PDF, PrinterMessage, STATUS_SUCCESS};
 
-use protocol::{JOB_FORMAT_PDF, MAX_JOB_BYTES, PrinterMessage, STATUS_SUCCESS};
+use crate::integrations::printer::PrinterSink;
 
 use crate::events::ClientEvent;
 
 /// Printer job receiver: the sink plus the replies to flush.
 pub struct PrinterJobs {
-    sink: channels::printer::PdfToDirSink,
+    sink: Box<dyn PrinterSink>,
     /// Replies to send on the reliable stream.
     out: Vec<PrinterMessage>,
 }
 
 impl PrinterJobs {
-    /// Creates the receiver, ensuring the destination directory exists.
-    pub fn new(dir: PathBuf) -> std::io::Result<Self> {
-        let sink = channels::printer::PdfToDirSink::new(dir, MAX_JOB_BYTES)?;
-        Ok(Self {
+    /// Creates the receiver around the injected sink.
+    #[must_use]
+    pub fn new(sink: Box<dyn PrinterSink>) -> Self {
+        Self {
             sink,
             out: Vec::new(),
-        })
+        }
     }
 
     /// Drains the replies queued since the last flush.
@@ -46,7 +47,6 @@ impl PrinterJobs {
 
     /// Applies one server message; returns the events to emit.
     pub fn handle(&mut self, msg: &PrinterMessage) -> Vec<ClientEvent> {
-        use channels::printer::PrinterSink as _;
         match msg {
             PrinterMessage::CreateJob {
                 job_id,
@@ -90,6 +90,7 @@ impl PrinterJobs {
         }
         self.sink
             .drain_done()
+            .into_iter()
             .map(|(path, bytes)| ClientEvent::PrintJobDone { path, bytes })
             .collect()
     }
@@ -98,12 +99,49 @@ impl PrinterJobs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::integrations::printer::STATUS_FAILED;
     use protocol::JOB_FORMAT_PDF;
+    use std::collections::HashMap;
+
+    /// In-memory sink: the wire adapter tests assert the session↔sink
+    /// contract; file materialization is covered by `channels`' own
+    /// `PdfToDirSink` tests.
+    #[derive(Default)]
+    struct MemSink {
+        jobs: HashMap<u32, Vec<u8>>,
+        done: Vec<(std::path::PathBuf, u64)>,
+    }
+
+    impl PrinterSink for MemSink {
+        fn create_job(&mut self, job_id: u32, _printer: &str, _doc: &str) -> Result<(), u32> {
+            self.jobs.insert(job_id, Vec::new());
+            Ok(())
+        }
+
+        fn write_data(&mut self, job_id: u32, data: &[u8]) -> Result<usize, u32> {
+            let job = self.jobs.get_mut(&job_id).ok_or(STATUS_FAILED)?;
+            job.extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn close_job(&mut self, job_id: u32) -> Result<(), u32> {
+            let data = self.jobs.remove(&job_id).ok_or(STATUS_FAILED)?;
+            self.done.push((std::path::PathBuf::from(format!("{job_id}.pdf")), data.len() as u64));
+            Ok(())
+        }
+
+        fn abort_job(&mut self, job_id: u32) {
+            self.jobs.remove(&job_id);
+        }
+
+        fn drain_done(&mut self) -> Vec<(std::path::PathBuf, u64)> {
+            std::mem::take(&mut self.done)
+        }
+    }
 
     #[test]
     fn full_job_roundtrip() {
-        let dir = std::env::temp_dir().join(format!("uds-print-adapter-{}", std::process::id()));
-        let mut jobs = PrinterJobs::new(dir.clone()).expect("dir");
+        let mut jobs = PrinterJobs::new(Box::new(MemSink::default()));
         let events = jobs.handle(&PrinterMessage::CreateJob {
             job_id: 1,
             format: JOB_FORMAT_PDF,
@@ -120,18 +158,15 @@ mod tests {
             panic!("expected PrintJobDone");
         };
         assert_eq!(*bytes, 13);
-        assert_eq!(std::fs::read(path).expect("read"), b"%PDF-1.4 fake");
-        assert!(path.ends_with("test.pdf"));
+        assert!(path.ends_with("1.pdf"));
         // Replies: JobCreated ok, JobClosed ok.
         let replies: Vec<_> = jobs.drain_out().collect();
         assert_eq!(replies.len(), 2);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn wrong_format_refused() {
-        let dir = std::env::temp_dir().join(format!("uds-print-adapter-fmt-{}", std::process::id()));
-        let mut jobs = PrinterJobs::new(dir.clone()).expect("dir");
+        let mut jobs = PrinterJobs::new(Box::new(MemSink::default()));
         jobs.handle(&PrinterMessage::CreateJob {
             job_id: 3,
             format: 99,
@@ -142,6 +177,5 @@ mod tests {
         assert!(
             matches!(replies.first(), Some(PrinterMessage::JobCreated { error, .. }) if *error != 0)
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

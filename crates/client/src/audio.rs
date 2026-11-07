@@ -29,7 +29,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use codec::audio_dsp::LinearResampler;
-use channels::audio::output::{PlaybackStream, SharedBuffer, start_playback};
+use codec::audio_dsp::SharedBuffer;
+
+use crate::integrations::audio_out::{AudioOutput, AudioOutputFactory};
 
 use crate::jitter::{JitterBuffer, JitterOutput};
 use codec::{AudioCodecType, AudioPreset};
@@ -89,14 +91,19 @@ impl AudioClient {
     /// appended to that file as raw s16le interleaved PCM (lab/E2E aid —
     /// the format is the announced spec's rate and channel count).
     #[must_use]
-    pub fn new(enabled: bool, dump: Option<std::path::PathBuf>, stats: Arc<crate::stats::SessionStats>) -> Self {
+    pub fn new(
+        enabled: bool,
+        dump: Option<std::path::PathBuf>,
+        stats: Arc<crate::stats::SessionStats>,
+        output_factory: Option<AudioOutputFactory>,
+    ) -> Self {
         let now_ms = Arc::new(AtomicI64::new(-1));
         if !enabled {
             return Self { tx: None, now_ms };
         }
         let (tx, rx) = channel();
         let shared = Arc::clone(&now_ms);
-        std::thread::spawn(move || run(&rx, &shared, dump.as_deref(), &stats));
+        std::thread::spawn(move || run(&rx, &shared, dump.as_deref(), &stats, output_factory));
         Self {
             tx: Some(tx),
             now_ms,
@@ -230,7 +237,7 @@ struct ActiveStream {
     /// `-1` until the clock is usable.
     now_ms: Arc<AtomicI64>,
     /// Keeps the device stream alive; dropped with the stream state.
-    _stream: Option<PlaybackStream>,
+    _out: Option<Box<dyn AudioOutput>>,
     /// Lab aid: every decoded frame is appended here as raw s16le PCM.
     dump: Option<std::io::BufWriter<std::fs::File>>,
     /// Scratch PCM buffer for one decoded frame (interleaved).
@@ -258,6 +265,7 @@ impl ActiveStream {
         now_ms: Arc<AtomicI64>,
         dump_path: Option<&std::path::Path>,
         stats: Arc<crate::stats::SessionStats>,
+        output_factory: Option<&AudioOutputFactory>,
     ) -> Option<Self> {
         let Some(codec) = AudioCodecType::from_wire_id(spec.codec) else {
             warn!(codec = spec.codec, "unknown audio codec id; stream dropped");
@@ -279,13 +287,13 @@ impl ActiveStream {
                 return None;
             }
         };
-        let playback_stream = start_playback(spec.sample_rate, spec.channels);
-        let playback = playback_stream.as_ref().map(|p| Arc::clone(&p.buffer));
+        let output = output_factory.and_then(|f| f(spec.sample_rate, spec.channels));
+        let playback = output.as_ref().map(|o| o.buffer());
         // Resample at the pump when the device runs at another rate; the
         // buffer and the clock map then work in device-rate samples.
-        let device_rate = playback_stream
+        let device_rate = output
             .as_ref()
-            .map_or(spec.sample_rate, |p| p.sample_rate);
+            .map_or(spec.sample_rate, |o| o.sample_rate());
         let resampler = (device_rate != spec.sample_rate)
             .then(|| LinearResampler::new(spec.sample_rate, device_rate, spec.channels));
         let dump = dump_path.and_then(|path| match std::fs::File::create(path) {
@@ -318,7 +326,7 @@ impl ActiveStream {
             clock_map,
             last_frame_ts: None,
             now_ms,
-            _stream: playback_stream,
+            _out: output,
             dump,
             pcm: vec![0i16; preset.frame_samples() * usize::from(spec.channels)],
             frame_ms: u32::from(spec.frame_ms),
@@ -489,25 +497,27 @@ impl ActiveStream {
 /// Audio thread main loop: applies jobs and ticks the active stream once
 /// per frame duration (absolute pacing, like the server's audio thread).
 /// Publishes the audio playback cursor (capture-clock ms) to `now_ms`.
+#[allow(clippy::needless_pass_by_value)] // owned: moved into the pump thread
 fn run(
     rx: &Receiver<AudioJob>,
     now_ms: &Arc<AtomicI64>,
     dump: Option<&std::path::Path>,
     stats: &Arc<crate::stats::SessionStats>,
+    output_factory: Option<AudioOutputFactory>,
 ) {
     let mut stream: Option<ActiveStream> = None;
     loop {
         let Some(st) = &mut stream else {
             // Nothing configured: block until the first job arrives.
             match rx.recv() {
-                Ok(job) => apply(&mut stream, job, now_ms, dump, stats),
+                Ok(job) => apply(&mut stream, job, now_ms, dump, stats, output_factory.as_ref()),
                 Err(_) => return, // client shutting down
             }
             continue;
         };
         let timeout = st.next_tick.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
-            Ok(job) => apply(&mut stream, job, now_ms, dump, stats),
+            Ok(job) => apply(&mut stream, job, now_ms, dump, stats, output_factory.as_ref()),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -527,10 +537,11 @@ fn apply(
     now_ms: &Arc<AtomicI64>,
     dump: Option<&std::path::Path>,
     stats: &Arc<crate::stats::SessionStats>,
+    output_factory: Option<&AudioOutputFactory>,
 ) {
     match job {
         AudioJob::Config(spec) => {
-            *stream = ActiveStream::new(&spec, Arc::clone(now_ms), dump, Arc::clone(stats));
+            *stream = ActiveStream::new(&spec, Arc::clone(now_ms), dump, Arc::clone(stats), output_factory);
         }
         AudioJob::Packet(payload) => {
             if let Some(st) = stream {
@@ -546,7 +557,7 @@ fn apply(
 mod tests {
     use super::*;
     #[cfg(feature = "audio")]
-    use channels::audio::output::PlaybackBuffer;
+    use codec::audio_dsp::PlaybackBuffer;
 
     #[test]
     fn clock_staleness_tracks_decode_activity() {
@@ -631,6 +642,7 @@ mod tests {
             Arc::clone(&now_ms),
             None,
             Arc::new(crate::stats::SessionStats::default()),
+            None,
         )
         .unwrap();
         // Headless CI has no output device; attach a buffer manually to
@@ -675,7 +687,7 @@ mod tests {
     /// packets and configs without decoding — the headless fallback.
     #[test]
     fn disabled_client_swallows_everything() {
-        let mut client = AudioClient::new(false, None, Arc::new(crate::stats::SessionStats::default()));
+        let mut client = AudioClient::new(false, None, Arc::new(crate::stats::SessionStats::default()), None);
         client.configure(AudioSpec {
             codec: AudioCodecType::Opus.wire_id(),
             sample_rate: 48_000,
@@ -721,7 +733,7 @@ mod tests {
                     }
                     continue;
                 }
-                apply(&mut stream, job, &now_ms, None, &stats);
+                apply(&mut stream, job, &now_ms, None, &stats, None);
             }
             (0, 0)
         });
@@ -780,7 +792,7 @@ mod tests {
                     }
                     continue;
                 }
-                apply(&mut stream, job, &now_ms, None, &stats);
+                apply(&mut stream, job, &now_ms, None, &stats, None);
             }
             (0, 0)
         });

@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::smartcard::consts::{SCARD_PROTOCOL_T0, SCARD_PROTOCOL_T1};
+use super::consts::{SCARD_PROTOCOL_T0, SCARD_PROTOCOL_T1};
 
 // ---------------------------------------------------------------------------
 // Handle generation

@@ -1,6 +1,6 @@
 [package]
 name = "client"
-description = "Client side of the protocol: session, decoding and the event/command API (no GUI)"
+description = "Client side of the protocol: session, decoding, integration contracts and the event/command API (no GUI)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,19 +10,14 @@ authors.workspace = true
 workspace = true
 
 [features]
-default = ["smartcard"]
+default = []
 vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
 jpeg = ["codec/codec-jpeg"]
-audio = ["codec/codec-opus", "channels/audio"]
-# Build the real PC/SC backend into the smartcard dispatcher (§17). The
-# dispatcher itself always compiles: without this feature (or without a
-# PC/SC subsystem at runtime) requests are answered SCARD_E_NO_SERVICE.
-smartcard = ["channels/smartcard"]
+audio = ["codec/codec-opus"]
 
 [dependencies]
 protocol.workspace = true
-channels.workspace = true
 transport.workspace = true
 crypt.workspace = true
 codec.workspace = true

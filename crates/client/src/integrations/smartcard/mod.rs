@@ -3,8 +3,8 @@
 // All rights reserved.
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-//! The [`SmartcardIntegration`] backend trait: what a client implements
-//! against a real PC/SC subsystem (pcsc-lite / WinSCard).
+//! The [`SmartcardIntegration`] backend trait: the contract a consumer
+//! implements against a real PC/SC subsystem (pcsc-lite / WinSCard).
 //!
 //! Ported from freerdp-integration (`rdp/src/integrations/smartcard/` and
 //! `rdp/src/addins/smartcard/transactions.rs`), dropping everything tied to
@@ -12,12 +12,13 @@
 //! caches): phase 1 is physical card relay only. Synchronous and pure: no
 //! networking, no async — the channel layer owns threading.
 
-use std::time::Duration;
+mod consts;
+mod types;
 
-use super::types::{
-    ConnectResult, ReaderStateIn, ReaderStateOut, ScardContext, ScardHandle, ScardIORequest,
-    ScardStatus, TransmitResult,
-};
+pub use consts::*;
+pub use types::*;
+
+use std::time::Duration;
 
 /// Backend-agnostic trait for smartcard access.
 ///
