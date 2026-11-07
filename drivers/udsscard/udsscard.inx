@@ -12,9 +12,11 @@ DriverVer   = ; set by stampinf at packaging time
 PnpLockdown = 1
 
 [Manufacturer]
-%ManufacturerName% = Standard,NT$ARCH$
+; TargetOSVersion decoration required by infverif: DIRID 13 (CopyFiles and
+; the UMDF ServiceBinary) installs on 10.0.17134+ only.
+%ManufacturerName% = Standard,NT$ARCH$.10.0...17134
 
-[Standard.NT$ARCH$]
+[Standard.NT$ARCH$.10.0...17134]
 %DeviceName% = udsscard, Root\udsscard
 
 [SourceDisksFiles]

@@ -51,6 +51,48 @@ RUN git clone https://github.com/microsoft/vcpkg $env:VCPKG_ROOT ; \
     & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" ; \
     C:\vcpkg\vcpkg install libvpx:x64-windows-static
 
+# WDK 26100 for the drivers/ workspace (udsaudio WDM/PortCls, udsscard UMDF):
+# kernel-mode headers+libs (km/, portcls.lib), WDF headers/stubs and the
+# driver build tools (stampinf, inf2cat, infverif), none of which ship with
+# the VS-bundled SDK. The official wdksetup.exe is a Burn web bootstrapper
+# that is unreliable inside containers, so the official NuGet package
+# (Microsoft.Windows.WDK.x64, same "Windows Kits\10" layout) is merged over
+# the installed SDK tree. The version MUST match the highest SDK present
+# (10.0.26100.0): wdk-build only accepts km/ content from the newest kit
+# (doc/plan/driver-audio-windows.md, trap M0). robocopy exit codes 0-7 are
+# success, so the code is captured before cleanup and only real errors fail.
+RUN Invoke-WebRequest -Uri 'https://api.nuget.org/v3-flatcontainer/microsoft.windows.wdk.x64/10.0.26100.6584/microsoft.windows.wdk.x64.10.0.26100.6584.nupkg' -OutFile C:\wdk-nuget.zip ; \
+    Expand-Archive C:\wdk-nuget.zip C:\wdk-nuget ; \
+    robocopy C:\wdk-nuget\c 'C:\Program Files (x86)\Windows Kits\10' /E /NFL /NDL /NJH /NJS /NP ; \
+    $rc=$LASTEXITCODE ; \
+    Remove-Item C:\wdk-nuget.zip -Force ; \
+    Remove-Item C:\wdk-nuget -Recurse -Force ; \
+    if ($rc -gt 7) { exit $rc } ; \
+    if (-not (Test-Path 'C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\km\portcls.h')) { exit 1 }
+
+# LLVM 17.0.6 libclang side-by-side (C:\LLVM17) for the driver builds ONLY:
+# the WDK bindings (wdk-sys + our bindgen pass over portcls.h) generate wrong
+# struct layouts with the LLVM 22 that choco installs (const size asserts
+# fail at compile time); LLVM 17 is the validated bindgen toolchain for
+# windows-drivers-rs (doc/plan/driver-audio-windows.md). Only libclang.dll is
+# needed (bindgen loads it directly). The official NSIS installer hangs in
+# containers, so 7-Zip (which reads NSIS) extracts just that DLL. curl.exe
+# because Invoke-WebRequest is pathologically slow in container builds.
+# The main crate build keeps using the newer LLVM from PATH;
+# build-drivers.ps1 points LIBCLANG_PATH here per-process.
+RUN choco install -y 7zip ; \
+    curl.exe -L -sS -o C:\llvm17.exe 'https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/LLVM-17.0.6-win64.exe' ; \
+    & 'C:\Program Files\7-Zip\7z.exe' x C:\llvm17.exe -oC:\llvm17-tmp 'bin\libclang.dll' -y | Out-Null ; \
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } ; \
+    New-Item -ItemType Directory -Force C:\LLVM17\bin | Out-Null ; \
+    Copy-Item C:\llvm17-tmp\bin\libclang.dll C:\LLVM17\bin\ ; \
+    Remove-Item C:\llvm17.exe -Force ; \
+    Remove-Item C:\llvm17-tmp -Recurse -Force
+
+# cargo-wdk: `cargo wdk build` compiles, packages (stampinf/inf2cat/infverif)
+# and test-signs drivers in one step.
+RUN cargo install cargo-wdk --locked
+
 # Build outputs must not mix with the host's target/ (Linux): a fixed
 # in-image dir that build.ps1 bind-mounts back out as target-windows/.
 # (Forward slashes: the Dockerfile parser eats the backslash in c:\out.)
