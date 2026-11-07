@@ -7,7 +7,7 @@
 //! client reconnects with `Command::Recover` and both ends resume from the
 //! last known sequence numbers — nonce reuse is never allowed.
 
-use crypt::consts;
+use protocol::crypt::consts;
 use protocol::{Command, channel};
 use transport::{
     Connector, DirectConnector, DirectListener, EncryptedStream, ReliableTransport, Target,

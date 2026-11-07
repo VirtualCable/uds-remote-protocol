@@ -20,7 +20,7 @@ fn element(size: usize) -> Vec<u8> {
 fn fragment_payload_respects_mtu_budget() {
     // The fragment payload plus the header must fit the datagram plaintext
     // budget (channel display over UDP, §6.2).
-    assert!(fragment_payload_max() + HEADER_SIZE <= crypt::consts::MAX_DATAGRAM_PAYLOAD);
+    assert!(fragment_payload_max() + HEADER_SIZE <= protocol::crypt::consts::MAX_DATAGRAM_PAYLOAD);
 }
 
 #[test]

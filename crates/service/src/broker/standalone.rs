@@ -9,8 +9,8 @@
 
 use anyhow::{Result, bail};
 
-use crate::{ConnectionProvider, SessionGrant};
-use crate::payload::{ChannelPolicy, DisplayPolicy, SessionCredentials, VideoPolicy};
+use super::{ConnectionProvider, SessionGrant};
+use super::payload::{ChannelPolicy, DisplayPolicy, SessionCredentials, VideoPolicy};
 
 /// Standalone (broker-less) provider: one fixed ticket, fixed key.
 pub struct StandaloneProvider {

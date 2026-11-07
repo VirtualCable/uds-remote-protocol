@@ -10,7 +10,7 @@
 
 pub use client;
 pub use codec;
-pub use crypt;
+pub use protocol::crypt;
 pub use protocol as core;
 pub use server;
 pub use transport;

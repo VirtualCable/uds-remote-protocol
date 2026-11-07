@@ -29,9 +29,9 @@ use udscredprov::logic::Credentials;
 #[derive(Clone)]
 pub struct StandaloneRuntime {
     /// Shared session key (PSK) for the crypto layer.
-    pub key: [u8; service_proto::KEY_LEN],
+    pub key: [u8; protocol::service_ipc::KEY_LEN],
     /// Fixed ticket clients must present (wire form).
-    pub ticket: [u8; service_proto::TICKET_LEN],
+    pub ticket: [u8; protocol::service_ipc::TICKET_LEN],
     /// Listen address for the session agent.
     pub bind: String,
     /// Video codec preset name for the session agent.
@@ -80,7 +80,7 @@ pub enum Runtime {
 /// Broker-backed runtime: the provider plus the public listen address.
 pub struct PqRuntime {
     /// Validates tickets against the broker and fetches session grants.
-    pub provider: Arc<broker::PqProvider>,
+    pub provider: Arc<crate::broker::PqProvider>,
     /// Listen address for the validating listener.
     pub bind: String,
 }
@@ -118,7 +118,7 @@ fn load_pq(path: &std::path::Path, config: &server_config::ServerConfig) -> Opti
             return None;
         }
     };
-    let provider = match broker::PqProvider::new(&broker_config.url, &broker_config.token, broker_config.verify_ssl) {
+    let provider = match crate::broker::PqProvider::new(&broker_config.url, &broker_config.token, broker_config.verify_ssl) {
         Ok(provider) => provider,
         Err(err) => {
             warn!(error = %format!("{err:#}"), path = %path.display(), "cannot build the broker provider; ignoring the config");
@@ -141,7 +141,7 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
             return None;
         }
     };
-    let key: [u8; service_proto::KEY_LEN] = match protocol::hex::decode(&config.shared_key) {
+    let key: [u8; protocol::service_ipc::KEY_LEN] = match protocol::hex::decode(&config.shared_key) {
         Ok(key) => key,
         Err(err) => {
             warn!(error = %format!("{err:#}"), path = %path.display(), "bad shared_key in the server config; ignoring it");

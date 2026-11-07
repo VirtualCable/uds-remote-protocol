@@ -21,7 +21,7 @@ use crate::error::Result;
 pub struct Target {
     addr: SocketAddr,
     ticket: [u8; protocol::TICKET_LENGTH],
-    key: [u8; crypt::consts::KEY_LENGTH],
+    key: [u8; protocol::crypt::consts::KEY_LENGTH],
 }
 
 impl Target {
@@ -30,7 +30,7 @@ impl Target {
     pub fn new(
         addr: SocketAddr,
         ticket: [u8; protocol::TICKET_LENGTH],
-        key: [u8; crypt::consts::KEY_LENGTH],
+        key: [u8; protocol::crypt::consts::KEY_LENGTH],
     ) -> Self {
         Self { addr, ticket, key }
     }
@@ -49,7 +49,7 @@ impl Target {
 
     /// Pre-shared key.
     #[must_use]
-    pub fn key(&self) -> &[u8; crypt::consts::KEY_LENGTH] {
+    pub fn key(&self) -> &[u8; protocol::crypt::consts::KEY_LENGTH] {
         &self.key
     }
 }

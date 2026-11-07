@@ -19,7 +19,6 @@ audio = ["codec/codec-opus"]
 [dependencies]
 protocol.workspace = true
 transport.workspace = true
-crypt.workspace = true
 codec.workspace = true
 anyhow.workspace = true
 tokio.workspace = true

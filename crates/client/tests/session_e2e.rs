@@ -82,7 +82,7 @@ async fn serve_udp(listener: DirectListener, got_input: flume::Sender<()>) -> Re
     let (pending, token) = udp_offer(&mut stream, "127.0.0.1:0", &TICKET, &KEY).await?;
     let clock_start = Instant::now();
     let (udp, first) = tokio::time::timeout(Duration::from_secs(3), pending.wait_first()).await??;
-    let keys = crypt::derive_datagram_keys(&TICKET, &KEY)?;
+    let keys = protocol::crypt::derive_datagram_keys(&TICKET, &KEY)?;
     let mut dgram = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
 
     // Answer the detection probe(s) that opened the leg (§4.2).

@@ -9,7 +9,7 @@
 //! tunnel: it applies the Hello handshake and the encrypted framing of `crypt`
 //! (record `|seq 8B|len 2B|encrypted channel_id|payload|tag|`, see design doc §6).
 
-use crypt::{SessionKeys, StreamCrypt, StreamDecrypt, consts, derive_session_keys};
+use protocol::crypt::{SessionKeys, StreamCrypt, StreamDecrypt, consts, derive_session_keys};
 use protocol::{ChannelId, Command, Hello, PROTOCOL_VERSION, TICKET_LENGTH};
 
 use crate::error::{Result, TransportError};
@@ -108,7 +108,7 @@ impl<T: ReliableTransport> EncryptedStream<T> {
         // that was already proven).
         let mut nonce = [0u8; 16];
         stream.read_control_exact(&mut nonce).await?;
-        let proof = crypt::possession_proof(&nonce, &keys);
+        let proof = protocol::crypt::possession_proof(&nonce, &keys);
         stream.send(protocol::channel::CONTROL, &proof).await?;
         Ok(stream)
     }
@@ -253,9 +253,9 @@ impl<T: ReliableTransport> EncryptedStream<T> {
             getrandom::fill(&mut nonce)
                 .map_err(|e| TransportError::UnexpectedMessage(format!("rng: {e}")))?;
             stream.send(protocol::channel::CONTROL, &nonce).await?;
-            let mut proof = [0u8; crypt::PROOF_LENGTH];
+            let mut proof = [0u8; protocol::crypt::PROOF_LENGTH];
             stream.read_control_exact(&mut proof).await?;
-            if !constant_time_eq(&proof, &crypt::possession_proof(&nonce, &keys)) {
+            if !constant_time_eq(&proof, &protocol::crypt::possession_proof(&nonce, &keys)) {
                 return Err(TransportError::ProofFailed);
             }
         }

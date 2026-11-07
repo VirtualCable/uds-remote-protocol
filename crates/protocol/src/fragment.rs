@@ -29,7 +29,7 @@ use crate::error::ProtocolError;
 /// Fragment header size in bytes.
 pub const HEADER_SIZE: usize = 12;
 
-/// Hard cap on datagram plaintext (must match `crypt::MAX_DATAGRAM_PAYLOAD`
+/// Hard cap on datagram plaintext (must match `protocol::crypt::consts::MAX_DATAGRAM_PAYLOAD`
 /// — kept as a literal so `protocol` does not depend on `crypt`).
 const MAX_DATAGRAM_PLAINTEXT: usize = 1180;
 

@@ -97,7 +97,7 @@ pub struct ClientValidated {
     /// Service runtime (standalone or broker mode).
     pub runtime: Arc<crate::standalone::Runtime>,
     /// Broker grant (pq mode only).
-    pub grant: Option<broker::SessionGrant>,
+    pub grant: Option<crate::broker::SessionGrant>,
     /// Session autologon credentials, when configured.
     pub creds: Option<Credentials>,
     /// Console-conflict configuration for this session.
@@ -123,7 +123,7 @@ enum Phase {
 struct Pending {
     stream: EncryptedStream<TcpTransport>,
     runtime: Arc<crate::standalone::Runtime>,
-    grant: Option<broker::SessionGrant>,
+    grant: Option<crate::broker::SessionGrant>,
     creds: Option<Credentials>,
     conflict: ConflictConfig,
     phase: Phase,
@@ -141,7 +141,7 @@ enum Mode {
     /// No listener: the manager keeps one agent alive in the console.
     Legacy {
         /// Fixed agent configuration for this service run.
-        config: service_proto::AgentConfig,
+        config: protocol::service_ipc::AgentConfig,
         /// The proactive agent, if alive.
         agent: Option<Agent>,
         /// Respawns so far (crash-loop cap).
@@ -205,13 +205,13 @@ pub fn run(
 
 /// Builds the fixed agent configuration of legacy mode (random key +
 /// ticket per service run, handed over through the agent's stdin pipe).
-fn legacy_config() -> service_proto::AgentConfig {
+fn legacy_config() -> protocol::service_ipc::AgentConfig {
     let mut key = [0u8; 32];
     let mut ticket = [0u8; 48];
     if let Err(err) = getrandom::fill(&mut key).and_then(|()| getrandom::fill(&mut ticket)) {
         error!(error = %format!("{err:#}"), "cannot generate session credentials");
     }
-    service_proto::AgentConfig {
+    protocol::service_ipc::AgentConfig {
         key,
         ticket,
         bind: "0.0.0.0:14433".to_owned(),

@@ -24,11 +24,11 @@
 use aes_gcm::aead::{AeadInOut, KeyInit, consts::U12};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
-use crate::consts::{
+use crate::crypt::consts::{
     CHANNEL_ID_SIZE, DATAGRAM_HEADER_SIZE, KEY_LENGTH, MAX_DATAGRAM_PAYLOAD, TAG_LENGTH,
     TOKEN_LENGTH,
 };
-use crate::error::CryptError;
+use crate::crypt::error::CryptError;
 
 fn nonce_from_seq(seq: u64) -> Nonce<U12> {
     let mut arr = [0u8; 12];

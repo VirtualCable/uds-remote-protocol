@@ -123,11 +123,11 @@ impl Agent {
     /// the command line stays free of secrets, which any process in the
     /// session could otherwise read (M3). Credentials are also logged so the
     /// lab client can connect.
-    pub(crate) fn spawn_in_console_session(config: &service_proto::AgentConfig) -> Result<Option<Self>> {
+    pub(crate) fn spawn_in_console_session(config: &protocol::service_ipc::AgentConfig) -> Result<Option<Self>> {
         let Some((agent, pipe_write)) = Self::spawn_process_in_console()? else {
             return Ok(None);
         };
-        write_all_and_close(&pipe_write, &service_proto::encode_agent_config(config))?;
+        write_all_and_close(&pipe_write, &protocol::service_ipc::encode_agent_config(config))?;
         info!(session_id = agent.session_id, pid = agent.pid, "session agent spawned");
         info!(key = protocol::hex::encode(&config.key), ticket = protocol::hex::encode(&config.ticket), "lab credentials (also piped to the agent)");
         Ok(Some(agent))
@@ -243,8 +243,8 @@ impl Agent {
 
     /// Second half of the handoff spawn: sends the config frame (with the
     /// handoff block already filled in) down the agent's stdin pipe.
-    pub(crate) fn write_config(pipe_write: OwnedHandle, config: &service_proto::AgentConfig) -> Result<()> {
-        write_all_and_close(&pipe_write, &service_proto::encode_agent_config(config))
+    pub(crate) fn write_config(pipe_write: OwnedHandle, config: &protocol::service_ipc::AgentConfig) -> Result<()> {
+        write_all_and_close(&pipe_write, &protocol::service_ipc::encode_agent_config(config))
     }
 
     /// Whether the agent process is still alive.

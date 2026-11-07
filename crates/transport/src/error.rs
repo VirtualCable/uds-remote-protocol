@@ -18,7 +18,7 @@ pub enum TransportError {
     Protocol(#[from] ProtocolError),
     /// Cryptographic error (decryption, anti-replay, etc.).
     #[error("encryption error: {0}")]
-    Crypt(#[from] crypt::CryptError),
+    Crypt(#[from] protocol::crypt::CryptError),
     /// The payload exceeds the maximum size of a record.
     #[error("payload too large: {size} bytes (max {max})")]
     TooLarge {

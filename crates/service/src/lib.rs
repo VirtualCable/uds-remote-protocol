@@ -8,6 +8,7 @@
 //! All real functionality is Windows-only; on other platforms this crate is
 //! an empty shell so the workspace still builds and lints cleanly.
 
+pub mod broker;
 #[cfg(windows)]
 mod agent;
 #[cfg(windows)]

@@ -27,8 +27,8 @@ fn test_ticket() -> [u8; TICKET_LENGTH] {
 }
 
 /// Fixed test pre-shared key.
-fn test_key() -> [u8; crypt::consts::KEY_LENGTH] {
-    [0x07; crypt::consts::KEY_LENGTH]
+fn test_key() -> [u8; protocol::crypt::consts::KEY_LENGTH] {
+    [0x07; protocol::crypt::consts::KEY_LENGTH]
 }
 
 /// [`ReliableTransport`] over a tokio in-memory duplex.
@@ -61,7 +61,7 @@ fn stream_pair() -> (
     EncryptedStream<DuplexTransport>,
 ) {
     let (a, b) = tokio::io::duplex(4096);
-    let keys = crypt::derive_session_keys(&test_ticket(), &test_key()).expect("keys");
+    let keys = protocol::crypt::derive_session_keys(&test_ticket(), &test_key()).expect("keys");
     let client = EncryptedStream::new(DuplexTransport(a), &keys.c2s, &keys.s2c);
     let server = EncryptedStream::new(DuplexTransport(b), &keys.s2c, &keys.c2s);
     (client, server)
@@ -72,7 +72,7 @@ async fn recv_survives_select_cancellation_storm() {
     let (mut client, mut server) = stream_pair();
 
     // Patterned max-size payload (detects both loss and reordering).
-    let payload: Vec<u8> = (0..crypt::consts::MAX_PLAINTEXT)
+    let payload: Vec<u8> = (0..protocol::crypt::consts::MAX_PLAINTEXT)
         .map(|i| u8::try_from(i % 251).expect("fits"))
         .collect();
 
@@ -88,7 +88,7 @@ async fn recv_survives_select_cancellation_storm() {
     // Cancel the receive future every millisecond: with a 4 KiB duplex the
     // body reads genuinely pend, so the timer constantly drops the future
     // mid-record. Each retry must resume, never restart.
-    let mut buf = vec![0u8; crypt::consts::MAX_PLAINTEXT + 64];
+    let mut buf = vec![0u8; protocol::crypt::consts::MAX_PLAINTEXT + 64];
     for round in 0..3 {
         let (ch, n) = loop {
             tokio::select! {

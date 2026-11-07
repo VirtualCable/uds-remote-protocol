@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
-use broker::ConnectionProvider as _;
+use crate::broker::ConnectionProvider as _;
 use tracing::{error, info, warn};
 use transport::{EncryptedStream, TcpTransport};
 use udscredprov::logic::Credentials;
@@ -186,7 +186,7 @@ async fn handle_connection(
     }
     // Broker mode resolves the PSK per ticket: the grant (key, credentials,
     // session parameters) lands in `grant_slot` during the handshake.
-    let grant_slot: Arc<Mutex<Option<broker::SessionGrant>>> = Arc::new(Mutex::new(None));
+    let grant_slot: Arc<Mutex<Option<crate::broker::SessionGrant>>> = Arc::new(Mutex::new(None));
     let peer_ip = peer.ip().to_string();
     let stream = match &**runtime {
         crate::standalone::Runtime::Standalone(standalone) => {
@@ -265,7 +265,7 @@ async fn handle_connection(
 pub(crate) async fn complete_session(
     mut stream: EncryptedStream<TcpTransport>,
     runtime: &crate::standalone::Runtime,
-    grant: Option<broker::SessionGrant>,
+    grant: Option<crate::broker::SessionGrant>,
     slot: &Arc<AgentSlot>,
     creds_slot: &Arc<Mutex<Option<Credentials>>>,
 ) -> Result<()> {
@@ -281,7 +281,7 @@ pub(crate) async fn complete_session(
     let socket_info = duplicate_socket_into(&socket, agent.pid)?;
     let video = grant.as_ref().and_then(|grant| grant.video.clone());
     let config = match runtime {
-        crate::standalone::Runtime::Standalone(standalone) => service_proto::AgentConfig {
+        crate::standalone::Runtime::Standalone(standalone) => protocol::service_ipc::AgentConfig {
             key: standalone.key,
             ticket: standalone.ticket,
             bind: standalone.bind.clone(),
@@ -295,7 +295,7 @@ pub(crate) async fn complete_session(
             fixed_resolution: standalone.fixed_resolution.unwrap_or((0, 0)),
             allow_lock: standalone.allow_lock,
             wallpaper_off: standalone.wallpaper_off,
-            handoff: Some(service_proto::HandoffInfo {
+            handoff: Some(protocol::service_ipc::HandoffInfo {
                 send_seq: seqs.send,
                 recv_seq: seqs.recv,
                 hello: hello.encode().to_vec(),
@@ -304,7 +304,7 @@ pub(crate) async fn complete_session(
         },
         crate::standalone::Runtime::Pq(pq) => {
             let key = grant.as_ref().expect("pq mode grants a session").key;
-            service_proto::AgentConfig {
+            protocol::service_ipc::AgentConfig {
                 key,
                 ticket: hello.ticket,
                 bind: pq.bind.clone(),
@@ -335,7 +335,7 @@ pub(crate) async fn complete_session(
                 // whether the client may lock the remote console.
                 allow_lock: grant.as_ref().is_some_and(|grant| grant.channels.lock),
                 wallpaper_off: grant.as_ref().is_some_and(|grant| grant.wallpaper_off),
-                handoff: Some(service_proto::HandoffInfo {
+                handoff: Some(protocol::service_ipc::HandoffInfo {
                     send_seq: seqs.send,
                     recv_seq: seqs.recv,
                     hello: hello.encode().to_vec(),
@@ -364,7 +364,7 @@ pub(crate) async fn complete_session(
                     break;
                 }
             }
-            let stats = broker::SessionStats {
+            let stats = crate::broker::SessionStats {
                 elapsed: started.elapsed(),
                 bytes_sent: 0,
                 bytes_received: 0,
@@ -388,7 +388,7 @@ pub(crate) fn mode_name(runtime: &crate::standalone::Runtime) -> &'static str {
 /// connection mode: standalone file settings, or the broker ticket payload.
 fn conflict_config(
     runtime: &crate::standalone::Runtime,
-    grant: Option<&broker::SessionGrant>,
+    grant: Option<&crate::broker::SessionGrant>,
 ) -> crate::console::ConflictConfig {
     match runtime {
         crate::standalone::Runtime::Standalone(standalone) => crate::console::ConflictConfig {

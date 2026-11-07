@@ -13,6 +13,8 @@ workspace = true
 serde.workspace = true
 postcard.workspace = true
 thiserror.workspace = true
+aes-gcm.workspace = true
+hkdf.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
-crypt.workspace = true

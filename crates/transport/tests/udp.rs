@@ -5,7 +5,7 @@
 
 //! Encrypted datagram integration tests over real UDP loopback (§6.2).
 
-use crypt::consts;
+use protocol::crypt::consts;
 use protocol::channel;
 use transport::{EncryptedDatagram, TransportError, UdpTransport};
 

@@ -8,8 +8,8 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-use crate::consts::KEY_LENGTH;
-use crate::error::CryptError;
+use crate::crypt::consts::KEY_LENGTH;
+use crate::crypt::error::CryptError;
 
 /// Domain separation label for the TCP stream.
 pub const STREAM_INFO: &[u8] = b"crypt";
@@ -47,7 +47,7 @@ impl std::fmt::Debug for SessionKeys {
 /// Derives the session keys for the TCP stream:
 /// `HKDF-SHA256(salt = ticket, ikm = shared_secret, info = "crypt")`.
 pub fn derive_session_keys(
-    ticket: &[u8; crate::consts::TICKET_LENGTH],
+    ticket: &[u8; crate::crypt::consts::TICKET_LENGTH],
     shared_secret: &[u8; KEY_LENGTH],
 ) -> Result<SessionKeys, CryptError> {
     let hk = Hkdf::<Sha256>::new(Some(ticket), shared_secret);
@@ -56,7 +56,7 @@ pub fn derive_session_keys(
 
 /// Derives the session keys for UDP datagrams (separate domain).
 pub fn derive_datagram_keys(
-    ticket: &[u8; crate::consts::TICKET_LENGTH],
+    ticket: &[u8; crate::crypt::consts::TICKET_LENGTH],
     shared_secret: &[u8; KEY_LENGTH],
 ) -> Result<SessionKeys, CryptError> {
     let hk = Hkdf::<Sha256>::new(Some(ticket), shared_secret);
@@ -82,11 +82,11 @@ pub fn ratchet_key(key: &[u8; KEY_LENGTH]) -> Result<[u8; KEY_LENGTH], CryptErro
 /// still carries it explicitly for flexibility, e.g. a future tunnel leg
 /// where the token is assigned by the relay instead).
 pub fn derive_udp_token(
-    ticket: &[u8; crate::consts::TICKET_LENGTH],
+    ticket: &[u8; crate::crypt::consts::TICKET_LENGTH],
     shared_secret: &[u8; KEY_LENGTH],
-) -> Result<[u8; crate::consts::TOKEN_LENGTH], CryptError> {
+) -> Result<[u8; crate::crypt::consts::TOKEN_LENGTH], CryptError> {
     let hk = Hkdf::<Sha256>::new(Some(ticket), shared_secret);
-    let mut token = [0u8; crate::consts::TOKEN_LENGTH];
+    let mut token = [0u8; crate::crypt::consts::TOKEN_LENGTH];
     hk.expand(b"crypt-udp-token", &mut token)
         .map_err(|_| CryptError::KeyDerivation)?;
     Ok(token)

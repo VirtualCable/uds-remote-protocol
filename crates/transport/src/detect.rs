@@ -10,7 +10,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use crypt::{consts, derive_datagram_keys, derive_udp_token};
+use protocol::crypt::{consts, derive_datagram_keys, derive_udp_token};
 use protocol::{ControlMessage, Probe, ProbeAck, channel, compute_rtt};
 
 use crate::datagram::EncryptedDatagram;

@@ -18,8 +18,8 @@ fn test_ticket() -> [u8; TICKET_LENGTH] {
 }
 
 /// Fixed test pre-shared key.
-fn test_key() -> [u8; crypt::consts::KEY_LENGTH] {
-    [0x07; crypt::consts::KEY_LENGTH]
+fn test_key() -> [u8; protocol::crypt::consts::KEY_LENGTH] {
+    [0x07; protocol::crypt::consts::KEY_LENGTH]
 }
 
 /// Connects a client with a completed handshake against `addr`.
@@ -167,7 +167,7 @@ async fn payload_above_max_is_rejected() {
     });
 
     let mut client = connect(addr).await;
-    let too_big = vec![0u8; crypt::consts::MAX_PLAINTEXT + 1];
+    let too_big = vec![0u8; protocol::crypt::consts::MAX_PLAINTEXT + 1];
     let result = client.send(channel::CONTROL, &too_big).await;
     assert!(matches!(result, Err(TransportError::TooLarge { .. })));
 
@@ -259,7 +259,7 @@ async fn server_rejects_a_wrong_psk_at_the_possession_proof() {
     // Hello) but not the PSK: with wrong session keys it cannot even read
     // the nonce, so the handshake fails (decrypt error, closed connection
     // or ProofFailed) — what matters is that it never succeeds.
-    let wrong_key = [0x99; crypt::consts::KEY_LENGTH];
+    let wrong_key = [0x99; protocol::crypt::consts::KEY_LENGTH];
     let connector = DirectConnector::new();
     let (raw, _) = connector
         .connect(&Target::new(addr, test_ticket(), wrong_key))
@@ -306,7 +306,7 @@ async fn handoff_roundtrip_resumes_the_server_side_stream() {
 
     // The "session agent": rebuilds the server side from the handoff state
     // and continues the conversation transparently.
-    let keys = crypt::derive_session_keys(&test_ticket(), &test_key()).unwrap();
+    let keys = protocol::crypt::derive_session_keys(&test_ticket(), &test_key()).unwrap();
     let mut agent = EncryptedStream::from_handoff(inner, &keys, hello, seqs);
 
     let mut buf = [0u8; 64];

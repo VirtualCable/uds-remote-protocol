@@ -344,27 +344,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "broker"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "async-trait",
- "base64 0.23.1",
- "hkdf",
- "libcrux-ml-kem",
- "protocol",
- "rand",
- "reqwest",
- "serde",
- "serde_json",
- "server-config",
- "sha2",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -528,7 +507,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "codec",
- "crypt",
  "flume 0.12.0",
  "protocol",
  "tempfile",
@@ -923,16 +901,6 @@ name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
-
-[[package]]
-name = "crypt"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "hkdf",
- "sha2",
- "thiserror 2.0.21",
-]
 
 [[package]]
 name = "crypto-common"
@@ -3330,9 +3298,11 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 name = "protocol"
 version = "0.1.0"
 dependencies = [
- "crypt",
+ "aes-gcm",
+ "hkdf",
  "postcard",
  "serde",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -3847,13 +3817,11 @@ dependencies = [
  "async-trait",
  "channels",
  "codec",
- "crypt",
  "getrandom 0.3.4",
  "image",
  "protocol",
  "serde",
  "server-config",
- "service-proto",
  "sha2",
  "tempfile",
  "thiserror 2.0.21",
@@ -3874,7 +3842,6 @@ name = "server-config"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "crypt",
  "getrandom 0.3.4",
  "protocol",
  "serde",
@@ -3886,14 +3853,21 @@ dependencies = [
 name = "service"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
- "broker",
- "crypt",
+ "async-trait",
+ "base64 0.23.1",
  "flume 0.12.0",
  "getrandom 0.3.4",
+ "hkdf",
+ "libcrux-ml-kem",
  "protocol",
+ "rand",
+ "reqwest",
+ "serde",
+ "serde_json",
  "server-config",
- "service-proto",
+ "sha2",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3902,10 +3876,6 @@ dependencies = [
  "widestring",
  "windows 0.62.2",
 ]
-
-[[package]]
-name = "service-proto"
-version = "0.1.0"
 
 [[package]]
 name = "sha2"
@@ -4485,7 +4455,6 @@ name = "transport"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "crypt",
  "getrandom 0.3.4",
  "protocol",
  "socket2",
@@ -4551,7 +4520,6 @@ version = "0.1.0"
 dependencies = [
  "client",
  "codec",
- "crypt",
  "protocol",
  "server",
  "transport",

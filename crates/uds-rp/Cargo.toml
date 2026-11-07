@@ -12,7 +12,6 @@ workspace = true
 [dependencies]
 protocol.workspace = true
 transport.workspace = true
-crypt.workspace = true
 codec.workspace = true
 server.workspace = true
 client.workspace = true

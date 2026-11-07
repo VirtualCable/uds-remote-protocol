@@ -7,7 +7,7 @@
 //! `|token 16B|seq 8B BE|channel_id encrypted|payload|tag 16B|`, AAD = token‖seq,
 //! sliding-window anti-replay and loss estimation from sequence gaps.
 
-use crypt::{CryptError, DatagramCrypt, DatagramDecrypt, consts, derive_datagram_keys};
+use protocol::crypt::{CryptError, DatagramCrypt, DatagramDecrypt, consts, derive_datagram_keys};
 
 const TOKEN: [u8; consts::TOKEN_LENGTH] = [0xA5; consts::TOKEN_LENGTH];
 const TICKET: [u8; consts::TICKET_LENGTH] = [0x11; consts::TICKET_LENGTH];

@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use codec::{AudioPreset, CodecPreset, VideoEncoder as _};
-use crypt::consts;
+use protocol::crypt::consts;
 use protocol::fragment::Fragmenter;
 use protocol::{self, ControlMessage, CursorMessage, Probe, ProbeAck, channel};
 use server::audio::AudioSource;
@@ -117,7 +117,7 @@ struct Args {
     /// Validated-connection handoff from the orchestrator service (§18.32):
     /// when set, the agent does not bind its own TCP listener; it rebuilds
     /// the connected socket and serves exactly one session, then exits.
-    handoff: Option<service_proto::HandoffInfo>,
+    handoff: Option<protocol::service_ipc::HandoffInfo>,
 }
 
 #[allow(clippy::too_many_lines)] // config file + CLI + agent-config frame seeding
@@ -167,7 +167,7 @@ fn parse_args() -> Result<Args> {
             // secrets included — over an anonymous pipe on stdin, so argv
             // stays clean. Read it before any other flag is processed.
             let frame = read_config_frame()?;
-            let config = service_proto::decode_agent_config(&frame)
+            let config = protocol::service_ipc::decode_agent_config(&frame)
                 .context("decoding the agent config frame")?;
             args.key = config.key;
             args.ticket = Some(config.ticket);
@@ -1957,7 +1957,7 @@ async fn serve_stream<T: ReliableTransport>(
     let clock_start = Instant::now();
     let udp = match tokio::time::timeout(Duration::from_secs(3), pending.wait_first()).await {
         Ok(Ok((udp, first))) => {
-            let keys = crypt::derive_datagram_keys(ticket, key)?;
+            let keys = protocol::crypt::derive_datagram_keys(ticket, key)?;
             let mut dgram = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
             answer_probes(&mut dgram, &first, clock_start).await?;
             info!("display leg: UDP");
@@ -3289,7 +3289,7 @@ async fn run() -> Result<()> {
     if let Some(handoff) = args.handoff.take() {
         let stream_tokio = server::handoff::reconstruct_tcp(&handoff.socket_info)
             .context("rebuilding the handed-off socket")?;
-        let keys = crypt::derive_session_keys(&ticket, &args.key)?;
+        let keys = protocol::crypt::derive_session_keys(&ticket, &args.key)?;
         let hello_bytes: &[u8; protocol::Hello::ENCODED_LEN] = handoff
             .hello
             .as_slice()

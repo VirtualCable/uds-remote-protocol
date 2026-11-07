@@ -5,11 +5,14 @@
 
 //! # protocol
 //!
-//! Protocol core: handshake, channel 0 messages, channel definitions and
-//! common error types. **Synchronous and pure** crate: no dependency on
-//! networking, cryptography or async runtimes (compilable to `wasm32-unknown-unknown`).
+//! Protocol core: handshake, channel 0 messages, channel definitions,
+//! common error types and cryptography ([`crypt`]). **Synchronous and pure**
+//! crate: no dependency on networking or async runtimes (compilable to
+//! `wasm32-unknown-unknown`); the crypto is pure Rust (aes-gcm, hkdf, sha2).
 
 pub mod audio;
+pub mod crypt;
+pub mod service_ipc;
 pub mod channel;
 pub mod fragment;
 pub mod hex;

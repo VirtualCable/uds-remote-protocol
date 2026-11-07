@@ -37,8 +37,8 @@ use libcrux_ml_kem::mlkem768::{MlKem768Ciphertext, MlKem768PrivateKey, decapsula
 use sha2::Sha256;
 use tracing::warn;
 
-use crate::payload::TicketPayload;
-use crate::{ConnectionProvider, SessionGrant, SessionStats};
+use super::payload::TicketPayload;
+use super::{ConnectionProvider, SessionGrant, SessionStats};
 
 // ML-KEM-768 sizes (libcrux-ml-kem 0.0.11).
 const KEM_PUBLIC_KEY_SIZE: usize = 1184;
@@ -167,7 +167,7 @@ impl ConnectionProvider for PqProvider {
         ticket: &[u8; protocol::TICKET_LENGTH],
         client_ip: &str,
     ) -> Result<SessionGrant> {
-        let ticket = crate::str_from_wire_ticket(ticket)?;
+        let ticket = super::str_from_wire_ticket(ticket)?;
         // Broker tickets are exactly 48 alphanumeric characters.
         anyhow::ensure!(
             ticket.len() == protocol::TICKET_LENGTH
@@ -195,7 +195,7 @@ impl ConnectionProvider for PqProvider {
             .next()
             .ok_or_else(|| anyhow::anyhow!("no remotes in the broker response"))?;
         let payload = TicketPayload::from_value(remote.extra.unwrap_or(serde_json::json!({
-            "version": crate::payload::PAYLOAD_VERSION
+            "version": super::payload::PAYLOAD_VERSION
         })))?;
         Ok(SessionGrant::from_payload(
             payload,
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn payload_material_matches_the_reference_vectors() {
-        // Same vectors as rdphtml5's shared::crypt::key_derivation tests:
+        // Same vectors as rdphtml5's shared::protocol::crypt::key_derivation tests:
         // shared_secret = [1; 32], ticket = [2; 48]. Our key_payload is
         // their key_payload (okm[0..32]) and the nonce is okm[96..108].
         let shared_secret = [1u8; 32];

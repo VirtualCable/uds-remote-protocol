@@ -36,7 +36,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use sha2::Digest as _;
 
-use crypt::consts;
+use protocol::crypt::consts;
 use protocol::TICKET_LENGTH;
 
 /// Default config file name.

@@ -10,7 +10,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crypt::{consts, derive_datagram_keys};
+use protocol::crypt::{consts, derive_datagram_keys};
 use protocol::{Probe, ProbeAck, channel};
 use transport::{
     Connector, DirectConnector, DirectListener, EncryptedDatagram, EncryptedStream, Target,

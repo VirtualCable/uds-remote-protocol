@@ -16,13 +16,13 @@
 //! - AAD: the full cleartext header (`seq || len`, 10B), so any tampering
 //!   with the framing is detected before the stream desynchronizes.
 //! - Strict anti-replay: any `seq` lower than the next expected one is
-//!   rejected. Unidirectional keys (see [`crate::keys`]).
+//!   rejected. Unidirectional keys (see [`crate::crypt::keys`]).
 
 use aes_gcm::aead::{AeadInOut, KeyInit, consts::U12};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
-use crate::consts::{CHANNEL_ID_SIZE, KEY_LENGTH, MAX_PLAINTEXT, STREAM_HEADER_SIZE, TAG_LENGTH};
-use crate::error::CryptError;
+use crate::crypt::consts::{CHANNEL_ID_SIZE, KEY_LENGTH, MAX_PLAINTEXT, STREAM_HEADER_SIZE, TAG_LENGTH};
+use crate::crypt::error::CryptError;
 
 fn nonce_from_seq(seq: u64) -> Nonce<U12> {
     let mut arr = [0u8; 12];

@@ -10,7 +10,7 @@
 //! (foreign tokens, tampering, replays) is dropped silently — over UDP that
 //! is normal network behaviour, not necessarily an attack.
 
-use crypt::{CryptError, DatagramCrypt, DatagramDecrypt, consts};
+use protocol::crypt::{CryptError, DatagramCrypt, DatagramDecrypt, consts};
 use protocol::ChannelId;
 
 use crate::error::{Result, TransportError};
