@@ -491,7 +491,22 @@ async fn display_sender(
     // The token bucket keeps the *average* rate; a batch is exactly the
     // burst the bucket size already allows.
     let mut batch: Vec<Vec<u8>> = Vec::with_capacity(96);
-    while let Some(frag) = rx.recv().await {
+    // Heartbeat (freeze hunt): if this task dies silently the paced queue
+    // fills and the session loop stalls behind it with no log anywhere.
+    let mut drained: u64 = 0;
+    let mut heartbeat = tokio::time::interval(STATS_LOG_INTERVAL);
+    loop {
+        let frag = tokio::select! {
+            maybe = rx.recv() => {
+                let Some(frag) = maybe else { break };
+                frag
+            }
+            _ = heartbeat.tick() => {
+                info!(dgrams = drained, "display sender alive");
+                drained = 0;
+                continue;
+            }
+        };
         let mut bytes = frag.len();
         batch.push(frag);
         let target = pacer.batch_target_bytes();
@@ -513,6 +528,7 @@ async fn display_sender(
                 warn!("display sender: send failed, ending task: {e}");
                 return;
             }
+            drained += 1;
         }
         drop(sink);
     }
@@ -557,6 +573,7 @@ struct OwnedFrame {
 /// controller): DXGI already blocks up to `frame_time` waiting for desktop
 /// damage, so only the synthetic source sleeps explicitly. Frames are
 /// stamped with `clock_start`'s clock — the same one audio uses (§9.1).
+#[allow(clippy::too_many_lines)] // watchdog instrumentation grew it past the pedantic limit
 fn spawn_capture(
     args: &Args,
     fps_shared: Arc<AtomicU32>,
@@ -588,6 +605,11 @@ fn spawn_capture(
             return;
         }
         let sleeps = matches!(source, Source::Synthetic(_));
+        // Watchdogs (freeze hunt): a wedged `next_frame` (GPU call stuck) and
+        // a wedged session loop (queue full forever) are both silent — the
+        // loop just stops emitting. Time both and heart-beat the thread.
+        let mut frames_window = 0u32;
+        let mut alive_last = Instant::now();
         loop {
             // The session may end while the desktop is idle (no frames to
             // send, so a dead receiver would go unnoticed and the DXGI
@@ -598,7 +620,17 @@ fn spawn_capture(
             }
             let fps = fps_shared.load(Ordering::Relaxed).max(1);
             let frame_time = Duration::from_secs_f64(1.0 / f64::from(fps));
-            match source.next_frame(frame_time) {
+            let next_start = Instant::now();
+            let frame = source.next_frame(frame_time);
+            let next_elapsed = next_start.elapsed();
+            if next_elapsed > frame_time.mul_f64(3.0) + Duration::from_millis(250) {
+                warn!(
+                    elapsed_ms = u64::try_from(next_elapsed.as_millis()).unwrap_or(u64::MAX),
+                    frame_time_ms = u64::try_from(frame_time.as_millis()).unwrap_or(u64::MAX),
+                    "capture next_frame slow (GPU/source call wedged?)"
+                );
+            }
+            match frame {
                 Ok(Some(f)) => {
                     let owned = OwnedFrame {
                         width: f.width,
@@ -607,9 +639,18 @@ fn spawn_capture(
                         capture_ts_ms: millis_since(clock_start),
                         data: f.data.to_vec(),
                     };
+                    let send_start = Instant::now();
                     if tx.blocking_send(CaptureMsg::Frame(owned)).is_err() {
                         return; // session over
                     }
+                    let send_wait = send_start.elapsed();
+                    if send_wait > Duration::from_millis(500) {
+                        warn!(
+                            waited_ms = u64::try_from(send_wait.as_millis()).unwrap_or(u64::MAX),
+                            "capture→session queue congested (session loop wedged?)"
+                        );
+                    }
+                    frames_window += 1;
                 }
                 Ok(None) => {} // no desktop damage this window
                 Err(e) => {
@@ -671,6 +712,13 @@ fn spawn_capture(
             }
             if sleeps {
                 std::thread::sleep(frame_time);
+            }
+            // Heartbeat: distinguishes "idle desktop, no damage" from a
+            // wedged `next_frame` in the agent log.
+            if alive_last.elapsed() >= STATS_LOG_INTERVAL {
+                info!(frames = frames_window, "capture thread alive");
+                frames_window = 0;
+                alive_last = Instant::now();
             }
         }
     });
@@ -1087,8 +1135,16 @@ fn spawn_audio(
                             capture_ts_ms: millis_since(clock_start),
                             data: packet.clone(),
                         };
+                        let send_start = Instant::now();
                         if tx.blocking_send(msg).is_err() {
                             return; // session over
+                        }
+                        let send_wait = send_start.elapsed();
+                        if send_wait > Duration::from_millis(500) {
+                            warn!(
+                                waited_ms = u64::try_from(send_wait.as_millis()).unwrap_or(u64::MAX),
+                                "audio→session queue congested (session loop wedged?)"
+                            );
                         }
                         seq = seq.wrapping_add(1);
                     }
@@ -1583,6 +1639,9 @@ async fn handle_frame<T: ReliableTransport>(
         data: &frame.data,
     })?;
     let encode_micros = u64::try_from(encode_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+    if encode_micros > 500_000 {
+        warn!(frame_id, encode_ms = encode_micros / 1000, "encode slow (encoder wedged?)");
+    }
     stats.encode_micros += encode_micros;
     stats.max_encode_micros = stats.max_encode_micros.max(encode_micros);
     // Adaptive fps (§12.7): the encoder's own cost steers the capture rate.
@@ -1608,7 +1667,17 @@ async fn handle_frame<T: ReliableTransport>(
     tagged.extend_from_slice(&encoder.codec_type().wire_id().to_be_bytes());
     tagged.extend_from_slice(&packet.data);
     let frags = Fragmenter::split(0, frame_id, frame.capture_ts_ms, &tagged);
-    if !legs.send_frame(frags, packet.keyframe).await? {
+    let send_start = Instant::now();
+    let frame_sent = legs.send_frame(frags, packet.keyframe).await?;
+    let send_wait = send_start.elapsed();
+    if send_wait > Duration::from_millis(500) {
+        warn!(
+            frame_id,
+            waited_ms = u64::try_from(send_wait.as_millis()).unwrap_or(u64::MAX),
+            "send_frame slow (paced queue drained slowly?)"
+        );
+    }
+    if !frame_sent {
         // The paced queue cannot hold this frame right now (a huge keyframe
         // over a busy link): skip it whole and force a keyframe on the next
         // one (the client's loss recovery would ask for it anyway).
