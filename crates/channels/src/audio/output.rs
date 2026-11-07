@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 pub use codec::audio_dsp::{PlaybackBuffer, SharedBuffer};
 
 #[cfg(feature = "audio")]
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Live device stream handle. Without the `audio` feature there is no cpal,
 /// so the type degenerates to `()` and playback is always the null sink.
@@ -188,6 +188,34 @@ fn select_config(
         })
 }
 
+/// Lab diagnostic (§18.66): when set, the output callback also writes every
+/// sample it pulls (underrun silence included) as raw s16le to this file —
+/// the post-buffer counterpart of the pump's pre-buffer dump. A BufWriter
+/// keeps syscalls rare; a stalled flush would glitch playback, so this is
+/// strictly an opt-in debug tool, never for production sessions.
+#[cfg(feature = "audio")]
+static OUTPUT_DUMP: std::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>> =
+    std::sync::Mutex::new(None);
+
+/// Sets the post-buffer dump file (see [`OUTPUT_DUMP`]). Replaces any
+/// previous file; pass a path that does not exist yet.
+#[cfg(feature = "audio")]
+pub fn set_output_dump(path: &std::path::Path) {
+    use std::io::BufWriter;
+    match std::fs::File::create(path) {
+        Ok(file) => {
+            info!(path = %path.display(), "dumping device-pulled audio as raw s16le PCM");
+            *OUTPUT_DUMP.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(BufWriter::with_capacity(1 << 20, file));
+        }
+        Err(e) => warn!(path = %path.display(), "cannot open the output dump file: {e}"),
+    }
+}
+
+/// No-op without the `audio` feature.
+#[cfg(not(feature = "audio"))]
+pub fn set_output_dump(_path: &std::path::Path) {}
+
 /// Builds an output stream typed to the config's sample format, converting
 /// our i16 buffer on the fly. The callback is allocation-free and degrades
 /// to silence on underrun or a contended/poisoned lock (§9.1).
@@ -208,9 +236,15 @@ where
     device.build_output_stream(
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            use std::io::Write as _;
+            let mut dump = OUTPUT_DUMP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Ok(mut buf) = buffer.lock() {
                 for sample in data.iter_mut() {
-                    *sample = T::from_sample(buf.pop_or_silence());
+                    let s = buf.pop_or_silence();
+                    if let Some(d) = dump.as_mut() {
+                        let _ = d.write_all(&s.to_le_bytes());
+                    }
+                    *sample = T::from_sample(s);
                 }
             } else {
                 // Poisoned lock: silence, never panic in the callback.

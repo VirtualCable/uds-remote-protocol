@@ -76,6 +76,14 @@ fn run() -> Result<()> {
             other => bail!("unknown argument: {other}"),
         }
     }
+    // §18.66 audio forensics: `--audio-dump p` writes the pre-buffer stream
+    // to `p.1` (jitter output, what SHOULD play) and the device-pulled
+    // stream to `p.2` (what actually plays, underrun silence included).
+    if let Some(p) = &flags.audio_dump {
+        let mut post = p.clone().into_os_string();
+        post.push(".2");
+        channels::audio::output::set_output_dump(std::path::Path::new(&post));
+    }
     let complete = !form.addr.is_empty() && !form.ticket.is_empty() && !form.key_hex.is_empty();
     let form = if complete {
         Some(form)

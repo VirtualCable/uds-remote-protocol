@@ -296,14 +296,21 @@ impl ActiveStream {
             .map_or(spec.sample_rate, |o| o.sample_rate());
         let resampler = (device_rate != spec.sample_rate)
             .then(|| LinearResampler::new(spec.sample_rate, device_rate, spec.channels));
-        let dump = dump_path.and_then(|path| match std::fs::File::create(path) {
-            Ok(file) => {
-                info!(path = %path.display(), "dumping decoded audio as raw s16le PCM");
-                Some(std::io::BufWriter::new(file))
-            }
-            Err(e) => {
-                warn!(path = %path.display(), "cannot open the audio dump file: {e}");
-                None
+        // Pre-buffer dump goes to `<path>.1`; the post-buffer one (what the
+        // device callback actually pulls, underrun silence included) is
+        // `<path>.2`, wired by the consumer into the output stream.
+        let dump = dump_path.and_then(|path| {
+            let mut pre = path.as_os_str().to_os_string();
+            pre.push(".1");
+            match std::fs::File::create(&pre) {
+                Ok(file) => {
+                    info!(path = %std::path::Path::new(&pre).display(), "dumping decoded audio as raw s16le PCM");
+                    Some(std::io::BufWriter::new(file))
+                }
+                Err(e) => {
+                    warn!(path = %std::path::Path::new(&pre).display(), "cannot open the audio dump file: {e}");
+                    None
+                }
             }
         });
         let clock_map = playback
