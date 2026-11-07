@@ -3289,13 +3289,19 @@ async fn run() -> Result<()> {
     if let Some(handoff) = args.handoff.take() {
         let stream_tokio = server::handoff::reconstruct_tcp(&handoff.socket_info)
             .context("rebuilding the handed-off socket")?;
-        let keys = protocol::crypt::derive_session_keys(&ticket, &args.key)?;
         let hello_bytes: &[u8; protocol::Hello::ENCODED_LEN] = handoff
             .hello
             .as_slice()
             .try_into()
             .context("handoff hello has wrong length")?;
         let hello = protocol::Hello::decode(hello_bytes).context("decoding the handoff hello")?;
+        // The keys MUST derive from the peer's Hello ticket: that is the
+        // ticket the service validated the possession proof against, and the
+        // one the client derived its own keys from. Using the local config
+        // ticket here desynchronizes AEAD from the very first record whenever
+        // the two differ (e.g. a client that hashes its ticket differently).
+        let ticket = hello.ticket;
+        let keys = protocol::crypt::derive_session_keys(&ticket, &args.key)?;
         let seqs = transport::StreamSeqs {
             send: handoff.send_seq,
             recv: handoff.recv_seq,
