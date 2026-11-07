@@ -86,6 +86,12 @@ pub fn run() -> anyhow::Result<()> {
             let (seconds, freq) = parse_opts(&args[1..])?;
             verify_loopback(seconds, freq)
         }
+        "probe-capture" => {
+            // Opens a capture stream on the first active endpoint matching
+            // the needle (default: UDS) and reports the Initialize result.
+            let needle = args.get(1).map_or(UDS_NAME_NEEDLE, String::as_str);
+            probe_capture(needle)
+        }
         "render-tone" => {
             let (seconds, freq) = parse_opts(&args[1..])?;
             // Render only — no loopback capture, so the driver ring keeps a
@@ -96,7 +102,7 @@ pub fn run() -> anyhow::Result<()> {
         }
         _ => {
             eprintln!(
-                "usage: udsaudio-ctl <list | push-tone | verify-mic | verify-loopback | render-tone> [seconds] [freq]"
+                "usage: udsaudio-ctl <list | push-tone | verify-mic | verify-loopback | render-tone | probe-capture [needle]> [seconds] [freq]"
             );
             std::process::exit(64);
         }
@@ -495,6 +501,46 @@ fn verdict(what: &str, samples: &[f32], rate: u32, freq: f32) -> ! {
 }
 
 // --- E2E subcommands ----------------------------------------------------------
+
+/// Diagnostics: opens a shared-mode capture stream on the first capture
+/// endpoint matching `needle` and reports whether `Initialize` succeeds.
+/// Used to isolate endpoint/AudioDG failures from ring content issues.
+fn probe_capture(needle: &str) -> anyhow::Result<()> {
+    let _com = ComGuard::init()?;
+    let device = find_endpoint(true, needle)?;
+    // SAFETY: activation on a live device.
+    let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
+        .context("IAudioClient activation failed")?;
+    // SAFETY: the client is alive; freed below with CoTaskMemFree.
+    let mix = unsafe { client.GetMixFormat() }.context("GetMixFormat failed")?;
+    anyhow::ensure!(!mix.is_null(), "GetMixFormat returned null");
+    let parsed = parse_mix_format(mix)?;
+    println!(
+        "mix format: {} {} ch {} Hz",
+        if parsed.is_f32 { "f32" } else { "s16" },
+        parsed.channels,
+        parsed.rate
+    );
+    // SAFETY: shared-mode init with the device's own mix format.
+    let init = unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, BUFFER_DURATION_HNS, 0, mix, None) };
+    // SAFETY: `mix` came from GetMixFormat and is freed exactly once.
+    unsafe { CoTaskMemFree(Some(mix.cast_const().cast())) };
+    match init {
+        Ok(()) => {
+            println!("probe: IAudioClient::Initialize OK");
+            // SAFETY: starting/stopping an initialized client.
+            let start = unsafe { client.Start() };
+            println!("probe: IAudioClient::Start -> {start:?}");
+            unsafe { client.Stop() }.ok();
+        }
+        Err(e) => {
+            println!("probe: IAudioClient::Initialize failed: {e:?}");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
 
 /// Pushes the tone into the mic control device while capturing from the UDS
 /// microphone endpoint; the captured signal must contain the tone.
