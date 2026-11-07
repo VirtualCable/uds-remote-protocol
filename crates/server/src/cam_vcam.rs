@@ -4,7 +4,7 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 //! Webcam sink that publishes decoded frames into the session shared slot
-//! (`vcam-ipc`), which the "UDS Webcam" DirectShow filter (`vcam` crate)
+//! (`vcam::ipc`), which the "UDS Webcam" DirectShow filter (`vcam` crate)
 //! serves to applications. Latest-frame-wins by design (§18.57).
 
 use vcam::ipc::CamSharedWriter;

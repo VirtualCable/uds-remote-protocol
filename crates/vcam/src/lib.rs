@@ -5,7 +5,7 @@
 
 //! UDS virtual camera: a DirectShow push source filter serving the webcam
 //! frames the server agent publishes into the session shared slot
-//! (`vcam-ipc`). Registered under `CLSID_VideoInputDeviceCategory`, so
+//! (`vcam::ipc`). Registered under `CLSID_VideoInputDeviceCategory`, so
 //! applications (Chrome, Teams, Zoom, ...) enumerate it as a camera named
 //! "UDS Webcam".
 //!

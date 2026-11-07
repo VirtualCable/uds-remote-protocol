@@ -6,7 +6,7 @@
 //! Local clipboard handle: event-driven watcher (clipboard-rs), text only.
 //!
 //! Replaces the two ad-hoc implementations the consumers grew (arboard
-//! poll-on-focus in client-gui, polling thread in testclient) with the
+//! poll-on-focus in labclient/gui, polling thread in testclient) with the
 //! uds-client model: one watcher thread firing a callback on every local
 //! change. Echo suppression is built in: what we write via [`set_text`]
 //! (remote clipboard applied locally) is not announced back, and repeated

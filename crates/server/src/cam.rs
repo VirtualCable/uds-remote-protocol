@@ -22,7 +22,7 @@
 //! The [`CamSink`] trait is the stability seam (§18.57): [`NullSink`]
 //! (defensive discard), [`RawSink`] (deterministic, hardware-free E2E
 //! verification) and, on Windows, `cam_vcam::VcamSink` publishing to the
-//! "UDS Webcam" DirectShow filter through the `vcam-ipc` shared slot.
+//! "UDS Webcam" DirectShow filter through the `vcam::ipc` shared slot.
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

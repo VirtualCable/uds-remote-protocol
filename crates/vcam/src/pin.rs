@@ -5,7 +5,7 @@
 
 //! Output pin of the virtual camera: format negotiation, allocator setup
 //! and the streaming thread that pumps frames from the shared slot
-//! (`vcam-ipc`) into the DirectShow graph.
+//! (`vcam::ipc`) into the DirectShow graph.
 
 // DShow API sizes are i32/usize mixed; geometry is bounded (<=1920x1080).
 #![allow(

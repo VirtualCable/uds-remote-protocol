@@ -3,7 +3,7 @@
 // All rights reserved.
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-//! # client-gui
+//! # labclient::gui (was client-gui)
 //!
 //! Reference GUI for the uds-rp client (winit + wgpu), mirroring the
 //! architecture of uds-client's launcher GUI: the protocol session runs on
