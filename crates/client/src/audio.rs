@@ -450,15 +450,18 @@ impl ActiveStream {
         // the clock is live: after a stale period the first few frames keep
         // the unusable marker so one stray packet cannot re-engage the
         // hold-against-audio path.
+        let mut diag: Option<(u64, Option<u32>)> = None;
         if self.frames_since_stale >= CLOCK_REARM_FRAMES
             && let (Some(buf), Some(clock)) = (&self.playback, &mut self.clock_map)
             && let Ok(b) = buf.lock()
         {
             let pos = b.play_pos();
             clock.prune(pos);
-            if let Some(ts) = clock.ts_at(pos) {
+            let ts = clock.ts_at(pos);
+            if let Some(ts) = ts {
                 self.now_ms.store(i64::from(ts), Ordering::Relaxed);
             }
+            diag = Some((pos, ts));
         }
         // Live stats for the consumer overlay (§15.3): cheap atomic stores,
         // refreshed once per frame tick so rates stay current.
@@ -479,6 +482,7 @@ impl ActiveStream {
             buffered as u32,
         );
         if self.last_log.elapsed() >= Duration::from_secs(5) {
+            let (play_pos, clock_ts) = diag.unwrap_or((0, None));
             info!(
                 decoded = self.decoded_frames,
                 plc = self.plc_frames,
@@ -487,6 +491,9 @@ impl ActiveStream {
                 buffered_samples = buffered,
                 drained_samples = drained,
                 underrun_samples = underrun,
+                play_pos,
+                clock_ts,
+                published_now_ms = self.now_ms.load(Ordering::Relaxed),
                 "audio"
             );
             self.last_log = Instant::now();

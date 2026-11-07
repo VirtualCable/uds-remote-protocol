@@ -873,6 +873,10 @@ enum DecodeJob {
 /// presentation latency.
 const DECODE_QUEUE_CAPACITY: usize = 4;
 
+/// How long the published audio cursor may stay unchanged (wall clock)
+/// before the presentation loop stops gating on it (§9.1 dead-clock guard).
+const DEAD_CLOCK_AFTER: Duration = Duration::from_millis(1500);
+
 /// Decode + presentation worker (§15.3): owns the decoders, the recovery
 /// state and the A/V presentation queue so video decode and framebuffer
 /// writes never block the network task (audio datagrams and probe acks
@@ -893,6 +897,18 @@ struct DecodeWorker {
     recovery_awaiting: Arc<AtomicBool>,
     /// Audio playback cursor (capture-clock ms), for the A/V decisions.
     audio_clock: Arc<AtomicI64>,
+    /// Dead-clock guard (§9.1): last published audio cursor and when it
+    /// last changed. A frozen cursor (audio announced but the published
+    /// position not advancing) must not gate video: after
+    /// [`DEAD_CLOCK_AFTER`] without movement the cursor is ignored and
+    /// frames present immediately.
+    audio_now_last: Option<u32>,
+    audio_now_changed_at: Instant,
+    /// Whether the guard is currently suppressing the cursor (logged once
+    /// per transition, not per frame).
+    dead_clock: bool,
+    /// Last video timestamp seen, for the periodic avsync log line.
+    last_video_ts: Option<u32>,
     present_queue: PresentQueue,
     avsync_stats: SyncStats,
     avsync_log: Instant,
@@ -917,6 +933,10 @@ impl DecodeWorker {
             decoders: HashMap::new(),
             recovery_awaiting: Arc::clone(&recovery_awaiting),
             audio_clock,
+            audio_now_last: None,
+            audio_now_changed_at: Instant::now(),
+            dead_clock: false,
+            last_video_ts: None,
             present_queue: PresentQueue::new(),
             avsync_stats: SyncStats::default(),
             avsync_log: Instant::now(),
@@ -932,6 +952,36 @@ impl DecodeWorker {
     fn audio_now_ms(&self) -> Option<u32> {
         let v = self.audio_clock.load(Ordering::Relaxed);
         u32::try_from(v).ok()
+    }
+
+    /// Audio cursor with the dead-clock guard applied (§9.1): an announced
+    /// but frozen cursor (the publisher stalled, a broken device clock, a
+    /// mapping bug) is treated as "no audio clock" after
+    /// [`DEAD_CLOCK_AFTER`] without movement, so video can never be
+    /// strangled by a dead sync reference.
+    fn effective_audio_now(&mut self) -> Option<u32> {
+        let Some(v) = self.audio_now_ms() else {
+            // Silent desktop path (cursor unpublished): not a dead clock.
+            self.audio_now_last = None;
+            self.audio_now_changed_at = Instant::now();
+            self.dead_clock = false;
+            return None;
+        };
+        if self.audio_now_last != Some(v) {
+            self.audio_now_last = Some(v);
+            self.audio_now_changed_at = Instant::now();
+            if self.dead_clock {
+                info!(audio_now = v, "audio clock alive again; resuming audio-master sync");
+                self.dead_clock = false;
+            }
+        } else if !self.dead_clock && self.audio_now_changed_at.elapsed() >= DEAD_CLOCK_AFTER {
+            self.dead_clock = true;
+            warn!(
+                audio_now = v,
+                "audio clock frozen; presenting video ungated until it moves"
+            );
+        }
+        if self.dead_clock { None } else { Some(v) }
     }
 
     /// Main loop: drains decode jobs, then pumps the presentation queue at
@@ -1064,7 +1114,8 @@ impl DecodeWorker {
 
     /// Applies the A/V sync decision (§9.1) to one freshly decoded frame.
     fn present_or_hold(&mut self, display_id: u8, frame: codec::DecodedFrame, video_ts_ms: u32) {
-        let audio_now = self.audio_now_ms();
+        self.last_video_ts = Some(video_ts_ms);
+        let audio_now = self.effective_audio_now();
         match avsync::decide(video_ts_ms, audio_now.unwrap_or(0), audio_now.is_some()) {
             avsync::PresentDecision::PresentNow => {
                 if let Some(now) = audio_now {
@@ -1090,7 +1141,7 @@ impl DecodeWorker {
     /// audio clock flushes everything so video never stalls) and logs the
     /// sync stats periodically. Returns `false` when the consumer is gone.
     fn avsync_pump(&mut self) -> bool {
-        let audio_now = self.audio_now_ms();
+        let audio_now = self.effective_audio_now();
         self.stats.set_avsync(
             u32::try_from(self.present_queue.frames.len()).unwrap_or(u32::MAX),
             audio_now.is_some(),
@@ -1123,6 +1174,8 @@ impl DecodeWorker {
                 dropped_overflow = self.avsync_stats.dropped_overflow,
                 skew_avg_ms = self.avsync_stats.skew_avg_ms(),
                 skew_max_abs_ms = self.avsync_stats.skew_max_abs_ms(),
+                audio_now = self.audio_now_ms(),
+                video_ts = self.last_video_ts,
                 "avsync"
             );
             self.avsync_stats.reset();
