@@ -19,7 +19,8 @@ use anyhow::{Context as _, bail};
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE, HANDLE};
 use windows::Win32::Media::Audio::{
-    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, IAudioCaptureClient,
+    AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    DEVICE_STATE_ACTIVE, IAudioCaptureClient,
     IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
     WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eRender,
 };
@@ -527,16 +528,29 @@ fn probe_capture(needle: &str) -> anyhow::Result<()> {
     unsafe { CoTaskMemFree(Some(mix.cast_const().cast())) };
     match init {
         Ok(()) => {
-            println!("probe: IAudioClient::Initialize OK");
+            println!("probe: IAudioClient::Initialize (shared) OK");
             // SAFETY: starting/stopping an initialized client.
             let start = unsafe { client.Start() };
             println!("probe: IAudioClient::Start -> {start:?}");
             unsafe { client.Stop() }.ok();
         }
         Err(e) => {
-            println!("probe: IAudioClient::Initialize failed: {e:?}");
-            std::process::exit(1);
+            println!("probe: IAudioClient::Initialize (shared) failed: {e:?}");
         }
+    }
+    // Exclusive mode bypasses the AudioDG shared engine: if this succeeds
+    // while shared fails, the block lives in the audio service path, not
+    // in the driver or the KS pin security.
+    let client2: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
+        .context("IAudioClient activation failed")?;
+    let mix2 = unsafe { client2.GetMixFormat() }.context("GetMixFormat failed")?;
+    let init2 = unsafe {
+        client2.Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, 0, BUFFER_DURATION_HNS, BUFFER_DURATION_HNS, mix2, None)
+    };
+    unsafe { CoTaskMemFree(Some(mix2.cast_const().cast())) };
+    match init2 {
+        Ok(()) => println!("probe: IAudioClient::Initialize (exclusive) OK"),
+        Err(e) => println!("probe: IAudioClient::Initialize (exclusive) failed: {e:?}"),
     }
     Ok(())
 }
