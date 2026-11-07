@@ -24,6 +24,7 @@
 //! desktop audio, with no anti-aliasing on the downsample path.
 
 use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 /// Converts one f32 sample to i16 with clamping: `-1.0` maps to `i16::MIN`,
 /// `+1.0` (and anything above, or NaN) saturates instead of wrapping.
@@ -315,6 +316,128 @@ impl DevicePipeline {
     }
 }
 
+
+/// Circular playback buffer between the network pump and the audio device
+/// callback (§9.1): overflow drains the oldest samples down to the target,
+/// underrun surfaces as silence (handled by the consumer side).
+///
+/// The buffer also tracks the absolute play position (samples consumed +
+/// drained + underrun silence) so the audio thread can map the playback
+/// cursor onto the server's capture clock for A/V lip-sync (§9.1).
+///
+/// Pure and synchronous: unit-tested without any audio device.
+#[derive(Debug)]
+pub struct PlaybackBuffer {
+    samples: VecDeque<i16>,
+    /// Buffered length above which the oldest samples are drained.
+    max_samples: usize,
+    /// Length the buffer is drained to on overflow (~1 jitter window).
+    target_samples: usize,
+    /// Samples actually consumed by the device callback (cumulative).
+    consumed_samples: u64,
+    /// Samples dropped by overflow drains (cumulative).
+    drained_samples: u64,
+    /// Samples the consumer asked for while the buffer was empty.
+    underrun_samples: u64,
+}
+
+/// Overflow threshold: 500 ms of buffered audio.
+const MAX_BUFFERED_MS: u32 = 500;
+/// Drain target after an overflow: 60 ms (~1 jitter window of 3 frames).
+const DRAIN_TARGET_MS: u32 = 60;
+
+impl PlaybackBuffer {
+    /// Creates a buffer with the default latency policy for the given stream
+    /// shape (§9.1).
+    #[must_use]
+    pub fn new(sample_rate: u32, channels: u8) -> Self {
+        let per_ms = sample_rate as usize * usize::from(channels) / 1000;
+        Self::with_limits(
+            per_ms * MAX_BUFFERED_MS as usize,
+            per_ms * DRAIN_TARGET_MS as usize,
+        )
+    }
+
+    /// Creates a buffer with explicit limits (tests).
+    #[must_use]
+    pub fn with_limits(max_samples: usize, target_samples: usize) -> Self {
+        Self {
+            samples: VecDeque::new(),
+            max_samples,
+            target_samples,
+            consumed_samples: 0,
+            drained_samples: 0,
+            underrun_samples: 0,
+        }
+    }
+
+    /// Buffered length in samples (interleaved).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// True when no samples are buffered.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    /// Absolute play position: samples already played, skipped by drains or
+    /// filled with underrun silence (§9.1). Advances in real time even
+    /// during underruns, so the A/V cursor never stalls.
+    #[must_use]
+    pub fn play_pos(&self) -> u64 {
+        self.consumed_samples + self.drained_samples + self.underrun_samples
+    }
+
+    /// Absolute position at which the next pushed sample is queued. When an
+    /// underrun overhang exists (the device played silence past the end),
+    /// newly pushed samples start playing at the play position instead —
+    /// timestamp anchors are registered at `max(push_pos, play_pos)`.
+    #[must_use]
+    pub fn push_pos(&self) -> u64 {
+        self.consumed_samples + self.drained_samples + self.samples.len() as u64
+    }
+
+    /// Samples dropped by overflow drains so far.
+    #[must_use]
+    pub fn drained_samples(&self) -> u64 {
+        self.drained_samples
+    }
+
+    /// Samples requested while empty so far (underrun accounting).
+    #[must_use]
+    pub fn underrun_samples(&self) -> u64 {
+        self.underrun_samples
+    }
+
+    /// Pushes one decoded frame; drains the oldest samples when the buffer
+    /// exceeds the overflow threshold (§9.1).
+    pub fn push(&mut self, frame: &[i16]) {
+        self.samples.extend(frame);
+        if self.samples.len() > self.max_samples {
+            let drop = self.samples.len() - self.target_samples;
+            self.samples.drain(..drop);
+            self.drained_samples += drop as u64;
+        }
+    }
+
+    /// Pops one sample for the device callback, or silence on underrun.
+    /// Allocation-free and wait-free on the buffer itself.
+    pub fn pop_or_silence(&mut self) -> i16 {
+        if let Some(s) = self.samples.pop_front() {
+            self.consumed_samples += 1;
+            return s;
+        }
+        self.underrun_samples += 1;
+        0
+    }
+}
+
+/// Shared handle between the pump thread and the cpal callback.
+pub type SharedBuffer = Arc<Mutex<PlaybackBuffer>>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,4 +657,73 @@ mod tests {
         pipe.push_packet(&packet, 4, false, &mut ring);
         assert_eq!(ring.len(), 4);
     }
+    #[test]
+    fn push_then_pop_in_order() {
+        let mut buf = PlaybackBuffer::with_limits(100, 50);
+        buf.push(&[1, 2, 3]);
+        assert_eq!(buf.pop_or_silence(), 1);
+        assert_eq!(buf.pop_or_silence(), 2);
+        assert_eq!(buf.len(), 1);
+    }
+
+    #[test]
+    fn underrun_is_silence_and_counted() {
+        let mut buf = PlaybackBuffer::with_limits(100, 50);
+        buf.push(&[7]);
+        assert_eq!(buf.pop_or_silence(), 7);
+        assert_eq!(buf.pop_or_silence(), 0);
+        assert_eq!(buf.pop_or_silence(), 0);
+        assert_eq!(buf.underrun_samples(), 2);
+    }
+
+    #[test]
+    fn overflow_drains_oldest_down_to_target() {
+        let mut buf = PlaybackBuffer::with_limits(10, 4);
+        for _ in 0..11 {
+            buf.push(&[1]);
+        }
+        // After the 11th push: 11 > 10 → drain to 4 samples.
+        assert_eq!(buf.len(), 4);
+        assert_eq!(buf.drained_samples(), 7);
+    }
+
+    #[test]
+    fn no_drain_below_threshold() {
+        let mut buf = PlaybackBuffer::with_limits(10, 4);
+        for _ in 0..10 {
+            buf.push(&[5]);
+        }
+        assert_eq!(buf.len(), 10);
+        assert_eq!(buf.drained_samples(), 0);
+    }
+
+    #[test]
+    fn default_policy_scales_with_shape() {
+        let buf = PlaybackBuffer::new(48_000, 2);
+        assert_eq!(buf.max_samples, 48_000 * 2 * 500 / 1000);
+        assert_eq!(buf.target_samples, 48_000 * 2 * 60 / 1000);
+    }
+
+    #[test]
+    fn play_pos_tracks_consumed_drained_and_underrun() {
+        let mut buf = PlaybackBuffer::with_limits(10, 4);
+        assert_eq!(buf.play_pos(), 0);
+        assert_eq!(buf.push_pos(), 0);
+        buf.push(&[1, 2, 3]);
+        assert_eq!(buf.push_pos(), 3, "queued samples count as pushed");
+        assert_eq!(buf.pop_or_silence(), 1);
+        assert_eq!(buf.play_pos(), 1, "consumed sample advances the cursor");
+        buf.push(&[0; 9]);
+        let drained = buf.drained_samples();
+        assert!(drained > 0);
+        assert_eq!(buf.play_pos(), 1 + drained, "drained samples skip the cursor");
+        // Underrun: empty the buffer, then pop silence.
+        while !buf.is_empty() {
+            buf.pop_or_silence();
+        }
+        let pos = buf.play_pos();
+        assert_eq!(buf.pop_or_silence(), 0);
+        assert_eq!(buf.play_pos(), pos + 1, "underrun advances the cursor in real time");
+    }
+
 }
