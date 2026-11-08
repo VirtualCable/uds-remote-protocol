@@ -121,9 +121,11 @@ struct Args {
     /// Quality policy from the `[quality]` config section (§18.69): ceilings,
     /// floors, pressure weights and the level table.
     quality: server::config::QualityConfig,
-    /// VP9 encoder backend: "" / "auto" (Media Foundation when available,
-    /// libvpx otherwise), "mf" (force MF; falls back with a warning) or
-    /// "software" (force libvpx). Only meaningful with `--preset ladder`.
+    /// Video-regime encoder backend: "" / "auto" (NVENC H.264 when the GPU
+    /// and the client decoder line up, then Media Foundation VP9, then
+    /// libvpx), "nvenc" (force NVENC H.264 attempt), "mf" (force MF VP9
+    /// attempt) or "software" (force libvpx). Explicit choices fall back to
+    /// the chain with a warning. Only meaningful with `--preset ladder`.
     encoder: String,
 }
 
@@ -3392,18 +3394,36 @@ fn video_ceiling_kbps(args: &Args, width: u32, height: u32) -> u32 {
 /// ladder (`--preset ladder`, feature `ladder`) which starts in rects-JPEG
 /// and switches to VP9 on sustained video-like change (§8.5).
 fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Result<ServerEncoder> {
-    // Gates H.264 hardware-encoder selection (NVENC/MFT, lands in H3.5):
-    // without a client decoder the server must stay on VP9.
+    // Used only by the NVENC branch (Windows + codec-nvenc + ladder).
     let _ = client_h264;
     #[cfg(feature = "ladder")]
     if args.preset == "ladder" {
         let kbps = video_ceiling_kbps(args, width, height);
         let knobs = ladder_knobs(&args.ladder)?;
         anyhow::ensure!(
-            matches!(args.encoder.as_str(), "" | "auto" | "mf" | "software"),
-            "bad encoder backend {:?} (auto|mf|software)",
+            matches!(args.encoder.as_str(), "" | "auto" | "mf" | "software" | "nvenc"),
+            "bad encoder backend {:?} (auto|mf|software|nvenc)",
             args.encoder
         );
+        // NVENC H.264 leg (Windows, NVIDIA): only when the client
+        // advertised H.264 decode (§18.75.9) — without a decoder the
+        // session must stay on VP9. "nvenc" asks for it explicitly (falls
+        // back to the normal backend chain with a warning when the GPU,
+        // driver or client capability is missing); "auto" prefers it over
+        // Media Foundation when everything lines up.
+        #[cfg(all(windows, feature = "codec-nvenc"))]
+        if matches!(args.encoder.as_str(), "" | "auto" | "nvenc") && client_h264 {
+            match codec::LadderEncoder::with_nvenc_h264(width, height, knobs.policy.clone(), kbps, 80)
+            {
+                Ok(encoder) => {
+                    info!(width, height, kbps, "codec ladder ready (rects-jpeg <-> h264 via NVENC)");
+                    return Ok(ServerEncoder::Ladder(Box::new(encoder)));
+                }
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "NVENC H.264 unavailable; falling back");
+                }
+            }
+        }
         // Media Foundation VP9 leg (Windows), hardware MFTs only: the
         // Microsoft Store software MFT measured clearly worse than our
         // tuned libvpx, so it is never used. "" / "auto" tries HW quietly;

@@ -53,15 +53,21 @@ pub struct LadderEncoder {
     last_low_encode: Option<Instant>,
 }
 
-/// VP9 backend of the ladder's video regime (§18.75): libvpx software
-/// always, Media Foundation (hardware when the driver provides it) on
-/// Windows behind `codec-mf`. The libvpx-only knob `cpu_used` is a no-op
-/// on the MF backend — the MFT has no equivalent and the content axis
-/// simply does not steer it.
+/// Video-regime backend of the ladder (§18.75): libvpx VP9 software always,
+/// Media Foundation VP9 (hardware when the driver provides it) on Windows
+/// behind `codec-mf`, or NVENC H.264 on Windows behind `codec-nvenc` (only
+/// when the client decodes H.264). The libvpx-only knob `cpu_used` is a
+/// no-op on the hardware backends — they have no equivalent and the content
+/// axis simply does not steer them.
 enum Vp9Backend {
     Software(Vp9Encoder),
     #[cfg(all(windows, feature = "codec-mf"))]
     Mf(crate::mf::MfEncoder),
+    /// NVENC H.264 (Windows + `codec-nvenc`): the video regime switches
+    /// codec from VP9 to H.264 — only selected when the client advertised
+    /// H.264 decode (§18.75.9).
+    #[cfg(all(windows, feature = "codec-nvenc"))]
+    Nvenc(crate::nvenc::NvencEncoder),
 }
 
 impl Vp9Backend {
@@ -70,6 +76,8 @@ impl Vp9Backend {
             Self::Software(e) => e.set_cpu_used(cpu_used),
             #[cfg(all(windows, feature = "codec-mf"))]
             Self::Mf(_) => Ok(()),
+            #[cfg(all(windows, feature = "codec-nvenc"))]
+            Self::Nvenc(_) => Ok(()),
         }
     }
 }
@@ -80,6 +88,8 @@ impl VideoEncoder for Vp9Backend {
             Self::Software(e) => e.encode(frame),
             #[cfg(all(windows, feature = "codec-mf"))]
             Self::Mf(e) => e.encode(frame),
+            #[cfg(all(windows, feature = "codec-nvenc"))]
+            Self::Nvenc(e) => e.encode(frame),
         }
     }
 
@@ -88,6 +98,8 @@ impl VideoEncoder for Vp9Backend {
             Self::Software(e) => e.request_keyframe(),
             #[cfg(all(windows, feature = "codec-mf"))]
             Self::Mf(e) => e.request_keyframe(),
+            #[cfg(all(windows, feature = "codec-nvenc"))]
+            Self::Nvenc(e) => e.request_keyframe(),
         }
     }
 
@@ -96,11 +108,17 @@ impl VideoEncoder for Vp9Backend {
             Self::Software(e) => e.set_bitrate(kbps),
             #[cfg(all(windows, feature = "codec-mf"))]
             Self::Mf(e) => e.set_bitrate(kbps),
+            #[cfg(all(windows, feature = "codec-nvenc"))]
+            Self::Nvenc(e) => e.set_bitrate(kbps),
         }
     }
 
     fn codec_type(&self) -> VideoCodecType {
-        VideoCodecType::Vp9
+        match self {
+            #[cfg(all(windows, feature = "codec-nvenc"))]
+            Self::Nvenc(_) => VideoCodecType::H264,
+            _ => VideoCodecType::Vp9,
+        }
     }
 }
 
@@ -216,6 +234,42 @@ impl LadderEncoder {
         })
     }
 
+    /// NVENC H.264 leg (Windows + `codec-nvenc`) instead of VP9. Only the
+    /// server picks this, and only when the client advertised H.264 decode
+    /// in the handshake (§18.75.9); otherwise it stays on a VP9 leg.
+    #[cfg(all(windows, feature = "codec-nvenc"))]
+    pub fn with_nvenc_h264(
+        width: u32,
+        height: u32,
+        policy: LadderPolicy,
+        h264_kbps: u32,
+        jpeg_quality: i32,
+    ) -> Result<Self> {
+        if width == 0 || height == 0 {
+            return Err(CodecError::BadDimensions {
+                width,
+                height,
+                stride: 0,
+                data_len: 0,
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            ladder: Ladder::new(policy, Instant::now()),
+            jpeg: JpegRectsEncoder::new(width, height, jpeg_quality)?,
+            vp9: Vp9Backend::Nvenc(crate::nvenc::NvencEncoder::new(
+                width, height, 30, h264_kbps,
+            )?),
+            prev: None,
+            pending_change: None,
+            force_full: false,
+            vp9_kbps: h264_kbps,
+            jpeg_bps_ema: None,
+            last_low_encode: None,
+        })
+    }
+
     /// Ladder tuning in use (live reference, e.g. to inspect the EMA).
     #[must_use]
     pub fn ladder(&self) -> &Ladder {
@@ -272,7 +326,7 @@ impl LadderEncoder {
                 // first VP9 frame of every visit must be a keyframe — the
                 // encoder's initial force_key only covers the first one.
                 self.vp9.request_keyframe();
-                VideoCodecType::Vp9
+                self.vp9.codec_type()
             }
         };
         self.pending_change = Some(codec);
@@ -366,7 +420,7 @@ impl VideoEncoder for LadderEncoder {
     fn codec_type(&self) -> VideoCodecType {
         match self.ladder.level() {
             Level::Low => VideoCodecType::JpegRects,
-            Level::High => VideoCodecType::Vp9,
+            Level::High => self.vp9.codec_type(),
         }
     }
 

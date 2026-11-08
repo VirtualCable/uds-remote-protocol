@@ -138,6 +138,20 @@ pub fn bgra_to_i420(frame: &VideoFrame<'_>) -> Result<I420Frame> {    let (width
     })
 }
 
+/// Converts a BGRA frame to tightly packed NV12 (Y plane, then interleaved
+/// U/V). Shared by the hardware encoders that only accept NV12 input
+/// (Media Foundation, NVENC).
+pub fn bgra_to_nv12(frame: &VideoFrame<'_>) -> Result<Vec<u8>> {
+    let i420 = bgra_to_i420(frame)?;
+    let mut data = i420.y;
+    data.reserve(i420.u.len() * 2);
+    for (u, v) in i420.u.iter().zip(i420.v.iter()) {
+        data.push(*u);
+        data.push(*v);
+    }
+    Ok(data)
+}
+
 /// Converts an I420 frame back to tight BGRA (decode side; BT.601 limited
 /// range, chroma replicated 2x2 — no interpolation, matching the cheap
 /// subsampling of [`bgra_to_i420`]).

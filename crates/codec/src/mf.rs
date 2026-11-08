@@ -745,20 +745,13 @@ impl MfEncoder {
 
     /// Converts the BGRA frame to the negotiated input layout (NV12/I420).
     fn convert_input(&self, frame: &VideoFrame<'_>) -> Result<Vec<u8>> {
+        if self.nv12 {
+            return crate::color::bgra_to_nv12(frame);
+        }
         let i420 = crate::color::bgra_to_i420(frame)?;
-        if !self.nv12 {
-            let mut data = i420.y;
-            data.extend_from_slice(&i420.u);
-            data.extend_from_slice(&i420.v);
-            return Ok(data);
-        }
-        // NV12: Y plane, then U/V interleaved.
         let mut data = i420.y;
-        data.reserve(i420.u.len() * 2);
-        for (u, v) in i420.u.iter().zip(i420.v.iter()) {
-            data.push(*u);
-            data.push(*v);
-        }
+        data.extend_from_slice(&i420.u);
+        data.extend_from_slice(&i420.v);
         Ok(data)
     }
 
