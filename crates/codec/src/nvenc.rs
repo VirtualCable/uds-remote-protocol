@@ -495,7 +495,9 @@ impl NvencEncoder {
             gop_length: INFINITE_GOPLENGTH,
             frame_interval_p: 1, // IPP, no B-frames (low latency)
             mono_chrome: 0,
-            frame_field_mode: 0,
+            // NV_ENC_PARAMS_FRAME_FIELD_MODE_FRAME (0 is invalid; init
+            // coerces it but reconfigure then rejects the mismatch).
+            frame_field_mode: 1,
             mv_precision: 0,
             rc_params: RcParams {
                 version: RC_PARAMS_VER,
