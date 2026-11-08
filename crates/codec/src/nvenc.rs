@@ -23,6 +23,14 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::{Arc, OnceLock};
 
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION,
+    D3D11CreateDevice, ID3D11Device,
+};
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+use windows::core::Interface;
+
 use crate::error::CodecError;
 use crate::video::{EncodedPacket, VideoCodecType, VideoEncoder, VideoFrame};
 use crate::Result;
@@ -362,6 +370,56 @@ fn nv_err(op: &str, status: u32) -> CodecError {
     CodecError::Backend(format!("nvenc {op} failed: status {status}"))
 }
 
+/// Creates a D3D11 device on the NVIDIA adapter. Modern drivers reject a
+/// null device in `nvEncOpenEncodeSessionEx` (INVALID_PTR), and the device
+/// must live on the GPU that owns the encoder — on hybrid VMs adapter 0 is
+/// the virtual display driver, so the adapter with "nvidia" in its name
+/// wins; `NVENC_ADAPTER=<idx>` overrides the pick for the lab.
+fn create_device() -> Result<ID3D11Device> {
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }
+        .map_err(|e| CodecError::Backend(format!("CreateDXGIFactory1: {e}")))?;
+    let mut adapters = Vec::new();
+    for i in 0.. {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(i) }) else { break };
+        let desc = unsafe { adapter.GetDesc1() }
+            .map_err(|e| CodecError::Backend(format!("adapter desc: {e}")))?;
+        let end = desc
+            .Description
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(desc.Description.len());
+        let name = String::from_utf16_lossy(&desc.Description[..end]);
+        adapters.push((name, adapter));
+    }
+    let pick: usize = std::env::var("NVENC_ADAPTER").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+        adapters
+            .iter()
+            .position(|(name, _)| name.to_lowercase().contains("nvidia"))
+            .unwrap_or_else(|| adapters.len().saturating_sub(1))
+    });
+    let (name, adapter) = adapters
+        .into_iter()
+        .nth(pick)
+        .ok_or_else(|| CodecError::Backend("nvenc: no DXGI adapter".into()))?;
+    tracing::info!("NVENC using adapter {pick}: {name}");
+    let mut device = None;
+    unsafe {
+        D3D11CreateDevice(
+            &adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            windows::Win32::Foundation::HMODULE::default(),
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&raw mut device),
+            None,
+            None,
+        )
+    }
+    .map_err(|e| CodecError::Backend(format!("D3D11CreateDevice on {name}: {e}")))?;
+    device.ok_or_else(|| CodecError::Backend("nvenc: no D3D11 device returned".into()))
+}
+
 // ---------------------------------------------------------------------------
 // Encoder
 // ---------------------------------------------------------------------------
@@ -374,6 +432,9 @@ pub struct NvencEncoder {
     output: Ptr,
     init: Box<InitializeParams>,
     config: Box<Config>,
+    /// Keeps the D3D11 device alive for the session lifetime (the driver
+    /// references it on every encode call).
+    _device: ID3D11Device,
     width: u32,
     height: u32,
     frame_idx: u32,
@@ -392,12 +453,13 @@ impl NvencEncoder {
     pub fn new(width: u32, height: u32, fps: u32, kbps: u32) -> Result<Self> {
         let api = NvencApi::get()
             .ok_or_else(|| CodecError::Backend("nvenc: API not available".into()))?;
+        let device = create_device()?;
 
         let mut encoder: Ptr = ptr::null_mut();
         let mut session = OpenSessionExParams {
             version: OPEN_SESSION_EX_VER,
             device_type: DEVICE_TYPE_DIRECTX,
-            device: ptr::null_mut(),
+            device: device.as_raw().cast(),
             reserved: ptr::null_mut(),
             api_version: NVENCAPI_VERSION,
             reserved1: [0; 253],
@@ -486,6 +548,7 @@ impl NvencEncoder {
             output,
             init,
             config,
+            _device: device,
             width,
             height,
             frame_idx: 0,
