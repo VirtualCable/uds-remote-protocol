@@ -45,6 +45,7 @@ use windows::Win32::Media::MediaFoundation::{
     MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoFormat_VP90,
     MFVideoInterlace_Progressive, MFSampleExtension_CleanPoint, MFSTARTUP_FULL, MF_VERSION,
     MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_GEOMETRIC_APERTURE,
     MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE,
     MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_TRANSFORM_FLAGS_Attribute,
     MFTEnumEx,
@@ -1092,6 +1093,17 @@ pub struct MfDecoder {
 // as the encoder: MFTs are free-threaded and access is `&mut self`.
 unsafe impl Send for MfDecoder {}
 
+/// MFArea (mfobjects.h) is missing from the windows crate 0.62; only the
+/// visible size is read (offsets are always 0,0 for our decoders).
+#[repr(C)]
+#[derive(Default)]
+struct MfArea {
+    offset_x: u32,
+    offset_y: u32,
+    cx: i32,
+    cy: i32,
+}
+
 /// Negotiates the decoder output taking the MFT's own offered types (I420
 /// preferred — cheapest conversion — NV12 accepted; most hardware decoders
 /// only offer NV12). Hand-built types miss attributes some decoders demand
@@ -1232,14 +1244,18 @@ impl MfDecoder {
 
     /// Reads the current output frame size and stride from the negotiated
     /// output type (resolution can change mid-stream; the type is the
-    /// source of truth).
-    fn output_shape(&self) -> Result<(u32, u32, usize)> {
+    /// source of truth). Returns `(visible_w, visible_h, alloc_h, stride)`:
+    /// vendor HW decoders report the macroblock-aligned allocation in
+    /// `MF_MT_FRAME_SIZE` (1088 rows for 1080p), so the visible size comes
+    /// from `MF_MT_GEOMETRIC_APERTURE` when present; the allocated height
+    /// still governs the plane offsets in the output buffer.
+    fn output_shape(&self) -> Result<(u32, u32, u32, usize)> {
         let ty = unsafe { self.transform.GetOutputCurrentType(self.out_stream) }
             .map_err(|e| CodecError::Backend(format!("decoder GetOutputCurrentType: {e}")))?;
         let packed = unsafe { ty.GetUINT64(&MF_MT_FRAME_SIZE) }
             .map_err(|e| CodecError::Backend(format!("decoder output frame size: {e}")))?;
         let width = (packed >> 32) as u32;
-        let height = u32::try_from(packed & 0xFFFF_FFFF).expect("low 32 bits fit");
+        let alloc_h = u32::try_from(packed & 0xFFFF_FFFF).expect("low 32 bits fit");
         // Negative strides (bottom-up) are legal MF; none of our decoders
         // produce them and the layout math below assumes top-down.
         let raw = unsafe { ty.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.unwrap_or(width);
@@ -1248,7 +1264,26 @@ impl MfDecoder {
             .and_then(|s| usize::try_from(s).ok())
             .filter(|&s| s >= width as usize)
             .ok_or_else(|| CodecError::Backend(format!("bad decoder stride: {raw}")))?;
-        Ok((width, height, stride))
+        let (mut vw, mut vh) = (width, alloc_h);
+        if let Ok(sz) = unsafe { ty.GetBlobSize(&MF_MT_GEOMETRIC_APERTURE) }
+            && sz as usize == std::mem::size_of::<MfArea>()
+        {
+            let mut area = MfArea::default();
+            let buf = unsafe {
+                std::slice::from_raw_parts_mut(
+                    (&raw mut area).cast::<u8>(),
+                    std::mem::size_of::<MfArea>(),
+                )
+            };
+            if unsafe { ty.GetBlob(&MF_MT_GEOMETRIC_APERTURE, buf, None) }.is_ok() {
+                let (aw, ah) = (area.cx.cast_unsigned(), area.cy.cast_unsigned());
+                if aw > 0 && ah > 0 && aw <= width && ah <= alloc_h {
+                    vw = aw;
+                    vh = ah;
+                }
+            }
+        }
+        Ok((vw, vh, alloc_h, stride))
     }
 
     /// Converts one output sample into a `DecodedFrame` and queues it.
@@ -1265,18 +1300,20 @@ impl MfDecoder {
             let _ = contiguous.Unlock();
             data
         };
-        let (width, height, stride) = self.output_shape()?;
-        let (w, h) = (width as usize, height as usize);
+        let (width, height, alloc_h, stride) = self.output_shape()?;
+        let (w, h, ah) = (width as usize, height as usize, alloc_h as usize);
         let frame = if self.nv12 {
-            let y_len = stride * h;
+            // Plane offsets use the allocated height; conversion crops to
+            // the visible one.
+            let y_len = stride * ah;
             if data.len() < y_len {
                 return Err(CodecError::Malformed);
             }
             crate::color::nv12_to_bgra(&data[..y_len], &data[y_len..], width, height, stride, stride)?
         } else {
-            let y_len = stride * h;
+            let y_len = stride * ah;
             let uv_stride = stride.div_ceil(2);
-            let uv_len = uv_stride * h.div_ceil(2);
+            let uv_len = uv_stride * ah.div_ceil(2);
             if data.len() < y_len + 2 * uv_len {
                 return Err(CodecError::Malformed);
             }
@@ -1298,8 +1335,8 @@ impl MfDecoder {
     /// One `ProcessOutput` round; queues every produced frame.
     fn drain_outputs(&mut self) -> Result<()> {
         loop {
-            let (width, height, _) = self.output_shape().unwrap_or((0, 0, 0));
-            let cb_size = (width as usize * height as usize * 3 / 2).max(1 << 20);
+            let (width, _, alloc_h, _) = self.output_shape().unwrap_or((0, 0, 0, 0));
+            let cb_size = (width as usize * alloc_h as usize * 3 / 2).max(1 << 20);
             let sample = unsafe { MFCreateSample() }
                 .map_err(|e| CodecError::Backend(format!("MFCreateSample: {e}")))?;
             let buffer = unsafe {
