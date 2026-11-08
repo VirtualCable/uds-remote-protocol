@@ -138,6 +138,11 @@ pub struct QualityConfig {
     pub rtt_bad_factor: f64,
     /// Absolute slack added to the RTT bad threshold (ms).
     pub rtt_bad_slack_ms: u64,
+    /// Hard floor for the effective RTT baseline (ms). On LANs the window
+    /// minimum collapses to sub-ms values and the bad threshold lands inside
+    /// decode/scheduling noise, pinning the ladder with phantom congestion
+    /// (§18.71 BUG-C2). `0` disables the floor.
+    pub rtt_baseline_floor_ms: u64,
     /// Jitter above which a network sample counts as bad (ms).
     pub jitter_bad_ms: u64,
     /// Loss rate above which a network sample counts as bad (0-1).
@@ -170,6 +175,7 @@ impl Default for QualityConfig {
             pressure_lo: pressure.pressure_lo,
             rtt_bad_factor: net.rtt_bad_factor,
             rtt_bad_slack_ms: net.rtt_bad_slack_micros / 1_000,
+            rtt_baseline_floor_ms: net.baseline_floor_micros / 1_000,
             jitter_bad_ms: net.jitter_bad_micros / 1_000,
             loss_bad: net.loss_bad,
             bad_to_down: net.bad_to_down,
@@ -277,7 +283,7 @@ impl QualityConfig {
         let vkbps = self.video_kbps.map_or_else(|| "auto".to_string(), |v| v.to_string());
         let budget = self.budget_kbps.map_or_else(|| "off".to_string(), |v| v.to_string());
         format!(
-            "vkbps={vkbps},budget={budget},akbps={},vfloor={},afloor={},minfps={},wc={},wcpu={},wbw={},phi={},plo={},rttf={},rtts={},jit={},loss={},b2d={},g2u={},cd={},levels={levels}",
+            "vkbps={vkbps},budget={budget},akbps={},vfloor={},afloor={},minfps={},wc={},wcpu={},wbw={},phi={},plo={},rttf={},rtts={},rttbf={},jit={},loss={},b2d={},g2u={},cd={},levels={levels}",
             self.audio_kbps,
             self.video_floor_kbps,
             self.audio_floor_kbps,
@@ -289,6 +295,7 @@ impl QualityConfig {
             self.pressure_lo,
             self.rtt_bad_factor,
             self.rtt_bad_slack_ms,
+            self.rtt_baseline_floor_ms,
             self.jitter_bad_ms,
             self.loss_bad,
             self.bad_to_down,
@@ -336,6 +343,7 @@ impl QualityConfig {
                 "plo" => q.pressure_lo = value.parse().context("bad plo")?,
                 "rttf" => q.rtt_bad_factor = value.parse().context("bad rttf")?,
                 "rtts" => q.rtt_bad_slack_ms = value.parse().context("bad rtts")?,
+                "rttbf" => q.rtt_baseline_floor_ms = value.parse().context("bad rttbf")?,
                 "jit" => q.jitter_bad_ms = value.parse().context("bad jit")?,
                 "loss" => q.loss_bad = value.parse().context("bad loss")?,
                 "b2d" => q.bad_to_down = value.parse().context("bad b2d")?,
@@ -373,6 +381,7 @@ impl QualityConfig {
         protocol::QualityPolicy {
             baseline_rtt_micros,
             baseline_window: std::time::Duration::from_secs(60),
+            baseline_floor_micros: self.rtt_baseline_floor_ms * 1_000,
             rtt_bad_factor: self.rtt_bad_factor,
             rtt_bad_slack_micros: self.rtt_bad_slack_ms * 1_000,
             jitter_bad_micros: self.jitter_bad_ms * 1_000,

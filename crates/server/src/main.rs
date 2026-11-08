@@ -1331,6 +1331,21 @@ fn handle_metrics(
                 budget_util,
             },
         );
+        // Decision trace (§18.71): every sample with its per-signal verdict,
+        // so the log says *why* the ladder moves or stays put.
+        if let Some(v) = controller.last_verdict() {
+            info!(
+                rtt_micros,
+                rtt_threshold_micros = v.rtt_threshold_micros,
+                baseline_rtt_micros = controller.baseline_rtt_micros(),
+                jitter_micros,
+                loss,
+                budget_util = budget_util.unwrap_or(f64::NAN),
+                bad = %v.bad_signals(),
+                network_level = controller.level(),
+                "quality sample"
+            );
+        }
         // Content axis (§18.69): same cadence as the client reports; the
         // pressure sample combines the encoder load, the content-change EMA
         // and the bandwidth utilization (gated on measured congestion).
@@ -1339,14 +1354,24 @@ fn handle_metrics(
         let pressure = ctl.pressure.get_or_insert_with(|| {
             protocol::PressureController::new(ctl.quality_cfg.pressure_policy(), max_level)
         });
-        let content_event = pressure.update(
-            now,
-            protocol::PressureSample {
-                change: encoder.change_ema_fraction().unwrap_or(0.0),
-                cpu: ctl.cpu_load_ema,
-                util: ctl.util_ema,
-                congested: controller.level() > protocol::LEVEL_FULL || net_event.is_some(),
-            },
+        let psample = protocol::PressureSample {
+            change: encoder.change_ema_fraction().unwrap_or(0.0),
+            cpu: ctl.cpu_load_ema,
+            util: ctl.util_ema,
+            congested: controller.level() > protocol::LEVEL_FULL || net_event.is_some(),
+        };
+        let pvalue = pressure.policy().pressure(&psample);
+        let content_event = pressure.update(now, psample);
+        info!(
+            change = psample.change,
+            cpu = psample.cpu,
+            util = psample.util,
+            congested = psample.congested,
+            pressure = pvalue,
+            pressure_hi = pressure.policy().pressure_hi,
+            pressure_lo = pressure.policy().pressure_lo,
+            content_level = pressure.level(),
+            "content sample"
         );
         (net_event, content_event)
     };

@@ -86,6 +86,13 @@ pub struct QualityPolicy {
     pub baseline_rtt_micros: u64,
     /// Sliding window for the RTT baseline (minimum inside it).
     pub baseline_window: Duration,
+    /// Hard floor for the effective RTT baseline (microseconds). On LANs the
+    /// window minimum collapses to a few hundred µs and the bad threshold
+    /// (`baseline * factor + slack`) lands inside normal decode/scheduling
+    /// noise, pinning the ladder at the bottom with phantom congestion
+    /// (§18.71 BUG-C2: baselines of 9,0 / 14,6 / 0,4 ms measured on the same
+    /// link). The floor keeps the threshold meaningful on fast links.
+    pub baseline_floor_micros: u64,
     /// RTT / baseline above which a sample counts as bad (queue filling).
     pub rtt_bad_factor: f64,
     /// Absolute slack added to the RTT bad threshold (microseconds). On fast
@@ -142,6 +149,7 @@ impl QualityPolicy {
         Self {
             baseline_rtt_micros: baseline_rtt_micros.max(1),
             baseline_window: Duration::from_secs(60),
+            baseline_floor_micros: 3_000,
             rtt_bad_factor: 1.5,
             rtt_bad_slack_micros: 2_000,
             jitter_bad_micros: 15_000,
@@ -466,6 +474,52 @@ impl PressureController {
     }
 }
 
+/// Per-signal verdict of one sample (§18.71): the caller logs this to see
+/// exactly which signal is holding the ladder down (baseline collapse,
+/// jitter, loss or budget) instead of inferring it from level changes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // one flag per signal IS the design
+pub struct SampleVerdict {
+    /// RTT above `baseline * factor + slack`.
+    pub rtt_bad: bool,
+    /// Jitter above its threshold.
+    pub jitter_bad: bool,
+    /// Loss above its threshold.
+    pub loss_bad: bool,
+    /// Sticky budget-overrun state (§18.70).
+    pub budget_bad: bool,
+    /// The RTT bad threshold applied to this sample (microseconds).
+    pub rtt_threshold_micros: u64,
+}
+
+impl SampleVerdict {
+    /// True when any signal reads as bad.
+    #[must_use]
+    pub fn any_bad(&self) -> bool {
+        self.rtt_bad || self.jitter_bad || self.loss_bad || self.budget_bad
+    }
+
+    /// Comma-separated names of the bad signals (`"-"` when the sample is
+    /// good): meant for log lines.
+    #[must_use]
+    pub fn bad_signals(&self) -> String {
+        let mut out = Vec::new();
+        if self.rtt_bad {
+            out.push("rtt");
+        }
+        if self.jitter_bad {
+            out.push("jitter");
+        }
+        if self.loss_bad {
+            out.push("loss");
+        }
+        if self.budget_bad {
+            out.push("budget");
+        }
+        if out.is_empty() { "-".to_string() } else { out.join(",") }
+    }
+}
+
 /// Link-quality controller. See module docs for the mechanics.
 #[derive(Debug)]
 pub struct QualityController {
@@ -493,6 +547,8 @@ pub struct QualityController {
     /// Sticky budget-bad state (§18.70): set above `BUDGET_HI_UTIL`, cleared
     /// below `BUDGET_LO_UTIL`, kept in between (hysteresis, no flapping).
     budget_bad: bool,
+    /// The verdict of the last fed sample (post-hysteresis), for logging.
+    last_verdict: Option<SampleVerdict>,
 }
 
 impl QualityController {
@@ -519,6 +575,7 @@ impl QualityController {
             rtt_max_observed: seed,
             max_level,
             budget_bad: false,
+            last_verdict: None,
         }
     }
 
@@ -546,6 +603,13 @@ impl QualityController {
         (self.rtt_min_observed, self.rtt_max_observed)
     }
 
+    /// The verdict of the last fed sample, after the budget hysteresis was
+    /// applied (§18.71 decision traces).
+    #[must_use]
+    pub fn last_verdict(&self) -> Option<SampleVerdict> {
+        self.last_verdict
+    }
+
     /// Feeds the sample's RTT into the sliding baseline window.
     fn track_rtt(&mut self, now: Instant, rtt_micros: u64) {
         self.rtt_min_observed = self.rtt_min_observed.min(rtt_micros);
@@ -565,11 +629,14 @@ impl QualityController {
             .map(|(_, r)| *r)
             .min()
             .unwrap_or(rtt_micros);
-        self.baseline_rtt_micros = window_min.max(1);
+        self.baseline_rtt_micros = window_min.max(self.policy.baseline_floor_micros).max(1);
     }
 
-    /// True when the sample is bad by any signal (§12.2, §18.70 budget).
-    fn is_bad(&self, s: &Sample) -> bool {
+    /// Per-signal breakdown of a sample (§18.71): which signals read as bad
+    /// and the RTT threshold in use, so the caller can log *why* a sample
+    /// counted against the level instead of guessing after the fact.
+    #[must_use]
+    pub fn verdict(&self, s: &Sample) -> SampleVerdict {
         // Integer-domain compare: bad RTT = baseline * factor + slack (the
         // factor is scaled x1024 to avoid float precision lints in the hot
         // path). The slack keeps sub-ms baselines from flagging normal noise.
@@ -578,10 +645,14 @@ impl QualityController {
         let threshold = u128::from(self.baseline_rtt_micros) * factor_x1024
             + u128::from(self.policy.rtt_bad_slack_micros) * 1024;
         let rtt_bad = u128::from(s.rtt_micros) * 1024 > threshold;
-        rtt_bad
-            || s.jitter_micros > self.policy.jitter_bad_micros
-            || s.loss > self.policy.loss_bad
-            || self.budget_bad
+        SampleVerdict {
+            rtt_bad,
+            jitter_bad: s.jitter_micros > self.policy.jitter_bad_micros,
+            loss_bad: s.loss > self.policy.loss_bad,
+            budget_bad: self.budget_bad,
+            #[allow(clippy::cast_possible_truncation)] // micros fit in u64
+            rtt_threshold_micros: (threshold / 1024) as u64,
+        }
     }
 
     /// Feeds one sample; returns an event when the level changes.
@@ -597,7 +668,9 @@ impl QualityController {
                 self.budget_bad = false;
             }
         }
-        if self.is_bad(&sample) {
+        let verdict = self.verdict(&sample);
+        self.last_verdict = Some(verdict);
+        if verdict.any_bad() {
             self.bad_streak += 1;
             self.good_streak = 0;
             if self.bad_streak >= self.policy.bad_to_down && self.level < self.max_level {
@@ -641,6 +714,7 @@ mod tests {
         QualityPolicy {
             baseline_rtt_micros: 10_000,
             baseline_window: Duration::from_secs(60),
+            baseline_floor_micros: 3_000,
             rtt_bad_factor: 1.5,
             rtt_bad_slack_micros: 2_000,
             jitter_bad_micros: 15_000,
@@ -828,6 +902,44 @@ mod tests {
     }
 
     #[test]
+    fn baseline_never_collapses_below_the_floor() {
+        // §18.71 BUG-C2: a LAN session measured a 400 µs baseline and the
+        // 2,6 ms threshold flagged decode noise as congestion forever.
+        let mut c = QualityController::new(policy());
+        let lan = Sample { rtt_micros: 400, jitter_micros: 100, loss: 0.0, budget_util: None };
+        for i in 0..10 {
+            c.update(t0() + Duration::from_secs(i), lan);
+        }
+        assert_eq!(c.baseline_rtt_micros(), 3_000, "floor clamps the collapse");
+        // Threshold = 3000*1.5 + 2000 = 6500 µs: a 3 ms scheduling spike on
+        // the same LAN must NOT count as congestion anymore.
+        let spike = Sample { rtt_micros: 3_000, ..lan };
+        assert!(!c.verdict(&spike).any_bad(), "spike inside the floored threshold is good");
+        let v = c.verdict(&spike);
+        assert_eq!(v.rtt_threshold_micros, 6_500);
+        assert!(!v.any_bad());
+        assert_eq!(v.bad_signals(), "-");
+        // But a real queueing delay still reads as bad, named in the verdict.
+        let queued = Sample { rtt_micros: 20_000, ..lan };
+        let v = c.verdict(&queued);
+        assert!(v.rtt_bad && v.any_bad());
+        assert_eq!(v.bad_signals(), "rtt");
+    }
+
+    #[test]
+    fn verdict_names_every_bad_signal() {
+        let mut c = QualityController::new(QualityPolicy { budget_kbps: Some(800), ..policy() });
+        c.update(t0(), Sample { budget_util: Some(1.5), ..good() });
+        let v = c.verdict(&Sample {
+            rtt_micros: 50_000,
+            jitter_micros: 50_000,
+            loss: 0.5,
+            budget_util: Some(1.5),
+        });
+        assert_eq!(v.bad_signals(), "rtt,jitter,loss,budget");
+    }
+
+    #[test]
     fn observed_min_max_are_tracked() {
         let mut c = QualityController::new(policy());
         c.update(t0(), Sample { rtt_micros: 40_000, ..good() });
@@ -991,7 +1103,7 @@ mod tests {
         // Inside the hysteresis band the state sticks (still bad), but the
         // streak restarted at the step: two more bad samples are needed.
         let mid = Sample { budget_util: Some(0.8), ..good() };
-        assert!(c.is_bad(&mid), "0.8 is inside the sticky band while bad");
+        assert!(c.verdict(&mid).any_bad(), "0.8 is inside the sticky band while bad");
         assert_eq!(c.update(t0() + Duration::from_secs(3), mid), None);
         let ev = c.update(t0() + Duration::from_secs(4), mid);
         assert!(ev.is_some_and(|e| e.level == 2), "still bad: keeps stepping");
@@ -999,7 +1111,7 @@ mod tests {
         let under = Sample { budget_util: Some(0.5), ..good() };
         assert!({
             c.update(t0() + Duration::from_secs(5), under);
-            !c.is_bad(&under)
+            !c.verdict(&under).any_bad()
         }, "under budget clears the bad state");
     }
 
