@@ -39,7 +39,7 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT,
 };
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample,
+    IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType, IMFSample,
     IMFTransform, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
     MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFShutdown, MFStartup,
     MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoFormat_VP90,
@@ -1092,6 +1092,45 @@ pub struct MfDecoder {
 // as the encoder: MFTs are free-threaded and access is `&mut self`.
 unsafe impl Send for MfDecoder {}
 
+/// Negotiates the decoder output taking the MFT's own offered types (I420
+/// preferred — cheapest conversion — NV12 accepted; most hardware decoders
+/// only offer NV12). Hand-built types miss attributes some decoders demand
+/// (the AMD HW decoder fails SetOutputType with MF_E_ATTRIBUTENOTFOUND).
+/// Returns true when NV12 was negotiated.
+fn select_decoder_output(transform: &IMFTransform, out_stream: u32) -> Result<bool> {
+    let mut nv12_choice: Option<IMFMediaType> = None;
+    for i in 0.. {
+        let Ok(t) = (unsafe { transform.GetOutputAvailableType(out_stream, i) }) else {
+            break;
+        };
+        let Ok(subtype) = (unsafe { t.GetGUID(&MF_MT_SUBTYPE) }) else {
+            continue;
+        };
+        if subtype == MFVideoFormat_I420 {
+            unsafe {
+                transform
+                    .SetOutputType(out_stream, &t, 0)
+                    .map_err(|e| CodecError::Backend(format!("decoder SetOutputType: {e}")))?;
+            }
+            return Ok(false);
+        }
+        if subtype == MFVideoFormat_NV12 && nv12_choice.is_none() {
+            nv12_choice = Some(t);
+        }
+    }
+    let Some(t) = nv12_choice else {
+        return Err(CodecError::Unsupported(
+            "decoder MFT offers no I420/NV12 output",
+        ));
+    };
+    unsafe {
+        transform
+            .SetOutputType(out_stream, &t, 0)
+            .map_err(|e| CodecError::Backend(format!("decoder SetOutputType: {e}")))?;
+    }
+    Ok(true)
+}
+
 impl MfDecoder {
     /// Creates the decoder preferring hardware transforms; falls back to
     /// any registered one (the Microsoft software decoder ships with the
@@ -1163,27 +1202,7 @@ impl MfDecoder {
                 .map_err(|e| CodecError::Backend(format!("decoder SetInputType H264: {e}")))?;
         }
 
-        // Output: I420 first (cheapest conversion), NV12 as fallback (most
-        // hardware decoders only offer NV12).
-        let mut nv12 = false;
-        let set_output = |subtype: &GUID| -> Result<()> {
-            let out_type = unsafe { MFCreateMediaType() }
-                .map_err(|e| CodecError::Backend(format!("MFCreateMediaType: {e}")))?;
-            unsafe {
-                out_type
-                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-                    .and_then(|()| out_type.SetGUID(&MF_MT_SUBTYPE, subtype))
-                    .map_err(|e| CodecError::Backend(format!("decoder output type: {e}")))?;
-                transform
-                    .SetOutputType(out_stream, &out_type, 0)
-                    .map_err(|e| CodecError::Backend(format!("decoder SetOutputType: {e}")))?;
-            }
-            Ok(())
-        };
-        if set_output(&MFVideoFormat_I420).is_err() {
-            nv12 = true;
-            set_output(&MFVideoFormat_NV12)?;
-        }
+        let nv12 = select_decoder_output(&transform, out_stream)?;
 
         unsafe {
             transform
