@@ -56,9 +56,10 @@ use windows::Win32::Media::MediaFoundation::{
     MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, METransformHaveOutput, METransformNeedInput,
 };
 use windows::Win32::Media::MediaFoundation::{
-    CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
-    CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode,
-    ICodecAPI, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    eAVEncH264VProfile_High, CODECAPI_AVEncCommonMeanBitRate,
+    CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVDefaultBPictureCount,
+    CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI,
+    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_MT_MPEG2_PROFILE,
 };
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
@@ -510,6 +511,19 @@ impl MfEncoder {
         unsafe {
             out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .and_then(|()| out_type.SetGUID(&MF_MT_SUBTYPE, codec.subtype()))
+                .and_then(|()| {
+                    // H264: the profile is a required part of the type for
+                    // strict MFTs (NVIDIA rejects the output type without it).
+                    if matches!(codec, MftCodec::H264) {
+                        let profile = std::env::var("MF_PROFILE")
+                            .ok()
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .unwrap_or(eAVEncH264VProfile_High.0 as u32);
+                        out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, profile)
+                    } else {
+                        Ok(())
+                    }
+                })
                 .and_then(|()| out_type.SetUINT32(&MF_MT_AVG_BITRATE, kbps * 1000))
                 .and_then(|()| {
                     out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
@@ -591,6 +605,12 @@ impl MfEncoder {
                 // CBR rate control; some hardware MFTs reject streams
                 // without an explicit rate-control mode.
                 let _ = codec_api.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(0));
+                if matches!(codec, MftCodec::H264) {
+                    // No B-frames: interactive desktop needs decode order
+                    // == presentation order.
+                    let _ = codec_api
+                        .SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0));
+                }
             }
             codec_api
                 .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(kbps * 1000))
@@ -776,6 +796,14 @@ impl MfEncoder {
             .map_err(|e| CodecError::Backend(format!("GetEvent: {e}")))?;
         let kind = unsafe { ev.GetType() }
             .map_err(|e| CodecError::Backend(format!("event type: {e}")))?;
+        if std::env::var_os("MF_DEBUG").is_some() {
+            let what = match kind as i32 {
+                k if k == METransformNeedInput.0 => "NeedInput",
+                k if k == METransformHaveOutput.0 => "HaveOutput",
+                _ => "other",
+            };
+            eprintln!("[mf] event {kind} ({what})");
+        }
         if kind == METransformHaveOutput.0 as u32 {
             self.drain_outputs()?;
             Ok(false)

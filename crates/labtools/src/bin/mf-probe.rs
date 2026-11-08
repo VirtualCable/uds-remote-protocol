@@ -76,7 +76,11 @@ fn fill_pattern(bgra: &mut [u8], w: u32, h: u32, i: u32) {
 /// GPU path is validated with H264 — §18.75 H2). Exit code 0 on success.
 #[cfg(all(windows, feature = "mf-probe"))]
 fn encode_test(frames: u32, gpu: bool, h264: bool) -> i32 {
-    let (w, h, fps, kbps) = (1920u32, 1080u32, 30u32, 2_000u32);
+    let (w, h, fps) = (1920u32, 1080u32, 30u32);
+    let kbps: u32 = std::env::var("MF_KBPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2_000);
     let codec_sel = if h264 {
         codec::mf::MftCodec::H264
     } else {
@@ -183,20 +187,49 @@ fn encode_test(frames: u32, gpu: bool, h264: bool) -> i32 {
     0
 }
 
-/// Creates a default D3D11 device for the GPU probe.
+/// Creates a D3D11 device for the GPU probe. `MF_ADAPTER=<idx>` picks a
+/// specific DXGI adapter (default: the LAST hardware adapter — on hybrid
+/// VMs adapter 0 is the virtual display driver, not the real GPU).
 #[cfg(all(windows, feature = "mf-probe"))]
 fn create_d3d11_device() -> windows::core::Result<windows::Win32::Graphics::Direct3D11::ID3D11Device> {
     use windows::Win32::Graphics::Direct3D::{
-        D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
+        D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
     };
     use windows::Win32::Graphics::Direct3D11::{
         D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11CreateDevice,
     };
+    use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1};
+    let factory: windows::Win32::Graphics::Dxgi::IDXGIFactory1 =
+        unsafe { CreateDXGIFactory1() }?;
+    let mut adapters: Vec<(String, IDXGIAdapter1)> = Vec::new();
+    for i in 0.. {
+        let Ok(a) = (unsafe { factory.EnumAdapters1(i) }) else { break };
+        let desc = unsafe { a.GetDesc1() }?;
+        let name = {
+            let end = desc
+                .Description
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(desc.Description.len());
+            String::from_utf16_lossy(&desc.Description[..end])
+        };
+        eprintln!("adapter {i}: {name}");
+        adapters.push((name, a));
+    }
+    let pick: usize = std::env::var("MF_ADAPTER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| adapters.len().saturating_sub(1));
+    let (name, adapter) = adapters
+        .into_iter()
+        .nth(pick)
+        .ok_or(windows::core::Error::from_thread())?;
+    eprintln!("using adapter {pick}: {name}");
     let mut device = None;
     unsafe {
         D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
+            &adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
             windows::Win32::Foundation::HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
             Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
