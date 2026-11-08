@@ -1584,11 +1584,14 @@ impl FrameStats {
         if self.csv.is_some() {
             use std::io::Write as _;
             let row = self.csv_row(encoder, ctl);
-            if let Some(csv) = &mut self.csv
-                && let Err(e) = writeln!(csv, "{row}")
-            {
-                warn!(error = %e, "stats CSV write failed; CSV disabled");
-                self.csv = None;
+            if let Some(csv) = &mut self.csv {
+                // Flush per row: at one row per 5 s the BufWriter would
+                // otherwise hold the whole session (~KBs) and lose it all if
+                // the session ends without a clean Drop (baseline lab hit).
+                if let Err(e) = writeln!(csv, "{row}").and_then(|()| csv.flush()) {
+                    warn!(error = %e, "stats CSV write failed; CSV disabled");
+                    self.csv = None;
+                }
             }
         }
         *self = Self {
