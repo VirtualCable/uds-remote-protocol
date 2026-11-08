@@ -2,34 +2,62 @@
 // Copyright (c) 2026, Virtual Cable S.L.
 // All rights reserved.
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
-//! Media Foundation video encoder backend (Windows, §18.75 HW-encode H1).
+//! Media Foundation video encoder backend (Windows, §18.75 HW-encode).
 //!
-//! Runtime MFT enumeration plus [`MfEncoder`], a VP9 encoder behind the
-//! platform-neutral [`crate::VideoEncoder`] trait: drivers register their
-//! hardware MFTs (Intel/NVIDIA/AMD) and the OS ships software MFTs, so one
-//! backend covers every vendor. Frames arrive in BGRA (CPU) and are fed as
-//! NV12/I420; the H2 step (zero-copy DXGI texture → MFT) plugs in later by
-//! replacing only the input path of this module.
+//! Runtime MFT enumeration plus [`MfEncoder`], a VP9/H264 encoder behind
+//! the platform-neutral [`crate::VideoEncoder`] trait: drivers register
+//! their hardware MFTs (Intel/NVIDIA/AMD) and the OS ships software MFTs,
+//! so one backend covers every vendor. Two input paths:
+//!
+//! - **H1 (CPU)**: frames arrive in BGRA and are fed as NV12/I420.
+//! - **H2 (zero-copy GPU)**: [`MfEncoder::encode_gpu`] takes an
+//!   `ID3D11Texture2D` on the shared device, converts BGRA → NV12 with the
+//!   D3D11 video processor and feeds the MFT through the DXGI device
+//!   manager — no CPU readback anywhere.
 
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
+    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+};
+use windows::Win32::Foundation::TRUE;
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+};
+use windows::Win32::Graphics::Dxgi::IDXGISurface;
+use windows::Win32::Graphics::Direct3D11::{
+    D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT,
+    D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT,
+};
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample, IMFTransform,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFShutdown,
-    MFStartup, MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoFormat_VP90,
+    IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample,
+    IMFTransform, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFShutdown, MFStartup,
+    MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoFormat_VP90,
     MFVideoInterlace_Progressive, MFSampleExtension_CleanPoint, MFSTARTUP_FULL, MF_VERSION,
     MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
     MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE,
-    MF_TRANSFORM_FLAGS_Attribute, MFTEnumEx, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
+    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_TRANSFORM_FLAGS_Attribute,
+    MFTEnumEx,
+    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
     MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT, MFT_ENUM_FLAG_SYNCMFT,
     MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_INFO,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
     MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, METransformHaveOutput, METransformNeedInput,
 };
 use windows::Win32::Media::MediaFoundation::{
-    CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode,
+    CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
+    CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode,
     ICodecAPI, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
 };
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4};
@@ -160,13 +188,11 @@ fn read_info(act: &IMFActivate, subtype: &str) -> MftInfo {
             Err(_) => String::new(),
         }
     };
-    let flags = unsafe { act.GetUINT32(&MF_TRANSFORM_FLAGS_Attribute).unwrap_or(0) };
     MftInfo {
         name,
         subtype: subtype.to_string(),
         d3d11_aware: unsafe { act.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) } != 0,
-        // MF_TRANSFORM_ASYNC = 1 in the MF_TRANSFORM_FLAGS attribute.
-        async_mft: flags & 1 != 0,
+        async_mft: unsafe { act.GetUINT32(&MF_TRANSFORM_ASYNC).unwrap_or(0) } != 0,
     }
 }
 
@@ -195,9 +221,59 @@ struct PendingPacket {
     keyframe: bool,
 }
 
-/// VP9 video encoder through a Media Foundation transform (§18.75 H1).
-/// CPU input (BGRA → NV12/I420 internally); the backend is whichever MFT
-/// the driver registered, hardware when available.
+/// Codec the MFT produces. H264 exists for lab validation of the GPU path
+/// (NVIDIA ships an H264 hardware MFT but no VP9 one); the production
+/// ladder only negotiates VP9.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MftCodec {
+    /// VP9 (`MFVideoFormat_VP90`).
+    Vp9,
+    /// H264 (`MFVideoFormat_H264`).
+    H264,
+}
+
+impl MftCodec {
+    fn subtype(self) -> &'static GUID {
+        match self {
+            Self::Vp9 => &MFVideoFormat_VP90,
+            Self::H264 => &MFVideoFormat_H264,
+        }
+    }
+
+    fn codec_type(self) -> VideoCodecType {
+        match self {
+            Self::Vp9 => VideoCodecType::Vp9,
+            Self::H264 => VideoCodecType::H264,
+        }
+    }
+}
+
+/// Zero-copy GPU input state (§18.75 H2): the DXGI device manager handed
+/// to the MFT plus the video-processor chain that converts the captured
+/// BGRA texture into the NV12 one the hardware encoder consumes.
+struct GpuPipeline {
+    context: ID3D11DeviceContext,
+    video_context: ID3D11VideoContext,
+    video_device: ID3D11VideoDevice,
+    /// Kept alive: input/output views are created against the enumerator.
+    enumerator: ID3D11VideoProcessorEnumerator,
+    processor: ID3D11VideoProcessor,
+    /// Persistent intermediate BGRA (the captured texture is copied here
+    /// GPU-side: duplication surfaces cannot always back a VP input view).
+    bgra: ID3D11Texture2D,
+    /// Persistent NV12 surface fed to the MFT.
+    nv12: ID3D11Texture2D,
+    /// Plain NV12 (no bind flags) handed to the MFT: the video processor
+    /// needs RENDER_TARGET on its output, but some hardware MFTs (NVIDIA)
+    /// reject bound textures as encoder input — one extra GPU copy.
+    nv12_feed: ID3D11Texture2D,
+    /// Kept alive: the MFT borrows it for the session.
+    _manager: IMFDXGIDeviceManager,
+}
+
+/// VP9/H264 video encoder through a Media Foundation transform (§18.75).
+/// CPU input (BGRA → NV12/I420 internally) or zero-copy GPU input
+/// ([`MfEncoder::encode_gpu`]) when built with a shared D3D11 device.
 pub struct MfEncoder {
     transform: IMFTransform,
     codec_api: ICodecAPI,
@@ -208,47 +284,216 @@ pub struct MfEncoder {
     out_provides_samples: bool,
     /// Input layout actually negotiated: NV12 when true, I420 when false.
     nv12: bool,
+    codec: VideoCodecType,
     width: u32,
     height: u32,
     fps: u32,
     kbps: u32,
     frame_counter: u64,
     pending: VecDeque<PendingPacket>,
+    gpu: Option<GpuPipeline>,
     /// Friendly name of the chosen MFT (for the "encoder ready" log line).
     mft_name: String,
     _guard: MfGuard,
 }
 
+/// Primes an MFT for zero-copy GPU input on `device` (§18.75 H2): hands
+/// the DXGI device manager to the transform and builds the video-processor
+/// chain that converts the captured BGRA texture into the NV12 surface the
+/// hardware encoder consumes. Any failure here means "no GPU path" — the
+/// caller retries with CPU input or falls back to libvpx.
+fn init_gpu(transform: &IMFTransform, device: &ID3D11Device, width: u32, height: u32) -> Result<GpuPipeline> {
+    unsafe {
+        let mut token = 0u32;
+        let mut manager: Option<IMFDXGIDeviceManager> = None;
+        MFCreateDXGIDeviceManager(&raw mut token, &raw mut manager)
+            .map_err(|e| CodecError::Backend(format!("MFCreateDXGIDeviceManager: {e}")))?;
+        let manager =
+            manager.ok_or_else(|| CodecError::Backend("DXGI device manager not created".into()))?;
+        manager
+            .ResetDevice(device, token)
+            .map_err(|e| CodecError::Backend(format!("DXGI manager ResetDevice: {e}")))?;
+        transform
+            .ProcessMessage(
+                MFT_MESSAGE_SET_D3D_MANAGER,
+                manager.as_raw() as usize,
+            )
+            .map_err(|e| CodecError::Backend(format!("MFT rejected the D3D11 manager: {e}")))?;
+
+        let video_device: ID3D11VideoDevice = device
+            .cast()
+            .map_err(|e| CodecError::Backend(format!("no ID3D11VideoDevice: {e}")))?;
+        let context = device
+            .GetImmediateContext()
+            .map_err(|e| CodecError::Backend(format!("no immediate D3D11 context: {e}")))?;
+        let video_context: ID3D11VideoContext = context
+            .cast()
+            .map_err(|e| CodecError::Backend(format!("no ID3D11VideoContext: {e}")))?;
+
+        let vp_content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
+            InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
+            InputFrameRate: DXGI_RATIONAL { Numerator: 30, Denominator: 1 },
+            InputWidth: width,
+            InputHeight: height,
+            OutputWidth: width,
+            OutputHeight: height,
+            OutputFrameRate: DXGI_RATIONAL { Numerator: 30, Denominator: 1 },
+            Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+        };
+        let enumerator = video_device
+            .CreateVideoProcessorEnumerator(&raw const vp_content)
+            .map_err(|e| CodecError::Backend(format!("VP enumerator: {e}")))?;
+        let in_support = enumerator
+            .CheckVideoProcessorFormat(DXGI_FORMAT_B8G8R8A8_UNORM)
+            .map_err(|e| CodecError::Backend(format!("VP input format check: {e}")))?;
+        let out_support = enumerator
+            .CheckVideoProcessorFormat(DXGI_FORMAT_NV12)
+            .map_err(|e| CodecError::Backend(format!("VP output format check: {e}")))?;
+        if in_support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT.0 as u32 == 0
+            || out_support & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT.0 as u32 == 0
+        {
+            return Err(CodecError::Backend(
+                "video processor cannot convert BGRA to NV12 on this device".into(),
+            ));
+        }
+        let processor = video_device
+            .CreateVideoProcessor(&enumerator, 0)
+            .map_err(|e| CodecError::Backend(format!("CreateVideoProcessor: {e}")))?;
+
+        let mut desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut bgra = None;
+        device
+            .CreateTexture2D(&raw const desc, None, Some(&raw mut bgra))
+            .map_err(|e| CodecError::Backend(format!("BGRA intermediate texture: {e}")))?;
+        desc.Format = DXGI_FORMAT_NV12;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET.0 as u32;
+        let mut nv12 = None;
+        device
+            .CreateTexture2D(&raw const desc, None, Some(&raw mut nv12))
+            .map_err(|e| CodecError::Backend(format!("NV12 target texture: {e}")))?;
+        desc.BindFlags = 0;
+        let mut nv12_feed = None;
+        device
+            .CreateTexture2D(&raw const desc, None, Some(&raw mut nv12_feed))
+            .map_err(|e| CodecError::Backend(format!("NV12 feed texture: {e}")))?;
+
+        Ok(GpuPipeline {
+            context,
+            video_context,
+            video_device,
+            enumerator,
+            processor,
+            bgra: bgra.ok_or_else(|| CodecError::Backend("BGRA texture not created".into()))?,
+            nv12: nv12.ok_or_else(|| CodecError::Backend("NV12 texture not created".into()))?,
+            nv12_feed: nv12_feed
+                .ok_or_else(|| CodecError::Backend("NV12 feed texture not created".into()))?,
+            _manager: manager,
+        })
+    }
+}
+
 impl MfEncoder {
-    /// Picks the best VP9 MFT (D3D11-aware first: hardware marks itself so)
-    /// and configures it for `width`x`height` at `fps`, `kbps`, low latency.
-    /// With `hw_only` only hardware transforms are considered (the Microsoft
-    /// Store software MFT is skipped). Returns `CodecError::Unsupported`
-    /// when no matching VP9 MFT exists — the caller falls back to libvpx.
-    pub fn new_vp9(width: u32, height: u32, fps: u32, kbps: u32, hw_only: bool) -> Result<Self> {
+    /// Picks the best MFT for `codec` (D3D11-aware first: hardware marks
+    /// itself so) and configures it for `width`x`height` at `fps`, `kbps`,
+    /// low latency. With `hw_only` only hardware transforms are considered
+    /// (the Microsoft Store software MFT is skipped). With `gpu_device`
+    /// the encoder is primed for zero-copy input on that device
+    /// ([`MfEncoder::encode_gpu`]); a failure to negotiate the D3D11
+    /// handshake with the MFT fails the whole constructor — the caller
+    /// retries without the device or falls back to libvpx. Returns
+    /// `CodecError::Unsupported` when no matching MFT exists at all.
+    #[allow(clippy::too_many_lines)] // MFT negotiation is one long COM sequence; splitting hurts readability.
+    pub fn new_mft(
+        codec: MftCodec,
+        width: u32,
+        height: u32,
+        fps: u32,
+        kbps: u32,
+        hw_only: bool,
+        gpu_device: Option<ID3D11Device>,
+    ) -> Result<Self> {
         let guard = MfGuard::acquire()?;
-        let activates = enumerate_activates(&MFVideoFormat_VP90, hw_only)?;
+        let activates = enumerate_activates(codec.subtype(), hw_only)?;
         if activates.is_empty() {
             return Err(CodecError::Unsupported(if hw_only {
-                "no hardware VP9 encoder MFT registered"
+                "no hardware encoder MFT registered for the codec"
             } else {
-                "no VP9 encoder MFT registered"
+                "no encoder MFT registered for the codec"
             }));
         }
         // Prefer D3D11-aware (hardware); among equals, the registry order.
-        let act = activates
-            .iter()
-            .max_by_key(|a| unsafe { a.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) })
-            .expect("non-empty")
-            .clone();
-        let info = read_info(&act, "VP9");
+        // Lab override: MF_PICK=<substring> forces a specific MFT by name.
+        let pick = std::env::var("MF_PICK").ok();
+        let act = if let Some(pick) = pick.as_deref() {
+            activates
+                .iter()
+                .find(|a| {
+                    read_info(a, "")
+                        .name
+                        .to_lowercase()
+                        .contains(&pick.to_lowercase())
+                })
+                .ok_or(CodecError::Unsupported("no MFT matches the MF_PICK filter"))?
+                .clone()
+        } else {
+            activates
+                .iter()
+                .max_by_key(|a| unsafe { a.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) })
+                .expect("non-empty")
+                .clone()
+        };
+        let info = read_info(
+            &act,
+            match codec {
+                MftCodec::Vp9 => "VP9",
+                MftCodec::H264 => "H264",
+            },
+        );
 
         let transform: IMFTransform = unsafe { act.ActivateObject() }
             .map_err(|e| CodecError::Backend(format!("MFT activate: {e}")))?;
         let codec_api: ICodecAPI = transform
             .cast()
             .map_err(|e| CodecError::Backend(format!("MFT has no ICodecAPI: {e}")))?;
+
+        // Async MFTs refuse SetInputType/ProcessMessage from a synchronous
+        // caller until explicitly unlocked (MF_E_ASYNC 0xC00D6D77
+        // otherwise); unlock before querying the event generator too.
+        if let Ok(attrs) = unsafe { transform.GetAttributes() } {
+            unsafe {
+                let _ = attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1);
+            }
+        }
         let events: Option<IMFMediaEventGenerator> = transform.cast().ok();
+        if std::env::var_os("MF_DEBUG").is_some() {
+            let flags = unsafe {
+                transform
+                    .GetAttributes()
+                    .and_then(|a| a.GetUINT32(&MF_TRANSFORM_FLAGS_Attribute))
+                    .unwrap_or(0)
+            };
+            eprintln!("[mf] post-activate flags=0x{flags:x} events={}", events.is_some());
+        }
+
+        // Zero-copy GPU input (H2): hand the DXGI device manager to the
+        // MFT and build the BGRA→NV12 video-processor chain. Done before
+        // any type negotiation: several hardware MFTs (NVIDIA) only enable
+        // their D3D11 input path when the manager arrives first.
+        let gpu = match gpu_device {
+            Some(device) => Some(init_gpu(&transform, &device, width, height)?),
+            None => None,
+        };
 
         // Non-default stream IDs are rare; try the query, default to 0/0.
         let (mut in_stream, mut out_stream) = (0u32, 0u32);
@@ -259,12 +504,12 @@ impl MfEncoder {
             );
         }
 
-        // Output type: video/VP9 with size, rate and average bitrate.
+        // Output type: video/<codec> with size, rate and average bitrate.
         let out_type = unsafe { MFCreateMediaType() }
             .map_err(|e| CodecError::Backend(format!("MFCreateMediaType: {e}")))?;
         unsafe {
             out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-                .and_then(|()| out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_VP90))
+                .and_then(|()| out_type.SetGUID(&MF_MT_SUBTYPE, codec.subtype()))
                 .and_then(|()| out_type.SetUINT32(&MF_MT_AVG_BITRATE, kbps * 1000))
                 .and_then(|()| {
                     out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
@@ -337,11 +582,22 @@ impl MfEncoder {
 
         // Codec API knobs (each is best-effort except the bitrate): low
         // latency for interactive desktop, average bitrate as the target.
+        // Lab override: MF_KNOBS=0 skips the optional knobs (some MFTs
+        // misbehave with low-latency / rate-control settings).
+        let knobs = std::env::var("MF_KNOBS").ok().as_deref() != Some("0");
         unsafe {
-            let _ = codec_api.SetValue(&CODECAPI_AVLowLatencyMode, &variant_bool(true));
+            if knobs {
+                let _ = codec_api.SetValue(&CODECAPI_AVLowLatencyMode, &variant_bool(true));
+                // CBR rate control; some hardware MFTs reject streams
+                // without an explicit rate-control mode.
+                let _ = codec_api.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(0));
+            }
             codec_api
                 .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(kbps * 1000))
                 .map_err(|e| CodecError::Backend(format!("set mean bitrate: {e}")))?;
+        }
+
+        unsafe {
             transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
                 .and_then(|()| transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0))
@@ -353,6 +609,15 @@ impl MfEncoder {
                 .GetOutputStreamInfo(out_stream)
                 .map_err(|e| CodecError::Backend(format!("GetOutputStreamInfo: {e}")))?
         };
+        if std::env::var_os("MF_DEBUG").is_some() {
+            eprintln!(
+                "[mf] out_info cbSize={} flags=0x{:x} provides={} input={}",
+                out_info.cbSize,
+                out_info.dwFlags,
+                out_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0,
+                if nv12 { "NV12" } else { "I420" }
+            );
+        }
 
         Ok(Self {
             transform,
@@ -365,15 +630,31 @@ impl MfEncoder {
                 & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
                 != 0,
             nv12,
+            codec: codec.codec_type(),
             width,
             height,
             fps,
             kbps,
             frame_counter: 0,
             pending: VecDeque::new(),
+            gpu,
             mft_name: info.name,
             _guard: guard,
         })
+    }
+
+    /// VP9 convenience wrapper over [`MfEncoder::new_mft`] (CPU input).
+    ///
+    /// # Errors
+    /// Same as [`MfEncoder::new_mft`].
+    pub fn new_vp9(width: u32, height: u32, fps: u32, kbps: u32, hw_only: bool) -> Result<Self> {
+        Self::new_mft(MftCodec::Vp9, width, height, fps, kbps, hw_only, None)
+    }
+
+    /// True when this encoder was primed for zero-copy GPU input.
+    #[must_use]
+    pub fn gpu_capable(&self) -> bool {
+        self.gpu.is_some()
     }
 
     /// Friendly name of the chosen MFT (log line).
@@ -405,7 +686,7 @@ impl MfEncoder {
     fn make_sample(&self, data: &[u8]) -> Result<IMFSample> {
         let sample = unsafe { MFCreateSample() }
             .map_err(|e| CodecError::Backend(format!("MFCreateSample: {e}")))?;
-        let buffer = unsafe { MFCreateMemoryBuffer(data.len() as u32) }
+        let buffer = unsafe { MFCreateMemoryBuffer(u32::try_from(data.len()).unwrap_or(u32::MAX)) }
             .map_err(|e| CodecError::Backend(format!("MFCreateMemoryBuffer: {e}")))?;
         unsafe {
             let mut ptr = std::ptr::null_mut();
@@ -415,13 +696,13 @@ impl MfEncoder {
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
             buffer
                 .Unlock()
-                .and_then(|()| buffer.SetCurrentLength(data.len() as u32))
+                .and_then(|()| buffer.SetCurrentLength(u32::try_from(data.len()).unwrap_or(u32::MAX)))
                 .map_err(|e| CodecError::Backend(format!("buffer commit: {e}")))?;
             sample
                 .AddBuffer(&buffer)
                 .map_err(|e| CodecError::Backend(format!("AddBuffer: {e}")))?;
             let dur = 10_000_000i64 / i64::from(self.fps.max(1));
-            sample.SetSampleTime(self.frame_counter as i64 * dur).ok();
+            sample.SetSampleTime(self.frame_counter.cast_signed() * dur).ok();
             sample.SetSampleDuration(dur).ok();
         }
         Ok(sample)
@@ -509,25 +790,22 @@ impl MfEncoder {
 // the encoder between threads is safe.
 unsafe impl Send for MfEncoder {}
 
-impl VideoEncoder for MfEncoder {
-    fn encode(&mut self, frame: &VideoFrame<'_>) -> Result<EncodedPacket> {
-        if frame.width != self.width || frame.height != self.height {
-            return Err(CodecError::BadDimensions {
-                width: frame.width,
-                height: frame.height,
-                stride: frame.stride,
-                data_len: frame.data.len(),
-            });
+impl MfEncoder {
+    /// Stamps, feeds and drains one prepared sample; shared by the CPU and
+    /// GPU input paths.
+    fn submit_and_collect(&mut self, sample: &IMFSample) -> Result<EncodedPacket> {
+        unsafe {
+            let dur = 10_000_000i64 / i64::from(self.fps.max(1));
+            sample.SetSampleTime(self.frame_counter.cast_signed() * dur).ok();
+            sample.SetSampleDuration(dur).ok();
         }
-        let data = self.convert_input(frame)?;
-        let sample = self.make_sample(&data)?;
         self.frame_counter += 1;
 
         // Feed; when the MFT is momentarily full, pump events until it
         // wants input again (async MFTs) or fail.
         let mut feed_attempts = 0u32;
         loop {
-            match unsafe { self.transform.ProcessInput(self.in_stream, &sample, 0) } {
+            match unsafe { self.transform.ProcessInput(self.in_stream, sample, 0) } {
                 Ok(()) => break,
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
                     if self.events.is_none() {
@@ -545,10 +823,17 @@ impl VideoEncoder for MfEncoder {
             }
         }
 
-        // Sync MFT: drain right away. Async MFT: pump events until at least
-        // one output packet lands in the queue.
+        // Sync MFT: drain right away. Sync MFTs with internal lookahead
+        // (B-frames) legitimately yield nothing for some inputs — the
+        // server already treats an empty packet as "no output this frame".
         if self.events.is_none() {
             self.drain_outputs()?;
+            if self.pending.is_empty() {
+                return Ok(EncodedPacket {
+                    data: Vec::new(),
+                    keyframe: false,
+                });
+            }
         }
         let mut stalls = 0u32;
         while self.pending.is_empty() {
@@ -563,6 +848,123 @@ impl VideoEncoder for MfEncoder {
             data: packet.data,
             keyframe: packet.keyframe,
         })
+    }
+
+    /// Wraps the NV12 GPU surface in an MF sample (zero-copy).
+    fn make_gpu_sample(&self) -> Result<IMFSample> {
+        let gpu = self
+            .gpu
+            .as_ref()
+            .ok_or_else(|| CodecError::Backend("encoder is not GPU-primed".into()))?;
+        let sample = unsafe { MFCreateSample() }
+            .map_err(|e| CodecError::Backend(format!("MFCreateSample: {e}")))?;
+        let surface: IDXGISurface = gpu
+            .nv12_feed
+            .cast()
+            .map_err(|e| CodecError::Backend(format!("NV12 texture is no DXGI surface: {e}")))?;
+        let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &surface, 0, false) }
+            .map_err(|e| CodecError::Backend(format!("MFCreateDXGISurfaceBuffer: {e}")))?;
+        unsafe {
+            sample
+                .AddBuffer(&buffer)
+                .map_err(|e| CodecError::Backend(format!("AddBuffer: {e}")))?;
+        }
+        Ok(sample)
+    }
+
+    /// Zero-copy GPU input (§18.75 H2): `src` is a BGRA texture on the
+    /// shared device (e.g. the DXGI duplication output). The frame is
+    /// copied GPU-side into the intermediate BGRA surface, converted to
+    /// NV12 by the video processor and fed to the MFT — nothing touches
+    /// the CPU.
+    ///
+    /// # Errors
+    /// [`CodecError::Backend`] when the encoder was not built with a GPU
+    /// device, or on any D3D11/MFT failure.
+    pub fn encode_gpu(&mut self, src: &ID3D11Texture2D) -> Result<EncodedPacket> {
+        let gpu = self
+            .gpu
+            .as_ref()
+            .ok_or_else(|| CodecError::Backend("encoder is not GPU-primed".into()))?;
+        let mut src_desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { src.GetDesc(&raw mut src_desc) };
+        if src_desc.Width != self.width || src_desc.Height != self.height {
+            return Err(CodecError::BadDimensions {
+                width: src_desc.Width,
+                height: src_desc.Height,
+                stride: 0,
+                data_len: 0,
+            });
+        }
+        unsafe {
+            gpu.context.CopyResource(&gpu.bgra, src);
+            let in_view_desc = D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC {
+                FourCC: 0,
+                ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 },
+                },
+            };
+            let mut in_view: Option<ID3D11VideoProcessorInputView> = None;
+            gpu.video_device
+                .CreateVideoProcessorInputView(
+                    &gpu.bgra,
+                    &gpu.enumerator,
+                    &raw const in_view_desc,
+                    Some(&raw mut in_view),
+                )
+                .map_err(|e| CodecError::Backend(format!("VP input view: {e}")))?;
+            let in_view =
+                in_view.ok_or_else(|| CodecError::Backend("VP input view not created".into()))?;
+            let out_view_desc = D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC {
+                ViewDimension: D3D11_VPOV_DIMENSION_TEXTURE2D,
+                Anonymous: D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0 {
+                    Texture2D: D3D11_TEX2D_VPOV { MipSlice: 0 },
+                },
+            };
+            let mut out_view: Option<ID3D11VideoProcessorOutputView> = None;
+            gpu.video_device
+                .CreateVideoProcessorOutputView(
+                    &gpu.nv12,
+                    &gpu.enumerator,
+                    &raw const out_view_desc,
+                    Some(&raw mut out_view),
+                )
+                .map_err(|e| CodecError::Backend(format!("VP output view: {e}")))?;
+            let out_view =
+                out_view.ok_or_else(|| CodecError::Backend("VP output view not created".into()))?;
+            let mut stream = D3D11_VIDEO_PROCESSOR_STREAM {
+                Enable: TRUE,
+                pInputSurface: ManuallyDrop::new(Some(in_view)),
+                ..Default::default()
+            };
+            let blt = gpu
+                .video_context
+                .VideoProcessorBlt(&gpu.processor, &out_view, 0, std::slice::from_ref(&stream));
+            // Reclaim the input view wrapped in ManuallyDrop so its COM
+            // reference is released with the frame, not leaked.
+            drop(ManuallyDrop::take(&mut stream.pInputSurface));
+            blt.map_err(|e| CodecError::Backend(format!("VideoProcessorBlt: {e}")))?;
+            gpu.context.CopyResource(&gpu.nv12_feed, &gpu.nv12);
+        }
+        let sample = self.make_gpu_sample()?;
+        self.submit_and_collect(&sample)
+    }
+}
+
+impl VideoEncoder for MfEncoder {
+    fn encode(&mut self, frame: &VideoFrame<'_>) -> Result<EncodedPacket> {
+        if frame.width != self.width || frame.height != self.height {
+            return Err(CodecError::BadDimensions {
+                width: frame.width,
+                height: frame.height,
+                stride: frame.stride,
+                data_len: frame.data.len(),
+            });
+        }
+        let data = self.convert_input(frame)?;
+        let sample = self.make_sample(&data)?;
+        self.submit_and_collect(&sample)
     }
 
     fn request_keyframe(&mut self) {
@@ -584,6 +986,6 @@ impl VideoEncoder for MfEncoder {
     }
 
     fn codec_type(&self) -> VideoCodecType {
-        VideoCodecType::Vp9
+        self.codec
     }
 }
