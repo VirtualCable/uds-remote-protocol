@@ -2374,7 +2374,7 @@ async fn serve_stream<T: ReliableTransport>(
         last_lock_req: None,
         allow_lock: args.allow_lock,
         injector: new_injector(),
-        video_ceiling_kbps: video_ceiling_kbps(args),
+        video_ceiling_kbps: video_ceiling_kbps(args, width, height),
         audio_ceiling_kbps,
         audio_control,
         fec_on: false,
@@ -3343,14 +3343,17 @@ fn ladder_knobs(spec: &str) -> Result<LadderKnobs> {
 }
 
 /// Video bitrate ceiling in kbps (§18.69): `--bitrate` wins, then
-/// `[quality] video_kbps`, else auto from the session resolution — 2000 at
-/// ≤1080p, scaling ~sqrt(pixels) above so 4K lands ≈ 4000 (not 4×).
-fn video_ceiling_kbps(args: &Args) -> u32 {
+/// `[quality] video_kbps`, else auto from the **real capture resolution**
+/// (§18.71 BUG-B3: in `--agent-config-stdin` mode `args.width/height` stay
+/// at their 640×480 defaults and the auto value collapsed to the 1000 clamp
+/// regardless of the actual session resolution) — 2000 at ≤1080p, scaling
+/// ~sqrt(pixels) above so 4K lands ≈ 4000 (not 4×).
+fn video_ceiling_kbps(args: &Args, width: u32, height: u32) -> u32 {
     const BASE_PX: f64 = 1920.0 * 1080.0;
     if let Some(kbps) = args.bitrate.or(args.quality.video_kbps) {
         return kbps;
     }
-    let px = f64::from(args.width) * f64::from(args.height);
+    let px = f64::from(width) * f64::from(height);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped below
     {
         (2000.0 * (px / BASE_PX).sqrt()).round().clamp(1000.0, 16_000.0) as u32
@@ -3363,7 +3366,7 @@ fn video_ceiling_kbps(args: &Args) -> u32 {
 fn build_encoder(args: &Args, width: u32, height: u32) -> Result<ServerEncoder> {
     #[cfg(feature = "ladder")]
     if args.preset == "ladder" {
-        let kbps = video_ceiling_kbps(args);
+        let kbps = video_ceiling_kbps(args, width, height);
         let knobs = ladder_knobs(&args.ladder)?;
         let encoder = match (knobs.vp9_cpu, knobs.threads) {
             (None, None) => codec::LadderEncoder::new(width, height, knobs.policy, kbps, 80)?,
