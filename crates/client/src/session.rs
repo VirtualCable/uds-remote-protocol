@@ -911,6 +911,11 @@ struct DecodeWorker {
     /// announcements, or Raw on first frame for servers that do not
     /// announce (§8.4 compat).
     decoders: HashMap<u8, Box<dyn VideoDecoder>>,
+    /// Codec whose decoder build already failed per display: frames are
+    /// dropped quietly instead of warning/retrying per frame (a broken
+    /// build does not fix itself between frames). Cleared when the codec
+    /// tag changes — the server may have switched regime.
+    decoder_failures: HashMap<u8, VideoCodecType>,
     /// Shared with the network task: it drives the keyframe requests.
     recovery_awaiting: Arc<AtomicBool>,
     /// Audio playback cursor (capture-clock ms), for the A/V decisions.
@@ -949,6 +954,7 @@ impl DecodeWorker {
             events,
             displays,
             decoders: HashMap::new(),
+            decoder_failures: HashMap::new(),
             recovery_awaiting: Arc::clone(&recovery_awaiting),
             audio_clock,
             audio_now_last: None,
@@ -1068,13 +1074,22 @@ impl DecodeWorker {
             .get(&complete.display_id)
             .is_none_or(|d| d.codec_type() != codec_type);
         if needs_build {
+            if self.decoder_failures.get(&complete.display_id) == Some(&codec_type) {
+                return; // already failed for this codec; drop quietly
+            }
             match codec::build_decoder(codec_type) {
                 Ok(dec) => {
                     info!(display_id = complete.display_id, codec_id, "decoder (re)built from frame tag");
+                    self.decoder_failures.remove(&complete.display_id);
                     self.decoders.insert(complete.display_id, dec);
                 }
                 Err(e) => {
                     warn!(codec_id, "cannot build decoder: {e}");
+                    self.decoder_failures.insert(complete.display_id, codec_type);
+                    let _ = emit(
+                        &self.events,
+                        ClientEvent::Error(format!("cannot build video decoder: {e}")),
+                    );
                     return;
                 }
             }
