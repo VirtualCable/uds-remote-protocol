@@ -181,8 +181,9 @@ impl LadderEncoder {
     }
 
     /// Media Foundation VP9 leg instead of libvpx (Windows + `codec-mf`).
-    /// Hardware whenever the driver exposes a VP9 MFT; the Microsoft Store
-    /// software MFT is a valid fallback too. `cpu_used` becomes a no-op.
+    /// With `hw_only` only a hardware MFT qualifies (the Microsoft Store
+    /// software MFT is skipped); otherwise any registered MFT serves.
+    /// `cpu_used` becomes a no-op on this backend.
     #[cfg(all(windows, feature = "codec-mf"))]
     pub fn with_mf_vp9(
         width: u32,
@@ -190,6 +191,7 @@ impl LadderEncoder {
         policy: LadderPolicy,
         vp9_kbps: u32,
         jpeg_quality: i32,
+        hw_only: bool,
     ) -> Result<Self> {
         if width == 0 || height == 0 {
             return Err(CodecError::BadDimensions {
@@ -204,7 +206,7 @@ impl LadderEncoder {
             height,
             ladder: Ladder::new(policy, Instant::now()),
             jpeg: JpegRectsEncoder::new(width, height, jpeg_quality)?,
-            vp9: Vp9Backend::Mf(crate::mf::MfEncoder::new_vp9(width, height, 30, vp9_kbps)?),
+            vp9: Vp9Backend::Mf(crate::mf::MfEncoder::new_vp9(width, height, 30, vp9_kbps, hw_only)?),
             prev: None,
             pending_change: None,
             force_full: false,

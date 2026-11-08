@@ -49,7 +49,8 @@ fn main() {
 #[cfg(all(windows, feature = "mf-probe"))]
 fn encode_test(frames: u32) -> i32 {
     let (w, h, fps, kbps) = (1920u32, 1080u32, 30u32, 2_000u32);
-    let mut enc = match codec::mf::MfEncoder::new_vp9(w, h, fps, kbps) {
+    // Lab probe: accept any registered MFT, software included.
+    let mut enc = match codec::mf::MfEncoder::new_vp9(w, h, fps, kbps, false) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("MfEncoder init failed: {e}");

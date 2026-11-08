@@ -3394,12 +3394,14 @@ fn build_encoder(args: &Args, width: u32, height: u32) -> Result<ServerEncoder> 
             "bad encoder backend {:?} (auto|mf|software)",
             args.encoder
         );
-        // Media Foundation VP9 leg (Windows): "" / "auto" tries it and falls
-        // back to libvpx; "mf" is the same but logs the fallback as a
-        // warning; "software" goes straight to libvpx.
+        // Media Foundation VP9 leg (Windows): "" / "auto" accepts only a
+        // hardware MFT (the Microsoft Store software MFT is not better than
+        // our tuned libvpx); "mf" forces MF even if it is software (lab);
+        // either way an init failure falls back to libvpx with a warning.
         #[cfg(all(windows, feature = "codec-mf"))]
         if matches!(args.encoder.as_str(), "" | "auto" | "mf") {
-            match codec::LadderEncoder::with_mf_vp9(width, height, knobs.policy.clone(), kbps, 80)
+            let hw_only = args.encoder != "mf";
+            match codec::LadderEncoder::with_mf_vp9(width, height, knobs.policy.clone(), kbps, 80, hw_only)
             {
                 Ok(encoder) => {
                     info!(width, height, kbps, "codec ladder ready (rects-jpeg <-> vp9 via Media Foundation)");

@@ -99,26 +99,32 @@ const SUBTYPES: [(&GUID, &str); 2] = [
 pub fn enumerate_encoders() -> Result<Vec<MftInfo>> {
     let mut out = Vec::new();
     for (subtype, label) in SUBTYPES {
-        for act in enumerate_activates(subtype)? {
+        for act in enumerate_activates(subtype, false)? {
             out.push(read_info(&act, label));
         }
     }
     Ok(out)
 }
 
-/// Enumerates the activates of encoder MFTs producing `subtype`, software
-/// and hardware, field-of-use filtered out.
-fn enumerate_activates(subtype: &GUID) -> Result<Vec<IMFActivate>> {
+/// Enumerates the activates of encoder MFTs producing `subtype`,
+/// field-of-use filtered out. `hw_only` restricts the enumeration to
+/// hardware transforms (the OS itself classifies them — the
+/// `MF_SA_D3D11_AWARE` attribute is not reliable for this).
+fn enumerate_activates(subtype: &GUID, hw_only: bool) -> Result<Vec<IMFActivate>> {
     let output = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: *subtype,
     };
-    let flags = MFT_ENUM_FLAG(
-        MFT_ENUM_FLAG_SYNCMFT.0
-            | MFT_ENUM_FLAG_ASYNCMFT.0
-            | MFT_ENUM_FLAG_HARDWARE.0
-            | MFT_ENUM_FLAG_LOCALMFT.0,
-    );
+    let flags = if hw_only {
+        MFT_ENUM_FLAG(MFT_ENUM_FLAG_HARDWARE.0)
+    } else {
+        MFT_ENUM_FLAG(
+            MFT_ENUM_FLAG_SYNCMFT.0
+                | MFT_ENUM_FLAG_ASYNCMFT.0
+                | MFT_ENUM_FLAG_HARDWARE.0
+                | MFT_ENUM_FLAG_LOCALMFT.0,
+        )
+    };
     let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0u32;
     unsafe {
@@ -216,13 +222,18 @@ pub struct MfEncoder {
 impl MfEncoder {
     /// Picks the best VP9 MFT (D3D11-aware first: hardware marks itself so)
     /// and configures it for `width`x`height` at `fps`, `kbps`, low latency.
-    /// Returns `CodecError::Unsupported` when no VP9 MFT exists at all — the
-    /// caller falls back to libvpx.
-    pub fn new_vp9(width: u32, height: u32, fps: u32, kbps: u32) -> Result<Self> {
+    /// With `hw_only` only hardware transforms are considered (the Microsoft
+    /// Store software MFT is skipped). Returns `CodecError::Unsupported`
+    /// when no matching VP9 MFT exists — the caller falls back to libvpx.
+    pub fn new_vp9(width: u32, height: u32, fps: u32, kbps: u32, hw_only: bool) -> Result<Self> {
         let guard = MfGuard::acquire()?;
-        let activates = enumerate_activates(&MFVideoFormat_VP90)?;
+        let activates = enumerate_activates(&MFVideoFormat_VP90, hw_only)?;
         if activates.is_empty() {
-            return Err(CodecError::Unsupported("no VP9 encoder MFT registered"));
+            return Err(CodecError::Unsupported(if hw_only {
+                "no hardware VP9 encoder MFT registered"
+            } else {
+                "no VP9 encoder MFT registered"
+            }));
         }
         // Prefer D3D11-aware (hardware); among equals, the registry order.
         let act = activates
