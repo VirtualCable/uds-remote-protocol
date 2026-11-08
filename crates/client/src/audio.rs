@@ -704,7 +704,9 @@ mod tests {
         let preset = AudioPreset::default();
         let mut encoder = codec::build_audio_encoder(&preset).unwrap();
         let pcm = vec![700i16; preset.frame_samples() * 2];
-        for seq in 0..3u32 {
+        // Six packets prime the depth-6 playback buffer (§9.1); only the
+        // first three are ticked out below.
+        for seq in 0..6u32 {
             let mut packet = Vec::new();
             encoder.encode(&pcm, &mut packet).unwrap();
             st.push_packet(&protocol::audio::encode(
@@ -784,15 +786,20 @@ mod tests {
                 }
                 apply(&mut stream, job, &now_ms, None, &stats, None);
             }
-            (0, 0)
+            // Channel closed before the target count: report the real
+            // counters so a short tick count fails with a useful diff
+            // instead of a hang.
+            stream.map_or((0, 0), |st| (st.decoded_frames, st.plc_frames))
         });
 
         tx.send(AudioJob::Config(spec)).unwrap();
-        // Encode 5 frames of a synthetic tone and feed them as packets.
+        // Encode 6 frames of a synthetic tone and feed them as packets:
+        // the playback jitter buffer primes at depth 6 (§9.1, 120 ms), so
+        // fewer packets would never leave the priming state.
         let preset = AudioPreset::default();
         let mut encoder = codec::build_audio_encoder(&preset).unwrap();
         let mut source_pcm = vec![1000i16; preset.frame_samples() * 2];
-        for seq in 0..5u32 {
+        for seq in 0..6u32 {
             let mut packet = Vec::new();
             encoder.encode(&source_pcm, &mut packet).unwrap();
             let payload = protocol::audio::encode(
@@ -805,9 +812,14 @@ mod tests {
             tx.send(AudioJob::Packet(payload)).unwrap();
             source_pcm.fill(0);
         }
-        for _ in 0..5 {
+        // Extra ticks: the jitter buffer's priming is not tick-exact, so
+        // five ticks occasionally decode fewer than five frames. Closing
+        // the channel before the join guarantees the worker exits instead
+        // of deadlocking on a short tick count.
+        for _ in 0..20 {
             tx.send(AudioJob::Packet(Vec::new())).unwrap(); // tick marker
         }
+        drop(tx);
         let (decoded, plc) = worker.join().unwrap();
         assert_eq!(decoded, 5);
         assert_eq!(plc, 0);
@@ -835,7 +847,9 @@ mod tests {
                 if is_tick {
                     if let Some(st) = &mut stream {
                         st.tick();
-                        if st.decoded_frames >= 5 {
+                        // Exit only after the concealed gap: five decoded
+                        // frames alone are the pre-loss packets.
+                        if st.decoded_frames >= 5 && st.plc_frames >= 1 {
                             return (st.decoded_frames, st.plc_frames);
                         }
                     }
@@ -843,16 +857,19 @@ mod tests {
                 }
                 apply(&mut stream, job, &now_ms, None, &stats, None);
             }
-            (0, 0)
+            // Channel closed before the target count: report the real
+            // counters so a short tick count fails with a useful diff
+            // instead of a hang.
+            stream.map_or((0, 0), |st| (st.decoded_frames, st.plc_frames))
         });
 
         tx.send(AudioJob::Config(spec)).unwrap();
         let preset = AudioPreset::default();
         let mut encoder = codec::build_audio_encoder(&preset).unwrap();
         let pcm = vec![500i16; preset.frame_samples() * 2];
-        // seq 0, 1, 2, then 4 (3 is lost): the jitter buffer primes on the
-        // first three, then conceals the gap.
-        for seq in [0u32, 1, 2, 4] {
+        // seq 0..=4, then 6 (5 is lost): six packets prime the depth-6
+        // playback buffer (§9.1), then the gap surfaces as one PLC frame.
+        for seq in [0u32, 1, 2, 3, 4, 6] {
             let mut packet = Vec::new();
             encoder.encode(&pcm, &mut packet).unwrap();
             let payload = protocol::audio::encode(
@@ -864,11 +881,13 @@ mod tests {
             );
             tx.send(AudioJob::Packet(payload)).unwrap();
         }
-        for _ in 0..5 {
+        for _ in 0..20 {
             tx.send(AudioJob::Packet(Vec::new())).unwrap(); // tick marker
         }
+        drop(tx);
         let (decoded, plc) = worker.join().unwrap();
-        assert_eq!(decoded, 5);
+        // Five real packets plus the one concealed gap.
+        assert_eq!(decoded, 6);
         assert_eq!(plc, 1);
     }
 }
