@@ -25,6 +25,8 @@
 //!          u16   webcam sink ("null"/"" = off, "raw:PATH" = E2E file)
 //!          u16   audio-in sink ("null"/"" = off, "uds" = driver mic,
 //!                "wav:PATH" = E2E file)
+//!          u16   quality policy ("k=v,..."; empty = §12.5 defaults)
+//!          u16   encoder backend (""/"auto", "mf", "software")
 //!          u32   fixed resolution width  (0 = approach the client's mode)
 //!          u32   fixed resolution height
 //!          u8    flags (bit0 = allow_lock: client may lock the console,
@@ -39,7 +41,7 @@
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 12;
+pub const AGENT_CONFIG_VERSION: u8 = 13;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -110,6 +112,10 @@ pub struct AgentConfig {
     /// `[quality]` config section serialized (ceilings, floors, weights and
     /// the level table). Empty keeps the agent's §12.5 defaults.
     pub quality: String,
+    /// VP9 encoder backend selector: "" or "auto" picks Media Foundation
+    /// when available and falls back to libvpx, "mf" forces MF (falls back
+    /// with a warning), "software" forces libvpx.
+    pub encoder: String,
     /// Server-fixed console resolution (§18.37); `(0, 0)` means the agent
     /// approaches the client's preferred mode instead.
     pub fixed_resolution: (u32, u32),
@@ -166,7 +172,8 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
             + config.stats_csv.len()
             + config.cam_sink.len()
             + config.mic_sink.len()
-            + config.quality.len(),
+            + config.quality.len()
+            + config.encoder.len(),
     );
     out.push(AGENT_CONFIG_VERSION);
     out.extend_from_slice(&config.key);
@@ -181,6 +188,7 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
         &config.cam_sink,
         &config.mic_sink,
         &config.quality,
+        &config.encoder,
     ] {
         let len = u16::try_from(s.len()).expect("string fields are bounded well below u16::MAX");
         out.extend_from_slice(&len.to_le_bytes());
@@ -224,7 +232,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     ticket.copy_from_slice(&buf[1 + KEY_LEN..1 + KEY_LEN + TICKET_LEN]);
 
     let mut rest = &buf[STRINGS_OFF..];
-    let mut strings = ["", "", "", "", "", "", "", "", ""];
+    let mut strings = ["", "", "", "", "", "", "", "", "", ""];
     for slot in &mut strings {
         let len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
         rest = &rest[2..];
@@ -285,7 +293,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         }
         _ => return Err(DecodeError::BadLength),
     };
-    let [bind, output_name, preset, ladder, fps_adapt, stats_csv, cam_sink, mic_sink, quality] =
+    let [bind, output_name, preset, ladder, fps_adapt, stats_csv, cam_sink, mic_sink, quality, encoder] =
         strings;
     Ok(AgentConfig {
         key,
@@ -299,6 +307,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         cam_sink: cam_sink.to_owned(),
         mic_sink: mic_sink.to_owned(),
         quality: quality.to_owned(),
+        encoder: encoder.to_owned(),
         fixed_resolution,
         allow_lock,
         wallpaper_off,
@@ -323,6 +332,7 @@ mod tests {
             cam_sink: String::new(),
             mic_sink: String::new(),
             quality: "wc=0.2,wcpu=0.3,wbw=0.5,levels=1.0:30:1.0:80:8;0.5:30:0.75:75:8".to_owned(),
+            encoder: "auto".to_owned(),
             fixed_resolution: (1280, 720),
             allow_lock: true,
             wallpaper_off: false,

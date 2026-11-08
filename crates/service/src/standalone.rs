@@ -70,6 +70,8 @@ pub struct StandaloneRuntime {
     /// Quality policy in wire form for the agent (§18.69; empty = §12.5
     /// defaults).
     pub quality: String,
+    /// VP9 encoder backend selector for the agent (""/"auto"/"mf"/"software").
+    pub encoder: String,
 }
 
 /// Active connection mode for the service.
@@ -197,5 +199,6 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
         console_conflict_timeout_secs: standalone.console_conflict_timeout_secs,
         console_takeover: standalone.console_takeover,
         quality: config.quality.to_wire(),
+        encoder: standalone.encoder.clone(),
     })
 }

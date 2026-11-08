@@ -223,6 +223,7 @@ fn legacy_config() -> protocol::service_ipc::AgentConfig {
         cam_sink: String::new(),
         mic_sink: String::new(),
         quality: String::new(),
+        encoder: String::new(),
         fixed_resolution: (0, 0),
         allow_lock: false,
         wallpaper_off: false,

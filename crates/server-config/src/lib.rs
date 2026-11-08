@@ -532,6 +532,10 @@ pub struct StandaloneConfig {
     pub fps: u32,
     /// Codec preset name (from `codec::PRESETS`).
     pub preset: String,
+    /// VP9 encoder backend: "" / `"auto"` (Media Foundation when available,
+    /// libvpx otherwise), `"mf"` (force MF; falls back with a warning) or
+    /// `"software"` (force libvpx).
+    pub encoder: String,
     /// Which desktop output to capture: case-insensitive substring of the
     /// adapter description or GDI device string. `None` captures the UDS
     /// virtual display (service default); set it to the physical console
@@ -724,6 +728,7 @@ impl Default for StandaloneConfig {
             resolution: None,
             fps: 30,
             preset: "ladder".to_string(),
+            encoder: String::new(),
             output_name: None,
             channels: ChannelSwitches {
                 audio: true,
@@ -914,6 +919,13 @@ pub fn load(path: &Path) -> Result<ServerConfig> {
         .quality
         .validate()
         .with_context(|| format!("validating [quality] of {}", path.display()))?;
+    if let Some(standalone) = &config.standalone {
+        anyhow::ensure!(
+            matches!(standalone.encoder.as_str(), "" | "auto" | "mf" | "software"),
+            "standalone.encoder must be \"auto\", \"mf\" or \"software\" (got {:?})",
+            standalone.encoder
+        );
+    }
     Ok(config)
 }
 

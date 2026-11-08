@@ -38,7 +38,7 @@ pub struct LadderEncoder {
     height: u32,
     ladder: Ladder,
     jpeg: JpegRectsEncoder,
-    vp9: Vp9Encoder,
+    vp9: Vp9Backend,
     /// Previous frame, kept for the changed-area metric (also fed to the
     /// JPEG encoder through `encode_with_dirty`).
     prev: Option<Vec<u8>>,
@@ -51,6 +51,57 @@ pub struct LadderEncoder {
     jpeg_bps_ema: Option<f64>,
     /// Timestamp of the previous Low-level encode (for the bit-rate EMA).
     last_low_encode: Option<Instant>,
+}
+
+/// VP9 backend of the ladder's video regime (§18.75): libvpx software
+/// always, Media Foundation (hardware when the driver provides it) on
+/// Windows behind `codec-mf`. The libvpx-only knob `cpu_used` is a no-op
+/// on the MF backend — the MFT has no equivalent and the content axis
+/// simply does not steer it.
+enum Vp9Backend {
+    Software(Vp9Encoder),
+    #[cfg(all(windows, feature = "codec-mf"))]
+    Mf(crate::mf::MfEncoder),
+}
+
+impl Vp9Backend {
+    fn set_cpu_used(&mut self, cpu_used: i32) -> Result<()> {
+        match self {
+            Self::Software(e) => e.set_cpu_used(cpu_used),
+            #[cfg(all(windows, feature = "codec-mf"))]
+            Self::Mf(_) => Ok(()),
+        }
+    }
+}
+
+impl VideoEncoder for Vp9Backend {
+    fn encode(&mut self, frame: &VideoFrame<'_>) -> Result<EncodedPacket> {
+        match self {
+            Self::Software(e) => e.encode(frame),
+            #[cfg(all(windows, feature = "codec-mf"))]
+            Self::Mf(e) => e.encode(frame),
+        }
+    }
+
+    fn request_keyframe(&mut self) {
+        match self {
+            Self::Software(e) => e.request_keyframe(),
+            #[cfg(all(windows, feature = "codec-mf"))]
+            Self::Mf(e) => e.request_keyframe(),
+        }
+    }
+
+    fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
+        match self {
+            Self::Software(e) => e.set_bitrate(kbps),
+            #[cfg(all(windows, feature = "codec-mf"))]
+            Self::Mf(e) => e.set_bitrate(kbps),
+        }
+    }
+
+    fn codec_type(&self) -> VideoCodecType {
+        VideoCodecType::Vp9
+    }
 }
 
 /// JPEG egress above `BW_UP_RATIO` × the VP9 target maps to the ladder's up
@@ -113,7 +164,47 @@ impl LadderEncoder {
             height,
             ladder: Ladder::new(policy, Instant::now()),
             jpeg: JpegRectsEncoder::new(width, height, jpeg_quality)?,
-            vp9: Vp9Encoder::with_tuning(width, height, vp9_kbps, Some(vp9_cpu_used), Some(threads))?,
+            vp9: Vp9Backend::Software(Vp9Encoder::with_tuning(
+                width,
+                height,
+                vp9_kbps,
+                Some(vp9_cpu_used),
+                Some(threads),
+            )?),
+            prev: None,
+            pending_change: None,
+            force_full: false,
+            vp9_kbps,
+            jpeg_bps_ema: None,
+            last_low_encode: None,
+        })
+    }
+
+    /// Media Foundation VP9 leg instead of libvpx (Windows + `codec-mf`).
+    /// Hardware whenever the driver exposes a VP9 MFT; the Microsoft Store
+    /// software MFT is a valid fallback too. `cpu_used` becomes a no-op.
+    #[cfg(all(windows, feature = "codec-mf"))]
+    pub fn with_mf_vp9(
+        width: u32,
+        height: u32,
+        policy: LadderPolicy,
+        vp9_kbps: u32,
+        jpeg_quality: i32,
+    ) -> Result<Self> {
+        if width == 0 || height == 0 {
+            return Err(CodecError::BadDimensions {
+                width,
+                height,
+                stride: 0,
+                data_len: 0,
+            });
+        }
+        Ok(Self {
+            width,
+            height,
+            ladder: Ladder::new(policy, Instant::now()),
+            jpeg: JpegRectsEncoder::new(width, height, jpeg_quality)?,
+            vp9: Vp9Backend::Mf(crate::mf::MfEncoder::new_vp9(width, height, 30, vp9_kbps)?),
             prev: None,
             pending_change: None,
             force_full: false,

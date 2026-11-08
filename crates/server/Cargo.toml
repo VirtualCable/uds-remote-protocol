@@ -11,7 +11,8 @@ workspace = true
 
 [features]
 default = ["opus"]
-windows-capture = ["dep:windows", "dep:image", "dep:udsscard-proto", "dep:vcam"]
+windows-capture = ["dep:windows", "dep:image", "dep:udsscard-proto", "dep:vcam", "codec-mf"]
+codec-mf = ["codec/codec-mf"]
 vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
 jpeg = ["codec/codec-jpeg"]

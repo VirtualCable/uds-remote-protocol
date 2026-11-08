@@ -121,6 +121,10 @@ struct Args {
     /// Quality policy from the `[quality]` config section (§18.69): ceilings,
     /// floors, pressure weights and the level table.
     quality: server::config::QualityConfig,
+    /// VP9 encoder backend: "" / "auto" (Media Foundation when available,
+    /// libvpx otherwise), "mf" (force MF; falls back with a warning) or
+    /// "software" (force libvpx). Only meaningful with `--preset ladder`.
+    encoder: String,
 }
 
 #[allow(clippy::too_many_lines)] // config file + CLI + agent-config frame seeding
@@ -152,6 +156,7 @@ fn parse_args() -> Result<Args> {
         wallpaper_off: false,
         handoff: None,
         quality: server::config::QualityConfig::default(),
+        encoder: String::new(),
     };
     let mut key_seen = false;
     // A config file (reference/standalone mode) seeds the defaults first;
@@ -184,6 +189,7 @@ fn parse_args() -> Result<Args> {
                 server::capture::OutputSelector::NameContains(config.output_name)
             };
             args.preset = config.preset;
+            args.encoder = config.encoder;
             args.ladder = config.ladder;
             args.fps_adapt = config.fps_adapt;
             if config.fixed_resolution.0 > 0 && config.fixed_resolution.1 > 0 {
@@ -244,6 +250,7 @@ fn parse_args() -> Result<Args> {
                 args.output = server::capture::OutputSelector::NameContains(value);
             }
             "--preset" => args.preset = value,
+            "--encoder" => args.encoder = value,
             "--ladder" => args.ladder = value,
             "--fps-adapt" => args.fps_adapt = value,
             "--bitrate" => args.bitrate = Some(value.parse().context("bad --bitrate")?),
@@ -318,6 +325,7 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
         }
         args.fps = standalone.fps;
         args.preset.clone_from(&standalone.preset);
+        args.encoder.clone_from(&standalone.encoder);
         args.ladder = standalone.ladder.to_wire();
         args.fps_adapt = standalone
             .adaptive_fps
@@ -3381,6 +3389,27 @@ fn build_encoder(args: &Args, width: u32, height: u32) -> Result<ServerEncoder> 
     if args.preset == "ladder" {
         let kbps = video_ceiling_kbps(args, width, height);
         let knobs = ladder_knobs(&args.ladder)?;
+        anyhow::ensure!(
+            matches!(args.encoder.as_str(), "" | "auto" | "mf" | "software"),
+            "bad encoder backend {:?} (auto|mf|software)",
+            args.encoder
+        );
+        // Media Foundation VP9 leg (Windows): "" / "auto" tries it and falls
+        // back to libvpx; "mf" is the same but logs the fallback as a
+        // warning; "software" goes straight to libvpx.
+        #[cfg(all(windows, feature = "codec-mf"))]
+        if matches!(args.encoder.as_str(), "" | "auto" | "mf") {
+            match codec::LadderEncoder::with_mf_vp9(width, height, knobs.policy.clone(), kbps, 80)
+            {
+                Ok(encoder) => {
+                    info!(width, height, kbps, "codec ladder ready (rects-jpeg <-> vp9 via Media Foundation)");
+                    return Ok(ServerEncoder::Ladder(Box::new(encoder)));
+                }
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "Media Foundation VP9 unavailable; falling back to libvpx");
+                }
+            }
+        }
         let encoder = match (knobs.vp9_cpu, knobs.threads) {
             (None, None) => codec::LadderEncoder::new(width, height, knobs.policy, kbps, 80)?,
             (cpu, threads) => codec::LadderEncoder::with_tuning(

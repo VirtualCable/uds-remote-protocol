@@ -1980,6 +1980,7 @@ name = "labtools"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "codec",
  "udscredprov",
  "udsscard-proto",
  "widestring",
