@@ -17,10 +17,13 @@ codec-jpeg = ["dep:turbojpeg"]
 codec-ladder = ["codec-jpeg", "codec-vp9"]
 codec-opus = ["dep:opus"]
 codec-mf = ["dep:windows"]
+codec-h264 = ["dep:libloading"]
 
 [dependencies]
 thiserror.workspace = true
 anyhow.workspace = true
+tracing.workspace = true
+libloading = { workspace = true, optional = true }
 vpx-sys = { workspace = true, optional = true }
 turbojpeg = { workspace = true, optional = true }
 opus = { workspace = true, optional = true }

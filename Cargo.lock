@@ -599,8 +599,10 @@ name = "codec"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libloading",
  "opus",
  "thiserror 2.0.21",
+ "tracing",
  "turbojpeg",
  "vpx-sys",
  "windows 0.62.2",

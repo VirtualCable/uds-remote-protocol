@@ -45,6 +45,7 @@ tokio = { version = "1.53", features = ["full"] }
 async-trait = "0.1"
 thiserror = "2.0"
 anyhow = "1"
+libloading = "0.8"
 tracing = "0.1"
 pcsc = "2.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

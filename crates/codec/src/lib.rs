@@ -26,6 +26,8 @@ mod jpeg_rects;
 mod ladder_encoder;
 #[cfg(all(windows, feature = "codec-mf"))]
 pub mod mf;
+#[cfg(feature = "codec-h264")]
+mod openh264;
 #[cfg(feature = "codec-opus")]
 mod opus;
 mod preset;
@@ -56,6 +58,8 @@ pub use ladder_encoder::LadderEncoder;
 #[cfg(feature = "codec-jpeg")]
 pub use jpeg_rects::{JpegRectsDecoder, JpegRectsEncoder};
 pub use preset::{CodecParams, CodecPreset, DEFAULT_BITRATE_KBPS, PRESETS, build_decoder};
+#[cfg(feature = "codec-h264")]
+pub use openh264::{OpenH264Decoder, h264_available};
 #[cfg(feature = "codec-opus")]
 pub use opus::{OpusDecoder, OpusEncoder};
 pub use raw::{RawDecoder, RawEncoder};
