@@ -1725,6 +1725,29 @@ impl FrameStats {
     }
 }
 
+/// Lab aid: with `UDSRP_DUMP_H264=<path>` in the environment, every H.264
+/// packet leaving the encoder is appended to the file (Annex B stream) so
+/// the live NVENC output can be decoded offline (`ffmpeg -i dump.h264`)
+/// and compared against what the client renders.
+fn dump_h264_packet(codec: codec::VideoCodecType, packet: &codec::EncodedPacket) {
+    use std::sync::{Mutex, OnceLock};
+    static FILE: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    if codec != codec::VideoCodecType::H264 || packet.data.is_empty() {
+        return;
+    }
+    let file = FILE.get_or_init(|| {
+        std::env::var_os("UDSRP_DUMP_H264")
+            .and_then(|p| std::fs::File::create(p).ok())
+            .map(Mutex::new)
+    });
+    if let Some(f) = file {
+        use std::io::Write as _;
+        if let Ok(mut g) = f.lock() {
+            let _ = g.write_all(&packet.data);
+        }
+    }
+}
+
 /// Encodes one captured frame and sends its fragments; also re-announces
 /// the display when the codec ladder switched regime (§8.5). Returns the
 /// next frame id.
@@ -1790,6 +1813,7 @@ async fn handle_frame<T: ReliableTransport>(
         return Ok(frame_id); // rect codecs: nothing changed on this frame
     }
     stats.encoded_bytes += packet.data.len() as u64;
+    dump_h264_packet(encoder.codec_type(), &packet);
     // Content axis (§18.69): bandwidth utilization estimate (encoded rate
     // at the current fps over the ceiling).
     #[allow(clippy::cast_precision_loss)] // frame payloads are MiB-scale
