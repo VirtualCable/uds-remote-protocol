@@ -582,9 +582,10 @@ struct OwnedFrame {
 /// behind capture waits (probes and metrics must be handled on time, §12).
 ///
 /// The thread paces itself from `fps_shared` (updated live by the quality
-/// controller): DXGI already blocks up to `frame_time` waiting for desktop
-/// damage, so only the synthetic source sleeps explicitly. Frames are
-/// stamped with `clock_start`'s clock — the same one audio uses (§9.1).
+/// controller): each iteration sleeps the remainder of the frame budget —
+/// DXGI only blocks *up to* `frame_time` waiting for damage, which paces an
+/// idle desktop but not a constantly changing one (§18.72 BUG-B1). Frames
+/// are stamped with `clock_start`'s clock — the same one audio uses (§9.1).
 #[allow(clippy::too_many_lines)] // watchdog instrumentation grew it past the pedantic limit
 fn spawn_capture(
     args: &Args,
@@ -616,7 +617,6 @@ fn spawn_capture(
         if tx.blocking_send(CaptureMsg::Ready(Ok(ready))).is_err() {
             return;
         }
-        let sleeps = matches!(source, Source::Synthetic(_));
         // Watchdogs (freeze hunt): a wedged `next_frame` (GPU call stuck) and
         // a wedged session loop (queue full forever) are both silent — the
         // loop just stops emitting. Time both and heart-beat the thread.
@@ -722,8 +722,15 @@ fn spawn_capture(
             {
                 return; // session over
             }
-            if sleeps {
-                std::thread::sleep(frame_time);
+            // Real fps pacing (§18.72 BUG-B1): `AcquireNextFrame(timeout)`
+            // only WAITS for damage — with a constantly changing desktop it
+            // returns immediately, so the loop ran at the damage rate and
+            // the quality/adaptive fps ceiling never throttled anything.
+            // Sleep the remainder of the frame budget instead; when the
+            // iteration already consumed it (slow acquire, big frame) there
+            // is nothing to wait.
+            if let Some(remainder) = frame_time.checked_sub(next_start.elapsed()) {
+                std::thread::sleep(remainder);
             }
             // Heartbeat: distinguishes "idle desktop, no damage" from a
             // wedged `next_frame` in the agent log.
