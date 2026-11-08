@@ -1303,7 +1303,24 @@ fn handle_metrics(
     let (net_event, content_event) = {
         let controller = ctl.quality.get_or_insert_with(|| {
             info!(baseline_rtt_micros = rtt_micros, "quality baseline set");
+            if let Some(budget) = ctl.quality_cfg.budget_kbps {
+                if budget < ctl.quality_cfg.video_floor_kbps {
+                    warn!(
+                        budget_kbps = budget,
+                        video_floor_kbps = ctl.quality_cfg.video_floor_kbps,
+                        "quality budget below the video floor: the floor wins (budget unreachable)"
+                    );
+                } else {
+                    info!(budget_kbps = budget, "economy mode: budget active");
+                }
+            }
             protocol::QualityController::new(ctl.quality_cfg.network_policy(rtt_micros))
+        });
+        // Economy mode (§18.70): utilization against the budget (the EMA is
+        // tracked against the ceiling; rescale). Over budget reads as
+        // congestion evidence even on a perfect network.
+        let budget_util = controller.policy().budget_kbps.map(|budget| {
+            ctl.util_ema * f64::from(ctl.video_ceiling_kbps) / f64::from(budget)
         });
         let net_event = controller.update(
             now,
@@ -1311,6 +1328,7 @@ fn handle_metrics(
                 rtt_micros,
                 jitter_micros,
                 loss,
+                budget_util,
             },
         );
         // Content axis (§18.69): same cadence as the client reports; the

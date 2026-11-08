@@ -67,6 +67,11 @@ pub struct Sample {
     pub jitter_micros: u64,
     /// UDP loss rate in the window (0.0-1.0), from seq gaps.
     pub loss: f64,
+    /// Bandwidth utilization against the configured `budget_kbps`
+    /// (sent / budget; §18.70), `None` when no budget is set. Economy mode:
+    /// being over budget counts as a bad sample even on a perfect network,
+    /// so the ladder settles below the budget, not below the ceiling.
+    pub budget_util: Option<f64>,
 }
 
 /// Controller tuning.
@@ -111,7 +116,21 @@ pub struct QualityPolicy {
     /// Hard fps floor (§18.69 "miner" guard): neither axis ever goes below
     /// this, so an externally saturated host still yields *some* picture.
     pub min_fps_guaranteed: u32,
+    /// Economy mode (§18.70): target video budget in kbps for deployments
+    /// billed per byte (cloud egress). `None` (default) keeps the classic
+    /// behavior — best quality up to the ceiling. With a budget set, being
+    /// over it counts as congestion evidence with hysteresis
+    /// ([`BUDGET_HI_UTIL`]/[`BUDGET_LO_UTIL`]), so the ladder settles below
+    /// the budget instead of below the ceiling. The floors still win when
+    /// the budget is unreachable.
+    pub budget_kbps: Option<u32>,
 }
+
+/// Budget hysteresis (§18.70): utilization (sent / budget) above this marks
+/// the sample bad.
+pub const BUDGET_HI_UTIL: f64 = 0.9;
+/// Utilization below this clears the budget-bad state (sticky in between).
+pub const BUDGET_LO_UTIL: f64 = 0.7;
 
 impl QualityPolicy {
     /// Defaults from §12: 1.5x baseline RTT is queue buildup, 1 % loss is
@@ -135,6 +154,7 @@ impl QualityPolicy {
             audio_floor_kbps: 6,
             levels: default_levels(),
             min_fps_guaranteed: 1,
+            budget_kbps: None,
         }
     }
 }
@@ -470,6 +490,9 @@ pub struct QualityController {
     rtt_max_observed: u64,
     /// Highest level the configured table allows (§18.69).
     max_level: QualityLevel,
+    /// Sticky budget-bad state (§18.70): set above `BUDGET_HI_UTIL`, cleared
+    /// below `BUDGET_LO_UTIL`, kept in between (hysteresis, no flapping).
+    budget_bad: bool,
 }
 
 impl QualityController {
@@ -495,6 +518,7 @@ impl QualityController {
             rtt_min_observed: seed,
             rtt_max_observed: seed,
             max_level,
+            budget_bad: false,
         }
     }
 
@@ -544,7 +568,7 @@ impl QualityController {
         self.baseline_rtt_micros = window_min.max(1);
     }
 
-    /// True when the sample is bad by any signal (§12.2).
+    /// True when the sample is bad by any signal (§12.2, §18.70 budget).
     fn is_bad(&self, s: &Sample) -> bool {
         // Integer-domain compare: bad RTT = baseline * factor + slack (the
         // factor is scaled x1024 to avoid float precision lints in the hot
@@ -554,12 +578,25 @@ impl QualityController {
         let threshold = u128::from(self.baseline_rtt_micros) * factor_x1024
             + u128::from(self.policy.rtt_bad_slack_micros) * 1024;
         let rtt_bad = u128::from(s.rtt_micros) * 1024 > threshold;
-        rtt_bad || s.jitter_micros > self.policy.jitter_bad_micros || s.loss > self.policy.loss_bad
+        rtt_bad
+            || s.jitter_micros > self.policy.jitter_bad_micros
+            || s.loss > self.policy.loss_bad
+            || self.budget_bad
     }
 
     /// Feeds one sample; returns an event when the level changes.
     pub fn update(&mut self, now: Instant, sample: Sample) -> Option<QualityEvent> {
         self.track_rtt(now, sample.rtt_micros);
+        // Economy mode (§18.70): hysteresis on the budget utilization.
+        if self.policy.budget_kbps.is_some()
+            && let Some(util) = sample.budget_util
+        {
+            if util > BUDGET_HI_UTIL {
+                self.budget_bad = true;
+            } else if util < BUDGET_LO_UTIL {
+                self.budget_bad = false;
+            }
+        }
         if self.is_bad(&sample) {
             self.bad_streak += 1;
             self.good_streak = 0;
@@ -616,15 +653,16 @@ mod tests {
             audio_floor_kbps: 16,
             levels: default_levels(),
             min_fps_guaranteed: 1,
+            budget_kbps: None,
         }
     }
 
     fn good() -> Sample {
-        Sample { rtt_micros: 10_000, jitter_micros: 1_000, loss: 0.0 }
+        Sample { rtt_micros: 10_000, jitter_micros: 1_000, loss: 0.0, budget_util: None }
     }
 
     fn bad_rtt() -> Sample {
-        Sample { rtt_micros: 20_000, jitter_micros: 1_000, loss: 0.0 }
+        Sample { rtt_micros: 20_000, jitter_micros: 1_000, loss: 0.0, budget_util: None }
     }
 
     fn t0() -> Instant {
@@ -756,7 +794,7 @@ mod tests {
     fn baseline_is_window_min_and_relaxes_when_the_link_breathes() {
         let mut c = QualityController::new(policy());
         // Session starts on an already congested link: RTT 100 ms.
-        let congested = Sample { rtt_micros: 100_000, jitter_micros: 1_000, loss: 0.0 };
+        let congested = Sample { rtt_micros: 100_000, jitter_micros: 1_000, loss: 0.0, budget_util: None };
         for i in 0..10 {
             c.update(t0() + Duration::from_secs(i), congested);
         }
@@ -781,7 +819,7 @@ mod tests {
         assert_eq!(c.baseline_rtt_micros(), 10_000);
         // The link permanently worsens to 100 ms (new route): while the good
         // samples stay in the window it counts as congestion...
-        let worse = Sample { rtt_micros: 100_000, jitter_micros: 1_000, loss: 0.0 };
+        let worse = Sample { rtt_micros: 100_000, jitter_micros: 1_000, loss: 0.0, budget_util: None };
         c.update(t0() + Duration::from_secs(10), worse);
         assert_eq!(c.baseline_rtt_micros(), 10_000);
         // ...but once the window slides past them, the baseline re-learns.
@@ -937,6 +975,41 @@ mod tests {
         // Content axis more degraded than network: fps follows the worst.
         let t = resolve_targets(0, 4, 4_000, 64, &p);
         assert_eq!((t.video_kbps, t.fps, t.jpeg_quality), (4_000, 15, 60));
+    }
+
+    #[test]
+    fn budget_overrun_degrades_on_a_perfect_network() {
+        // §18.70: with a budget set, over-utilization alone (RTT/jitter/loss
+        // all healthy) steps the ladder down with hysteresis.
+        let p = QualityPolicy { budget_kbps: Some(800), ..policy() };
+        let mut c = QualityController::new(p);
+        c.update(t0(), good());
+        let over = Sample { budget_util: Some(1.2), ..good() };
+        assert_eq!(c.update(t0() + Duration::from_secs(1), over), None, "first bad arms");
+        let ev = c.update(t0() + Duration::from_secs(2), over);
+        assert!(ev.is_some_and(|e| e.degraded && e.level == 1), "over budget steps down");
+        // Inside the hysteresis band the state sticks (still bad), but the
+        // streak restarted at the step: two more bad samples are needed.
+        let mid = Sample { budget_util: Some(0.8), ..good() };
+        assert!(c.is_bad(&mid), "0.8 is inside the sticky band while bad");
+        assert_eq!(c.update(t0() + Duration::from_secs(3), mid), None);
+        let ev = c.update(t0() + Duration::from_secs(4), mid);
+        assert!(ev.is_some_and(|e| e.level == 2), "still bad: keeps stepping");
+        // Below the low mark the budget signal clears and good streaks start.
+        let under = Sample { budget_util: Some(0.5), ..good() };
+        assert!({
+            c.update(t0() + Duration::from_secs(5), under);
+            !c.is_bad(&under)
+        }, "under budget clears the bad state");
+    }
+
+    #[test]
+    fn no_budget_ignores_the_utilization_field() {
+        let mut c = QualityController::new(policy()); // budget_kbps: None
+        c.update(t0(), good());
+        let crazy = Sample { budget_util: Some(99.0), ..good() };
+        assert_eq!(c.update(t0() + Duration::from_secs(1), crazy), None);
+        assert_eq!(c.level(), LEVEL_FULL);
     }
 
     #[test]
