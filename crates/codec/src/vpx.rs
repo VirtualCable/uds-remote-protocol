@@ -532,6 +532,12 @@ impl Vp9Encoder {
             threads,
         )?))
     }
+
+    /// Re-programs `cpu_used` at runtime (§18.69, content quality axis).
+    #[cfg_attr(not(feature = "codec-ladder"), allow(dead_code))] // only the ladder calls it
+    pub fn set_cpu_used(&mut self, cpu_used: i32) -> Result<()> {
+        self.0.set_cpu_used(cpu_used)
+    }
 }
 
 impl VideoEncoder for Vp9Encoder {
