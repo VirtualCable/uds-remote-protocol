@@ -17,6 +17,7 @@ udscredprov = { path = "../udscredprov" }
 
 [features]
 mf-probe = ["codec/codec-mf"]
+nvenc-probe = ["codec/codec-nvenc"]
 
 [target.'cfg(windows)'.dependencies]
 widestring = "1.2"
@@ -51,3 +52,7 @@ path = "src/bin/udscredprov-ctl.rs"
 [[bin]]
 name = "mf-probe"
 path = "src/bin/mf-probe.rs"
+
+[[bin]]
+name = "nvenc-probe"
+path = "src/bin/nvenc-probe.rs"
