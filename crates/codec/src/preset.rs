@@ -167,15 +167,45 @@ pub fn build_decoder(codec: VideoCodecType) -> crate::Result<Box<dyn VideoDecode
         VideoCodecType::Vp8 => Ok(Box::new(crate::Vp8Decoder::new()?)),
         #[cfg(feature = "codec-jpeg")]
         VideoCodecType::JpegRects => Ok(Box::new(crate::JpegRectsDecoder::new())),
+        #[cfg(any(feature = "codec-h264", all(windows, feature = "codec-mf")))]
+        VideoCodecType::H264 => build_h264_decoder(),
         other => Err(crate::CodecError::Unsupported(match other {
             VideoCodecType::Vp9 => "vp9 (build with --features codec/codec-vp9)",
             VideoCodecType::Vp8 => "vp8 (build with --features codec/codec-vp8)",
-            VideoCodecType::H264 => "h264 (not implemented yet)",
+            VideoCodecType::H264 => {
+                "h264 (build with --features codec/codec-h264 or codec/codec-mf)"
+            }
             VideoCodecType::Av1 => "av1 (not implemented yet)",
             VideoCodecType::JpegRects => "jpeg-rects (build with --features codec/codec-jpeg)",
             VideoCodecType::Raw => unreachable!("raw handled above"),
         })),
     }
+}
+
+/// H264 decoder selection (§18.75.8): hardware/OS MFT first on Windows,
+/// then the Cisco OpenH264 binary.
+#[cfg(any(feature = "codec-h264", all(windows, feature = "codec-mf")))]
+#[allow(unreachable_code, unused_variables, clippy::needless_return)]
+fn build_h264_decoder() -> crate::Result<Box<dyn VideoDecoder>> {
+    #[cfg(all(windows, feature = "codec-mf"))]
+    {
+        match crate::mf::MfDecoder::new_h264() {
+            Ok(dec) => {
+                tracing::info!(mft = dec.mft_name(), "H264 decoder: Media Foundation");
+                return Ok(Box::new(dec));
+            }
+            Err(e) => {
+                tracing::warn!("MFT H264 decoder unavailable ({e}); trying OpenH264");
+            }
+        }
+    }
+    #[cfg(feature = "codec-h264")]
+    {
+        return Ok(Box::new(crate::OpenH264Decoder::new()?));
+    }
+    Err(crate::CodecError::Unsupported(
+        "h264 (build with --features codec/codec-h264 or codec/codec-mf)",
+    ))
 }
 
 #[cfg(test)]

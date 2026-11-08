@@ -176,6 +176,11 @@ impl Session {
         if printer.is_some() {
             flags |= protocol::FLAG_PRINTER;
         }
+        // H.264 decode (§18.75.8): the server only enables H.264 hardware
+        // encoders when we advertise a decoder for them.
+        if codec::h264_decode_available() {
+            flags |= protocol::FLAG_H264_DECODE;
+        }
         let mut stream: EncryptedStream<Box<dyn ReliableTransport>> =
             EncryptedStream::client_handshake(
                 raw,

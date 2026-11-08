@@ -15,6 +15,8 @@ vp9 = ["codec/codec-vp9"]
 vp8 = ["codec/codec-vp8"]
 jpeg = ["codec/codec-jpeg"]
 audio = ["codec/codec-opus"]
+# H.264 decode: Cisco OpenH264 binary (runtime-loaded) + OS MFT on Windows.
+h264 = ["codec/codec-h264", "codec/codec-mf"]
 
 [dependencies]
 protocol.workspace = true

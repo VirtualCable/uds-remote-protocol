@@ -70,3 +70,24 @@ pub use video::{
 pub use vpx::{Vp9Decoder, Vp9Encoder};
 #[cfg(feature = "codec-vp8")]
 pub use vpx::{Vp8Decoder, Vp8Encoder};
+
+/// True when this client can decode H.264: a hardware/OS decoder MFT on
+/// Windows, or the Cisco OpenH264 binary anywhere (§18.75.8). Drives the
+/// `FLAG_H264_DECODE` handshake bit — the server only enables H.264
+/// hardware encoders when the client advertises it.
+#[must_use]
+pub fn h264_decode_available() -> bool {
+    #[cfg(all(windows, feature = "codec-mf"))]
+    {
+        if mf::h264_decode_available() {
+            return true;
+        }
+    }
+    #[cfg(feature = "codec-h264")]
+    {
+        if openh264::h264_available() {
+            return true;
+        }
+    }
+    false
+}

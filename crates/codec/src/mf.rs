@@ -146,6 +146,13 @@ pub fn enumerate_decoders() -> Result<Vec<MftInfo>> {
     Ok(out)
 }
 
+/// True when any H264 decoder MFT is registered (the Microsoft software
+/// decoder ships with the OS, so this is nearly always true on Windows).
+#[must_use]
+pub fn h264_decode_available() -> bool {
+    enumerate_decoder_activates(&MFVideoFormat_H264, false).is_ok_and(|v| !v.is_empty())
+}
+
 /// Enumerates the activates of decoder MFTs consuming `subtype`.
 /// `hw_only` restricts to hardware transforms.
 fn enumerate_decoder_activates(subtype: &GUID, hw_only: bool) -> Result<Vec<IMFActivate>> {

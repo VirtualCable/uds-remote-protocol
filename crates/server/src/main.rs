@@ -2134,6 +2134,13 @@ async fn serve_stream<T: ReliableTransport>(
         warn!("privacy screen ignored: incompatible with console-mirror capture");
     }
 
+    // H.264 decode capability (§18.75.8): H.264 hardware encoders
+    // (NVENC/MFT) are only eligible when the client advertised a decoder.
+    let client_h264 = stream
+        .peer_hello()
+        .is_some_and(|h| h.flags & protocol::FLAG_H264_DECODE != 0);
+    info!(client_h264, "client H.264 decode capability");
+
     // Resolution policy (§18.36/§18.37): a fixed server resolution wins;
     // otherwise approach the client's HELLO preference without exceeding it.
     // Applied before capture starts so the first frames already carry the
@@ -2269,7 +2276,7 @@ async fn serve_stream<T: ReliableTransport>(
         }
     };
     let (mut width, mut height) = (ready.width, ready.height);
-    let mut encoder = build_encoder(args, width, height)?;
+    let mut encoder = build_encoder(args, width, height, client_h264)?;
 
     // Announce the display codec/geometry before the first frame (§8.3/§8.4).
     announce_display(&mut legs, &mut encoder, width, height).await?;
@@ -2469,7 +2476,7 @@ async fn serve_stream<T: ReliableTransport>(
                                 );
                                 width = ready.width;
                                 height = ready.height;
-                                encoder = build_encoder(args, width, height)?;
+                                encoder = build_encoder(args, width, height, client_h264)?;
                                 announce_display(&mut legs, &mut encoder, width, height).await?;
                             }
                             Err(e) => {
@@ -2512,7 +2519,7 @@ async fn serve_stream<T: ReliableTransport>(
                             );
                             width = frame.width;
                             height = frame.height;
-                            encoder = build_encoder(args, width, height)?;
+                            encoder = build_encoder(args, width, height, client_h264)?;
                             announce_display(&mut legs, &mut encoder, width, height).await?;
                         }
                         frame_id = handle_frame(
@@ -3384,7 +3391,10 @@ fn video_ceiling_kbps(args: &Args, width: u32, height: u32) -> u32 {
 /// Builds the display encoder from `--preset`: a named preset, or the codec
 /// ladder (`--preset ladder`, feature `ladder`) which starts in rects-JPEG
 /// and switches to VP9 on sustained video-like change (§8.5).
-fn build_encoder(args: &Args, width: u32, height: u32) -> Result<ServerEncoder> {
+fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Result<ServerEncoder> {
+    // Gates H.264 hardware-encoder selection (NVENC/MFT, lands in H3.5):
+    // without a client decoder the server must stay on VP9.
+    let _ = client_h264;
     #[cfg(feature = "ladder")]
     if args.preset == "ladder" {
         let kbps = video_ceiling_kbps(args, width, height);

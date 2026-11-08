@@ -12,11 +12,12 @@ workspace = true
 # The reference client ships with every codec so it can evaluate any server
 # preset out of the box.
 [features]
-default = ["vp9", "vp8", "jpeg", "audio"]
+default = ["vp9", "vp8", "jpeg", "audio", "h264"]
 vp9 = ["client/vp9"]
 vp8 = ["client/vp8"]
 jpeg = ["client/jpeg"]
 audio = ["client/audio", "channels/audio"]
+h264 = ["client/h264"]
 
 [dependencies]
 client.workspace = true

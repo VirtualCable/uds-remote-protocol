@@ -42,6 +42,12 @@ pub const FLAG_WEBCAM: u8 = 0x04;
 /// receive print jobs on `channel::PRINTER` and deliver them locally.
 pub const FLAG_PRINTER: u8 = 0x08;
 
+/// HELLO flag: the client can decode H.264 (§18.75.8: hardware MFT on
+/// Windows, or the Cisco OpenH264 binary loaded at runtime). The server
+/// only enables H.264 hardware encoders (NVENC/MFT) when this flag is set;
+/// otherwise it stays on VP9.
+pub const FLAG_H264_DECODE: u8 = 0x10;
+
 /// Handshake commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

@@ -42,7 +42,8 @@ pub use control::{
 pub use cursor::{CursorError, CursorMessage, MAX_CURSOR_DIM};
 pub use error::ProtocolError;
 pub use hello::{
-    Command, FLAG_PRINTER, FLAG_PRIVACY_SCREEN, FLAG_SMARTCARD, FLAG_WEBCAM, HANDSHAKE_SIGNATURE,
+    Command, FLAG_H264_DECODE, FLAG_PRINTER, FLAG_PRIVACY_SCREEN, FLAG_SMARTCARD, FLAG_WEBCAM,
+    HANDSHAKE_SIGNATURE,
     Hello, PROTOCOL_VERSION, TICKET_LENGTH,
 };
 pub use input::{InputError, InputMessage, PointerButton};
