@@ -39,15 +39,16 @@
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 11;
+pub const AGENT_CONFIG_VERSION: u8 = 12;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
 /// Session ticket length in bytes (matches `protocol`).
 pub const TICKET_LEN: usize = 48;
 
-/// Maximum accepted length for any string field (defensive bound).
-pub const MAX_STRING_LEN: usize = 256;
+/// Maximum accepted length for any string field (defensive bound; the
+/// quality policy wire form carries the whole level table, §18.69).
+pub const MAX_STRING_LEN: usize = 2048;
 
 /// Maximum accepted length for the opaque socket-info blob
 /// (WSAPROTOCOL_INFO is ~400 bytes; bound generously).
@@ -55,7 +56,7 @@ pub const MAX_SOCKET_INFO_LEN: usize = 4096;
 
 /// Minimum frame size: version + key + ticket + the u16 string lengths
 /// (all strings empty) + fixed resolution + flags + the handoff flag.
-const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 7 * 2 + 8 + 1 + 1;
+const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 9 * 2 + 8 + 1 + 1;
 
 /// Offset where the length-prefixed string fields start.
 const STRINGS_OFF: usize = 1 + KEY_LEN + TICKET_LEN;
@@ -105,6 +106,10 @@ pub struct AgentConfig {
     /// off; "uds" feeds the udsaudio driver's virtual microphone, "wav:PATH"
     /// records decoded PCM for E2E verification.
     pub mic_sink: String,
+    /// Quality policy in compact `key=value,...` wire form (§18.69): the
+    /// `[quality]` config section serialized (ceilings, floors, weights and
+    /// the level table). Empty keeps the agent's §12.5 defaults.
+    pub quality: String,
     /// Server-fixed console resolution (§18.37); `(0, 0)` means the agent
     /// approaches the client's preferred mode instead.
     pub fixed_resolution: (u32, u32),
@@ -160,7 +165,8 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
             + config.fps_adapt.len()
             + config.stats_csv.len()
             + config.cam_sink.len()
-            + config.mic_sink.len(),
+            + config.mic_sink.len()
+            + config.quality.len(),
     );
     out.push(AGENT_CONFIG_VERSION);
     out.extend_from_slice(&config.key);
@@ -174,6 +180,7 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
         &config.stats_csv,
         &config.cam_sink,
         &config.mic_sink,
+        &config.quality,
     ] {
         let len = u16::try_from(s.len()).expect("string fields are bounded well below u16::MAX");
         out.extend_from_slice(&len.to_le_bytes());
@@ -217,7 +224,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     ticket.copy_from_slice(&buf[1 + KEY_LEN..1 + KEY_LEN + TICKET_LEN]);
 
     let mut rest = &buf[STRINGS_OFF..];
-    let mut strings = ["", "", "", "", "", "", "", ""];
+    let mut strings = ["", "", "", "", "", "", "", "", ""];
     for slot in &mut strings {
         let len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
         rest = &rest[2..];
@@ -278,7 +285,8 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         }
         _ => return Err(DecodeError::BadLength),
     };
-    let [bind, output_name, preset, ladder, fps_adapt, stats_csv, cam_sink, mic_sink] = strings;
+    let [bind, output_name, preset, ladder, fps_adapt, stats_csv, cam_sink, mic_sink, quality] =
+        strings;
     Ok(AgentConfig {
         key,
         ticket,
@@ -290,6 +298,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         stats_csv: stats_csv.to_owned(),
         cam_sink: cam_sink.to_owned(),
         mic_sink: mic_sink.to_owned(),
+        quality: quality.to_owned(),
         fixed_resolution,
         allow_lock,
         wallpaper_off,
@@ -313,6 +322,7 @@ mod tests {
             stats_csv: String::new(),
             cam_sink: String::new(),
             mic_sink: String::new(),
+            quality: "wc=0.2,wcpu=0.3,wbw=0.5,levels=1.0:30:1.0:80:8;0.5:30:0.75:75:8".to_owned(),
             fixed_resolution: (1280, 720),
             allow_lock: true,
             wallpaper_off: false,

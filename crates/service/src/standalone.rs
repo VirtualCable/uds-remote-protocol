@@ -67,6 +67,9 @@ pub struct StandaloneRuntime {
     pub console_conflict_timeout_secs: u64,
     /// How a takeover evicts the console owner.
     pub console_takeover: server_config::TakeoverMode,
+    /// Quality policy in wire form for the agent (§18.69; empty = §12.5
+    /// defaults).
+    pub quality: String,
 }
 
 /// Active connection mode for the service.
@@ -193,5 +196,6 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
         console_conflict_reveal_user: standalone.console_conflict_reveal_user,
         console_conflict_timeout_secs: standalone.console_conflict_timeout_secs,
         console_takeover: standalone.console_takeover,
+        quality: config.quality.to_wire(),
     })
 }

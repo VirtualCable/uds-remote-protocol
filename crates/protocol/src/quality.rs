@@ -106,6 +106,11 @@ pub struct QualityPolicy {
     /// Lowest audio bitrate we ever apply (kbps, §12.4 floor; 6 is the
     /// lowest sane Opus target).
     pub audio_floor_kbps: u32,
+    /// The quality table (§18.69); `default_levels()` reproduces §12.5.
+    pub levels: Vec<LevelSpec>,
+    /// Hard fps floor (§18.69 "miner" guard): neither axis ever goes below
+    /// this, so an externally saturated host still yields *some* picture.
+    pub min_fps_guaranteed: u32,
 }
 
 impl QualityPolicy {
@@ -128,8 +133,45 @@ impl QualityPolicy {
             force_video_codec_at: 2,
             video_floor_kbps: 256,
             audio_floor_kbps: 6,
+            levels: default_levels(),
+            min_fps_guaranteed: 1,
         }
     }
+}
+
+/// One row of the configurable quality table (§18.69): what the server
+/// applies while sitting at this level. Factors multiply the negotiated
+/// ceilings; `jpeg_quality` and `vp9_speed` are the content-axis actuators.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LevelSpec {
+    /// Fraction of the video ceiling bitrate (0, 1].
+    pub video_factor: f64,
+    /// Capture fps ceiling at this level.
+    pub fps: u32,
+    /// Fraction of the audio ceiling bitrate (0, 1].
+    pub audio_factor: f64,
+    /// JPEG quality (1-100) for the rects regime.
+    pub jpeg_quality: i32,
+    /// libvpx `cpu_used` (0 best/slowest .. 8 fastest) for the VP9 regime.
+    pub vp9_speed: i32,
+}
+
+/// The default table: the fixed §12.5 ladder as data (same factors/fps).
+/// JPEG quality steps 80→50 (70 stays "quite good", 60 "reasonable", §18.69);
+/// `vp9_speed` stays at the low-latency 8 on every level.
+#[must_use]
+pub fn default_levels() -> Vec<LevelSpec> {
+    LADDER
+        .iter()
+        .zip([80, 75, 70, 65, 60, 55, 50])
+        .map(|(&(vfactor, fps, afactor), jpeg_quality)| LevelSpec {
+            video_factor: vfactor,
+            fps,
+            audio_factor: afactor,
+            jpeg_quality,
+            vp9_speed: 8,
+        })
+        .collect()
 }
 
 /// A decided level change.
@@ -185,9 +227,14 @@ pub struct QualityTargets {
     pub audio_kbps: u32,
     /// True at the degraded level (reduced encode resolution allowed).
     pub degraded_resolution: bool,
+    /// JPEG quality to apply in the rects regime at this level (§18.69).
+    pub jpeg_quality: i32,
+    /// libvpx `cpu_used` to apply in the VP9 regime at this level (§18.69).
+    pub vp9_speed: i32,
 }
 
 /// Resolves a level into absolute targets given the negotiated ceilings.
+/// The row comes from `policy.levels` (clamped to the table length).
 #[must_use]
 pub fn targets(
     level: QualityLevel,
@@ -195,16 +242,207 @@ pub fn targets(
     audio_ceiling_kbps: u32,
     policy: &QualityPolicy,
 ) -> QualityTargets {
-    let level = level.min(LEVEL_DEGRADED);
-    let (vfactor, fps, afactor) = LADDER[level as usize];
+    let idx = (level as usize).min(policy.levels.len().saturating_sub(1));
+    let row = policy.levels.get(idx).copied().unwrap_or(LevelSpec {
+        video_factor: 1.0,
+        fps: 30,
+        audio_factor: 1.0,
+        jpeg_quality: 80,
+        vp9_speed: 8,
+    });
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // factors are 0..1
     QualityTargets {
-        video_kbps: ((f64::from(video_ceiling_kbps) * vfactor) as u32)
+        video_kbps: ((f64::from(video_ceiling_kbps) * row.video_factor) as u32)
             .max(policy.video_floor_kbps),
-        fps,
-        audio_kbps: ((f64::from(audio_ceiling_kbps) * afactor) as u32)
+        fps: row.fps.max(policy.min_fps_guaranteed),
+        audio_kbps: ((f64::from(audio_ceiling_kbps) * row.audio_factor) as u32)
             .max(policy.audio_floor_kbps),
-        degraded_resolution: level == LEVEL_DEGRADED,
+        degraded_resolution: idx >= policy.levels.len().saturating_sub(1)
+            && policy.levels.len() > 1,
+        jpeg_quality: row.jpeg_quality,
+        vp9_speed: row.vp9_speed,
+    }
+}
+
+/// Combines the network-axis row and the content-axis row (§18.69): bitrate
+/// targets always come from the network level; `fps` is the minimum of both
+/// rows (never below `min_fps_guaranteed`); `jpeg_quality`/`vp9_speed` come
+/// from the content level.
+#[must_use]
+pub fn resolve_targets(
+    network_level: QualityLevel,
+    content_level: QualityLevel,
+    video_ceiling_kbps: u32,
+    audio_ceiling_kbps: u32,
+    policy: &QualityPolicy,
+) -> QualityTargets {
+    let net = targets(network_level, video_ceiling_kbps, audio_ceiling_kbps, policy);
+    let content = targets(content_level, video_ceiling_kbps, audio_ceiling_kbps, policy);
+    QualityTargets {
+        fps: net.fps.min(content.fps).max(policy.min_fps_guaranteed),
+        jpeg_quality: content.jpeg_quality,
+        vp9_speed: content.vp9_speed,
+        degraded_resolution: net.degraded_resolution || content.degraded_resolution,
+        ..net
+    }
+}
+
+/// Weights and thresholds for the content axis (§18.69): a weighted pressure
+/// from the content-change EMA, the encoder load and the bandwidth
+/// utilization drives its own level (fps, JPEG quality, VP9 speed), with the
+/// same down-fast/up-slow mechanics as the network axis.
+#[derive(Debug, Clone)]
+pub struct PressurePolicy {
+    /// Weight of the changed-area EMA (0..1 normalized inside).
+    pub weight_change: f64,
+    /// Weight of the encoder load (encode time / frame budget).
+    pub weight_cpu: f64,
+    /// Weight of the bandwidth utilization (sent / ceiling). Counts only
+    /// while congestion is measured (RTT/jitter/loss), so a fat pipe in use
+    /// on a healthy network never degrades the picture.
+    pub weight_bandwidth: f64,
+    /// Pressure above which a sample counts as bad.
+    pub pressure_hi: f64,
+    /// Pressure below which a sample counts as good (the band in between is
+    /// neutral: neither streak advances).
+    pub pressure_lo: f64,
+    /// Consecutive bad samples to step down one level.
+    pub bad_to_down: u32,
+    /// Consecutive good samples to step up one level.
+    pub good_to_up: u32,
+    /// Minimum time between two raises.
+    pub raise_cooldown: Duration,
+}
+
+impl Default for PressurePolicy {
+    /// Defaults (§18.69): bandwidth-dominant weights reproducing today's
+    /// behavior; hi/lo band 0.85/0.60; same stepping cadence as §12.5.
+    fn default() -> Self {
+        Self {
+            weight_change: 0.2,
+            weight_cpu: 0.3,
+            weight_bandwidth: 0.5,
+            pressure_hi: 0.85,
+            pressure_lo: 0.60,
+            bad_to_down: 2,
+            good_to_up: 10,
+            raise_cooldown: Duration::from_secs(10),
+        }
+    }
+}
+
+/// One content-axis measurement.
+#[derive(Debug, Clone, Copy)]
+pub struct PressureSample {
+    /// Changed-area fraction, EMA over the last seconds (0..1).
+    pub change: f64,
+    /// Encoder load: encode time / frame budget, EMA (0..1+; clamped).
+    pub cpu: f64,
+    /// Bandwidth utilization: sent bitrate / ceiling (0..1+; clamped).
+    /// Only counted when `congested` is set (§18.69).
+    pub util: f64,
+    /// True when the network axis currently sees congestion (RTT/jitter/loss
+    /// above its thresholds): gates the utilization term.
+    pub congested: bool,
+}
+
+impl PressurePolicy {
+    /// Weighted, normalized pressure of a sample (0..1, clamped).
+    #[must_use]
+    pub fn pressure(&self, s: &PressureSample) -> f64 {
+        let util = if s.congested { s.util } else { 0.0 };
+        // The bandwidth weight only participates while its signal is active:
+        // otherwise the gated term would still dilute the denominator and a
+        // loaded encoder on a healthy network could never read as pressure.
+        let wsum = self.weight_change
+            + self.weight_cpu
+            + if s.congested { self.weight_bandwidth } else { 0.0 };
+        if wsum <= f64::EPSILON {
+            return 0.0;
+        }
+        let p = self.weight_change.mul_add(
+            s.change.clamp(0.0, 1.0),
+            self.weight_cpu.mul_add(
+                s.cpu.clamp(0.0, 1.0),
+                self.weight_bandwidth * util.clamp(0.0, 1.0),
+            ),
+        ) / wsum;
+        p.clamp(0.0, 1.0)
+    }
+}
+
+/// Content-axis controller (§18.69): steps a level through the same
+/// down-fast/up-slow mechanics as [`QualityController`], driven by the
+/// weighted pressure instead of network signals.
+#[derive(Debug)]
+pub struct PressureController {
+    policy: PressurePolicy,
+    level: QualityLevel,
+    /// Highest level the table allows (set from the table length).
+    max_level: QualityLevel,
+    bad_streak: u32,
+    good_streak: u32,
+    last_raise: Option<Instant>,
+}
+
+impl PressureController {
+    /// Creates a controller at level 0. `max_level` is the last row of the
+    /// quality table (the controller never steps past it).
+    #[must_use]
+    pub fn new(policy: PressurePolicy, max_level: QualityLevel) -> Self {
+        Self {
+            policy,
+            level: LEVEL_FULL,
+            max_level,
+            bad_streak: 0,
+            good_streak: 0,
+            last_raise: None,
+        }
+    }
+
+    /// Current level.
+    #[must_use]
+    pub fn level(&self) -> QualityLevel {
+        self.level
+    }
+
+    /// Tuning in use.
+    #[must_use]
+    pub fn policy(&self) -> &PressurePolicy {
+        &self.policy
+    }
+
+    /// Feeds one sample; returns the new level when it changes.
+    pub fn update(&mut self, now: Instant, sample: PressureSample) -> Option<QualityLevel> {
+        let p = self.policy.pressure(&sample);
+        if p > self.policy.pressure_hi {
+            self.bad_streak += 1;
+            self.good_streak = 0;
+            if self.bad_streak >= self.policy.bad_to_down && self.level < self.max_level {
+                self.bad_streak = 0;
+                self.level += 1;
+                return Some(self.level);
+            }
+            return None;
+        }
+        if p < self.policy.pressure_lo {
+            self.good_streak += 1;
+            self.bad_streak = 0;
+            if self.good_streak >= self.policy.good_to_up && self.level > LEVEL_FULL {
+                let cooled = self
+                    .last_raise
+                    .is_none_or(|t| now.duration_since(t) >= self.policy.raise_cooldown);
+                if cooled {
+                    self.good_streak = 0;
+                    self.last_raise = Some(now);
+                    self.level -= 1;
+                    return Some(self.level);
+                }
+            }
+            return None;
+        }
+        // Neutral band: neither streak advances (hysteresis, no flapping).
+        None
     }
 }
 
@@ -230,13 +468,22 @@ pub struct QualityController {
     rtt_min_observed: u64,
     /// Highest RTT ever reported (diagnostics).
     rtt_max_observed: u64,
+    /// Highest level the configured table allows (§18.69).
+    max_level: QualityLevel,
 }
 
 impl QualityController {
-    /// Creates a controller at [`LEVEL_FULL`].
+    /// Creates a controller at [`LEVEL_FULL`]; the deepest level is the last
+    /// row of `policy.levels` (§18.69).
     #[must_use]
     pub fn new(policy: QualityPolicy) -> Self {
         let seed = policy.baseline_rtt_micros.max(1);
+        #[allow(clippy::cast_possible_truncation)] // clamped to LEVEL_DEGRADED (6)
+        let max_level = policy
+            .levels
+            .len()
+            .saturating_sub(1)
+            .min(LEVEL_DEGRADED as usize) as QualityLevel;
         Self {
             policy,
             level: LEVEL_FULL,
@@ -247,6 +494,7 @@ impl QualityController {
             baseline_rtt_micros: seed,
             rtt_min_observed: seed,
             rtt_max_observed: seed,
+            max_level,
         }
     }
 
@@ -315,7 +563,7 @@ impl QualityController {
         if self.is_bad(&sample) {
             self.bad_streak += 1;
             self.good_streak = 0;
-            if self.bad_streak >= self.policy.bad_to_down && self.level < LEVEL_DEGRADED {
+            if self.bad_streak >= self.policy.bad_to_down && self.level < self.max_level {
                 self.bad_streak = 0;
                 self.level += 1;
                 return Some(self.event(true));
@@ -366,6 +614,8 @@ mod tests {
             force_video_codec_at: 2,
             video_floor_kbps: 256,
             audio_floor_kbps: 16,
+            levels: default_levels(),
+            min_fps_guaranteed: 1,
         }
     }
 
@@ -582,6 +832,111 @@ mod tests {
         // Never above the ceiling, never below the floor.
         let tiny: Vec<u32> = (0..=6).map(|l| targets(l, 4_000, 7, &p).audio_kbps).collect();
         assert!(tiny.iter().all(|&k| (6..=7).contains(&k)), "{tiny:?}");
+    }
+
+    #[test]
+    fn targets_come_from_the_configured_table() {
+        // A custom 2-level table ("cheap jpegrects" policy, §18.69).
+        let p = QualityPolicy {
+            levels: vec![
+                LevelSpec { video_factor: 1.0, fps: 30, audio_factor: 1.0, jpeg_quality: 70, vp9_speed: 8 },
+                LevelSpec { video_factor: 0.2, fps: 12, audio_factor: 0.5, jpeg_quality: 55, vp9_speed: 8 },
+            ],
+            ..policy()
+        };
+        let n0 = targets(0, 4_000, 64, &p);
+        assert_eq!((n0.video_kbps, n0.fps, n0.jpeg_quality, n0.vp9_speed), (4_000, 30, 70, 8));
+        assert!(!n0.degraded_resolution);
+        let n1 = targets(1, 4_000, 64, &p);
+        assert_eq!((n1.video_kbps, n1.fps, n1.audio_kbps), (800, 12, 32));
+        assert_eq!((n1.jpeg_quality, n1.vp9_speed), (55, 8));
+        assert!(n1.degraded_resolution, "last row of the table is the degraded one");
+        // The network controller never steps past the last configured row.
+        let mut c = QualityController::new(p);
+        c.update(t0(), good());
+        let mut now = t0() + Duration::from_secs(1);
+        for _ in 0..30 {
+            c.update(now, bad_rtt());
+            now += Duration::from_secs(1);
+        }
+        assert_eq!(c.level(), 1);
+    }
+
+    #[test]
+    fn min_fps_guaranteed_floors_every_row() {
+        let p = QualityPolicy {
+            min_fps_guaranteed: 5,
+            ..policy()
+        };
+        let n6 = targets(LEVEL_DEGRADED, 4_000, 64, &p);
+        assert_eq!(n6.fps, 10, "table row above the floor passes through");
+        let p = QualityPolicy {
+            min_fps_guaranteed: 12,
+            ..policy()
+        };
+        let n6 = targets(LEVEL_DEGRADED, 4_000, 64, &p);
+        assert_eq!(n6.fps, 12, "the guaranteed floor clamps the table row");
+    }
+
+    #[test]
+    fn pressure_weights_normalize_and_gate_utilization() {
+        let pol = PressurePolicy::default();
+        let s = PressureSample { change: 1.0, cpu: 1.0, util: 1.0, congested: true };
+        assert!((pol.pressure(&s) - 1.0).abs() < 1e-9, "all max is pressure 1");
+        // Utilization is gated by measured congestion: a fat pipe on a
+        // healthy network does not press.
+        let not_congested = PressureSample { congested: false, ..s };
+        let p = pol.pressure(&not_congested);
+        assert!(
+            (p - 1.0).abs() < 1e-9,
+            "util term gated out AND out of the normalizer: {p}"
+        );
+        // Zero-sum weights mean "no pressure signal at all": never bad.
+        let zero = PressurePolicy { weight_change: 0.0, weight_cpu: 0.0, weight_bandwidth: 0.0, ..pol };
+        assert_eq!(zero.pressure(&s), 0.0);
+    }
+
+    #[test]
+    fn pressure_controller_steps_down_fast_and_up_slow() {
+        let pol = PressurePolicy { bad_to_down: 2, good_to_up: 3, raise_cooldown: Duration::from_secs(10), ..Default::default() };
+        let mut c = PressureController::new(pol, 3);
+        let hot = PressureSample { change: 1.0, cpu: 1.0, util: 1.0, congested: true };
+        let cold = PressureSample { change: 0.0, cpu: 0.0, util: 0.0, congested: false };
+        assert_eq!(c.update(t0(), hot), None, "first bad sample only arms");
+        assert_eq!(c.update(t0() + Duration::from_secs(1), hot), Some(1));
+        // Neutral band: no streak movement.
+        let mid = PressureSample { change: 0.7, cpu: 0.7, util: 0.0, congested: false };
+        assert_eq!(c.update(t0() + Duration::from_secs(2), mid), None);
+        assert_eq!(c.level(), 1);
+        // Sustained cold raises one level (good_to_up=3).
+        let mut now = t0() + Duration::from_secs(3);
+        let mut raised = None;
+        for _ in 0..3 {
+            raised = c.update(now, cold);
+            now += Duration::from_secs(1);
+        }
+        assert_eq!(raised, Some(0));
+        // Never past max_level.
+        for _ in 0..20 {
+            c.update(now, hot);
+            now += Duration::from_secs(1);
+        }
+        assert_eq!(c.level(), 3);
+    }
+
+    #[test]
+    fn resolve_targets_splits_the_axes() {
+        let p = policy();
+        // Network at N2 (500 kbps factors), content at N3 (20 fps, jpeg 65).
+        let t = resolve_targets(2, 3, 4_000, 64, &p);
+        assert_eq!(t.video_kbps, 1_000, "bitrate is the network axis' (25 %)");
+        assert_eq!(t.audio_kbps, 40);
+        assert_eq!(t.fps, 20, "fps is the minimum of both rows");
+        assert_eq!(t.jpeg_quality, 65, "jpeg quality is the content axis'");
+        assert_eq!(t.vp9_speed, 8);
+        // Content axis more degraded than network: fps follows the worst.
+        let t = resolve_targets(0, 4, 4_000, 64, &p);
+        assert_eq!((t.video_kbps, t.fps, t.jpeg_quality), (4_000, 15, 60));
     }
 
     #[test]

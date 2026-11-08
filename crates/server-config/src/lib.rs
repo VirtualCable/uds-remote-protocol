@@ -57,6 +57,10 @@ pub struct ServerConfig {
     /// Broker section (required when `connection_method = "pq"`; used by
     /// the service, not by the reference server).
     pub broker: Option<BrokerConfig>,
+    /// Quality policy (`[quality]` table, §18.69): ceilings, hard floors,
+    /// pressure weights and the level table. Defaults reproduce the fixed
+    /// §12.5 ladder.
+    pub quality: QualityConfig,
 }
 
 impl Default for ServerConfig {
@@ -67,6 +71,326 @@ impl Default for ServerConfig {
             bind: SocketAddr::from(([0, 0, 0, 0], 19790)),
             standalone: None,
             broker: None,
+            quality: QualityConfig::default(),
+        }
+    }
+}
+
+/// One row of the `[quality.levels]` table (§18.69). Maps 1:1 onto
+/// `protocol::LevelSpec`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct QualityLevelConfig {
+    /// Fraction of the video ceiling bitrate (0, 1].
+    pub video_factor: f64,
+    /// Capture fps ceiling at this level.
+    pub fps: u32,
+    /// Fraction of the audio ceiling bitrate (0, 1].
+    pub audio_factor: f64,
+    /// JPEG quality for the rects regime (1-100).
+    pub jpeg_quality: i32,
+    /// libvpx `cpu_used` for the VP9 regime (0-8).
+    pub vp9_speed: i32,
+}
+
+impl Default for QualityLevelConfig {
+    fn default() -> Self {
+        Self {
+            video_factor: 1.0,
+            fps: 30,
+            audio_factor: 1.0,
+            jpeg_quality: 80,
+            vp9_speed: 8,
+        }
+    }
+}
+
+/// The `[quality]` section (§18.69). Absent keys keep the §12.5 defaults, so
+/// a config without the section behaves exactly as before.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct QualityConfig {
+    /// Video bitrate ceiling (kbps). `None` = auto from the session
+    /// resolution: 2000 at ≤1080p, scaling ~sqrt(pixels) above (4K ≈ 4000).
+    pub video_kbps: Option<u32>,
+    /// Audio bitrate ceiling (kbps).
+    pub audio_kbps: u32,
+    /// Hard video floor (kbps); only settable here, never via ticket data.
+    pub video_floor_kbps: u32,
+    /// Hard audio floor (kbps; 6 is the lowest sane Opus target).
+    pub audio_floor_kbps: u32,
+    /// Hard fps floor ("miner" guard): neither axis ever goes below this.
+    pub min_fps_guaranteed: u32,
+    /// Pressure weights (normalized internally; §18.69).
+    pub weight_change: f64,
+    /// See `weight_change` (encoder load).
+    pub weight_cpu: f64,
+    /// See `weight_change` (bandwidth utilization; gated by congestion).
+    pub weight_bandwidth: f64,
+    /// Content-axis pressure above which a sample counts as bad.
+    pub pressure_hi: f64,
+    /// Content-axis pressure below which a sample counts as good.
+    pub pressure_lo: f64,
+    /// RTT / baseline above which a network sample counts as bad.
+    pub rtt_bad_factor: f64,
+    /// Absolute slack added to the RTT bad threshold (ms).
+    pub rtt_bad_slack_ms: u64,
+    /// Jitter above which a network sample counts as bad (ms).
+    pub jitter_bad_ms: u64,
+    /// Loss rate above which a network sample counts as bad (0-1).
+    pub loss_bad: f64,
+    /// Consecutive bad samples to step down one level (both axes).
+    pub bad_to_down: u32,
+    /// Consecutive good samples to step up one level (both axes).
+    pub good_to_up: u32,
+    /// Minimum seconds between two raises (both axes).
+    pub raise_cooldown_secs: u64,
+    /// The level table, N0 (full) first; validated monotonic on load.
+    pub levels: Vec<QualityLevelConfig>,
+}
+
+impl Default for QualityConfig {
+    fn default() -> Self {
+        let net = protocol::QualityPolicy::standard(10_000);
+        let pressure = protocol::PressurePolicy::default();
+        Self {
+            video_kbps: None,
+            audio_kbps: 64,
+            video_floor_kbps: net.video_floor_kbps,
+            audio_floor_kbps: net.audio_floor_kbps,
+            min_fps_guaranteed: 1,
+            weight_change: pressure.weight_change,
+            weight_cpu: pressure.weight_cpu,
+            weight_bandwidth: pressure.weight_bandwidth,
+            pressure_hi: pressure.pressure_hi,
+            pressure_lo: pressure.pressure_lo,
+            rtt_bad_factor: net.rtt_bad_factor,
+            rtt_bad_slack_ms: net.rtt_bad_slack_micros / 1_000,
+            jitter_bad_ms: net.jitter_bad_micros / 1_000,
+            loss_bad: net.loss_bad,
+            bad_to_down: net.bad_to_down,
+            good_to_up: net.good_to_up,
+            raise_cooldown_secs: 10,
+            levels: protocol::default_levels()
+                .iter()
+                .map(|l| QualityLevelConfig {
+                    video_factor: l.video_factor,
+                    fps: l.fps,
+                    audio_factor: l.audio_factor,
+                    jpeg_quality: l.jpeg_quality,
+                    vp9_speed: l.vp9_speed,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl QualityConfig {
+    /// Validates ranges and table monotonicity; call after loading the file.
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            !self.levels.is_empty(),
+            "quality.levels must have at least one row"
+        );
+        anyhow::ensure!(
+            self.levels.len() <= 7,
+            "quality.levels: at most 7 rows (got {})",
+            self.levels.len()
+        );
+        for (i, l) in self.levels.iter().enumerate() {
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&l.video_factor) && l.video_factor > 0.0,
+                "quality.levels[{i}].video_factor must be in (0, 1]"
+            );
+            anyhow::ensure!(
+                (1..=60).contains(&l.fps),
+                "quality.levels[{i}].fps must be in 1..=60"
+            );
+            anyhow::ensure!(
+                (0.0..=1.0).contains(&l.audio_factor) && l.audio_factor > 0.0,
+                "quality.levels[{i}].audio_factor must be in (0, 1]"
+            );
+            anyhow::ensure!(
+                (1..=100).contains(&l.jpeg_quality),
+                "quality.levels[{i}].jpeg_quality must be in 1..=100"
+            );
+            anyhow::ensure!(
+                (0..=8).contains(&l.vp9_speed),
+                "quality.levels[{i}].vp9_speed must be in 0..=8"
+            );
+            if let Some(prev) = i.checked_sub(1).map(|p| &self.levels[p]) {
+                anyhow::ensure!(
+                    l.video_factor <= prev.video_factor
+                        && l.fps <= prev.fps
+                        && l.audio_factor <= prev.audio_factor,
+                    "quality.levels[{i}] must not exceed the previous row \
+                     (monotonic non-increasing factors/fps)"
+                );
+            }
+        }
+        anyhow::ensure!(self.video_floor_kbps > 0, "quality.video_floor_kbps must be > 0");
+        anyhow::ensure!(self.audio_floor_kbps > 0, "quality.audio_floor_kbps must be > 0");
+        anyhow::ensure!(self.min_fps_guaranteed >= 1, "quality.min_fps_guaranteed must be >= 1");
+        anyhow::ensure!(
+            self.weight_change >= 0.0 && self.weight_cpu >= 0.0 && self.weight_bandwidth >= 0.0,
+            "quality.weight_* must be >= 0"
+        );
+        anyhow::ensure!(
+            (0.0..1.0).contains(&self.pressure_lo)
+                && (0.0..=1.0).contains(&self.pressure_hi)
+                && self.pressure_lo < self.pressure_hi,
+            "quality.pressure_lo/pressure_hi must satisfy 0 < lo < hi <= 1"
+        );
+        anyhow::ensure!(self.rtt_bad_factor >= 1.0, "quality.rtt_bad_factor must be >= 1");
+        anyhow::ensure!(
+            (0.0..1.0).contains(&self.loss_bad),
+            "quality.loss_bad must be in (0, 1)"
+        );
+        anyhow::ensure!(self.bad_to_down >= 1, "quality.bad_to_down must be >= 1");
+        anyhow::ensure!(self.good_to_up >= 1, "quality.good_to_up must be >= 1");
+        Ok(())
+    }
+
+    /// Compact wire form for the service→agent config frame (§18.69):
+    /// `key=value` pairs plus the level table as
+    /// `levels=vf:fps:af:jq:vs;...`. Parsed back by [`Self::from_wire`].
+    #[must_use]
+    pub fn to_wire(&self) -> String {
+        let levels = self
+            .levels
+            .iter()
+            .map(|l| {
+                format!(
+                    "{}:{}:{}:{}:{}",
+                    l.video_factor, l.fps, l.audio_factor, l.jpeg_quality, l.vp9_speed
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let vkbps = self.video_kbps.map_or_else(|| "auto".to_string(), |v| v.to_string());
+        format!(
+            "vkbps={vkbps},akbps={},vfloor={},afloor={},minfps={},wc={},wcpu={},wbw={},phi={},plo={},rttf={},rtts={},jit={},loss={},b2d={},g2u={},cd={},levels={levels}",
+            self.audio_kbps,
+            self.video_floor_kbps,
+            self.audio_floor_kbps,
+            self.min_fps_guaranteed,
+            self.weight_change,
+            self.weight_cpu,
+            self.weight_bandwidth,
+            self.pressure_hi,
+            self.pressure_lo,
+            self.rtt_bad_factor,
+            self.rtt_bad_slack_ms,
+            self.jitter_bad_ms,
+            self.loss_bad,
+            self.bad_to_down,
+            self.good_to_up,
+            self.raise_cooldown_secs,
+        )
+    }
+
+    /// Parses the wire form produced by [`Self::to_wire`]; an empty string
+    /// yields the defaults. Unknown keys and malformed values are rejected —
+    /// a typo must not silently tune nothing.
+    pub fn from_wire(spec: &str) -> Result<Self> {
+        let mut q = Self::default();
+        if spec.trim().is_empty() {
+            return Ok(q);
+        }
+        for pair in spec.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let (key, value) = pair
+                .split_once('=')
+                .with_context(|| format!("bad quality override (expected key=value): {pair}"))?;
+            let value = value.trim();
+            match key.trim() {
+                "vkbps" => {
+                    q.video_kbps = if value == "auto" {
+                        None
+                    } else {
+                        Some(value.parse().context("bad vkbps")?)
+                    };
+                }
+                "akbps" => q.audio_kbps = value.parse().context("bad akbps")?,
+                "vfloor" => q.video_floor_kbps = value.parse().context("bad vfloor")?,
+                "afloor" => q.audio_floor_kbps = value.parse().context("bad afloor")?,
+                "minfps" => q.min_fps_guaranteed = value.parse().context("bad minfps")?,
+                "wc" => q.weight_change = value.parse().context("bad wc")?,
+                "wcpu" => q.weight_cpu = value.parse().context("bad wcpu")?,
+                "wbw" => q.weight_bandwidth = value.parse().context("bad wbw")?,
+                "phi" => q.pressure_hi = value.parse().context("bad phi")?,
+                "plo" => q.pressure_lo = value.parse().context("bad plo")?,
+                "rttf" => q.rtt_bad_factor = value.parse().context("bad rttf")?,
+                "rtts" => q.rtt_bad_slack_ms = value.parse().context("bad rtts")?,
+                "jit" => q.jitter_bad_ms = value.parse().context("bad jit")?,
+                "loss" => q.loss_bad = value.parse().context("bad loss")?,
+                "b2d" => q.bad_to_down = value.parse().context("bad b2d")?,
+                "g2u" => q.good_to_up = value.parse().context("bad g2u")?,
+                "cd" => q.raise_cooldown_secs = value.parse().context("bad cd")?,
+                "levels" => {
+                    let mut rows = Vec::new();
+                    for row in value.split(';').map(str::trim).filter(|r| !r.is_empty()) {
+                        let fields: Vec<&str> = row.split(':').collect();
+                        anyhow::ensure!(
+                            fields.len() == 5,
+                            "bad levels row (expected vf:fps:af:jq:vs): {row}"
+                        );
+                        rows.push(QualityLevelConfig {
+                            video_factor: fields[0].parse().context("bad levels video_factor")?,
+                            fps: fields[1].parse().context("bad levels fps")?,
+                            audio_factor: fields[2].parse().context("bad levels audio_factor")?,
+                            jpeg_quality: fields[3].parse().context("bad levels jpeg_quality")?,
+                            vp9_speed: fields[4].parse().context("bad levels vp9_speed")?,
+                        });
+                    }
+                    q.levels = rows;
+                }
+                other => anyhow::bail!("unknown quality key: {other}"),
+            }
+        }
+        q.validate()?;
+        Ok(q)
+    }
+
+    /// Builds the protocol network-axis policy (RTT baseline seeded later,
+    /// per session, hence the parameter).
+    #[must_use]
+    pub fn network_policy(&self, baseline_rtt_micros: u64) -> protocol::QualityPolicy {
+        protocol::QualityPolicy {
+            baseline_rtt_micros,
+            baseline_window: std::time::Duration::from_secs(60),
+            rtt_bad_factor: self.rtt_bad_factor,
+            rtt_bad_slack_micros: self.rtt_bad_slack_ms * 1_000,
+            jitter_bad_micros: self.jitter_bad_ms * 1_000,
+            loss_bad: self.loss_bad,
+            bad_to_down: self.bad_to_down,
+            good_to_up: self.good_to_up,
+            raise_cooldown: std::time::Duration::from_secs(self.raise_cooldown_secs),
+            force_video_codec_at: 2,
+            video_floor_kbps: self.video_floor_kbps,
+            audio_floor_kbps: self.audio_floor_kbps,
+            levels: self.levels.iter().map(|l| protocol::LevelSpec {
+                video_factor: l.video_factor,
+                fps: l.fps,
+                audio_factor: l.audio_factor,
+                jpeg_quality: l.jpeg_quality,
+                vp9_speed: l.vp9_speed,
+            }).collect(),
+            min_fps_guaranteed: self.min_fps_guaranteed,
+        }
+    }
+
+    /// Builds the protocol content-axis policy.
+    #[must_use]
+    pub fn pressure_policy(&self) -> protocol::PressurePolicy {
+        protocol::PressurePolicy {
+            weight_change: self.weight_change,
+            weight_cpu: self.weight_cpu,
+            weight_bandwidth: self.weight_bandwidth,
+            pressure_hi: self.pressure_hi,
+            pressure_lo: self.pressure_lo,
+            bad_to_down: self.bad_to_down,
+            good_to_up: self.good_to_up,
+            raise_cooldown: std::time::Duration::from_secs(self.raise_cooldown_secs),
         }
     }
 }
@@ -544,7 +868,13 @@ impl std::fmt::Debug for ResolvedConfig {
 pub fn load(path: &Path) -> Result<ServerConfig> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading config {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
+    let config: ServerConfig =
+        toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+    config
+        .quality
+        .validate()
+        .with_context(|| format!("validating [quality] of {}", path.display()))?;
+    Ok(config)
 }
 
 /// The platform fallback config directory.
@@ -653,6 +983,115 @@ shared_key = "{KEY_HEX}"
         );
         let config: ServerConfig = toml::from_str(&text).expect("parse");
         assert!(config.validated().is_err());
+    }
+
+    #[test]
+    fn quality_defaults_reproduce_the_fixed_ladder() {
+        let q = QualityConfig::default();
+        q.validate().expect("defaults are valid");
+        assert_eq!(q.levels.len(), 7);
+        let net = q.network_policy(10_000);
+        assert_eq!(net.levels[0].jpeg_quality, 80);
+        assert_eq!(net.levels[6].fps, 10);
+        let pressure = q.pressure_policy();
+        assert!((pressure.weight_bandwidth - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn quality_parses_a_custom_table() {
+        let text = format!(
+            r#"
+shared_key = "{KEY_HEX}"
+
+[quality]
+video_kbps = 8000
+weight_change = 0.0
+weight_cpu = 0.7
+weight_bandwidth = 0.3
+min_fps_guaranteed = 2
+
+[[quality.levels]]
+video_factor = 1.0
+fps = 30
+audio_factor = 1.0
+jpeg_quality = 70
+vp9_speed = 8
+
+[[quality.levels]]
+video_factor = 0.3
+fps = 15
+audio_factor = 0.5
+jpeg_quality = 55
+vp9_speed = 8
+"#
+        );
+        let config: ServerConfig = toml::from_str(&text).expect("parse");
+        config.quality.validate().expect("valid");
+        assert_eq!(config.quality.video_kbps, Some(8_000));
+        assert_eq!(config.quality.levels.len(), 2);
+        let net = config.quality.network_policy(10_000);
+        assert_eq!(net.levels[1].jpeg_quality, 55);
+        assert_eq!(net.min_fps_guaranteed, 2);
+        let pressure = config.quality.pressure_policy();
+        assert_eq!(pressure.weight_change, 0.0);
+    }
+
+    #[test]
+    fn quality_rejects_a_non_monotonic_table() {
+        let text = format!(
+            r#"
+shared_key = "{KEY_HEX}"
+
+[[quality.levels]]
+video_factor = 0.5
+
+[[quality.levels]]
+video_factor = 1.0
+"#
+        );
+        let config: ServerConfig = toml::from_str(&text).expect("parse");
+        let err = config.quality.validate().expect_err("non-monotonic must fail");
+        assert!(err.to_string().contains("monotonic"), "{err}");
+    }
+
+    #[test]
+    fn quality_wire_roundtrip() {
+        let q = QualityConfig {
+            video_kbps: Some(8_000),
+            weight_change: 0.0,
+            levels: vec![
+                QualityLevelConfig { video_factor: 1.0, fps: 30, audio_factor: 1.0, jpeg_quality: 70, vp9_speed: 8 },
+                QualityLevelConfig { video_factor: 0.3, fps: 12, audio_factor: 0.5, jpeg_quality: 55, vp9_speed: 6 },
+            ],
+            ..QualityConfig::default()
+        };
+        let back = QualityConfig::from_wire(&q.to_wire()).expect("parse");
+        assert_eq!(back.video_kbps, Some(8_000));
+        assert_eq!(back.weight_change, 0.0);
+        assert_eq!(back.levels.len(), 2);
+        assert_eq!(back.levels[1].jpeg_quality, 55);
+        assert_eq!(back.levels[1].vp9_speed, 6);
+        // Empty wire = defaults; garbage is rejected.
+        assert_eq!(QualityConfig::from_wire("").expect("defaults").levels.len(), 7);
+        assert!(QualityConfig::from_wire("vkbps=abc").is_err());
+        assert!(QualityConfig::from_wire("bogus=1").is_err());
+        assert!(QualityConfig::from_wire("levels=1.0:30:1.0").is_err());
+    }
+
+    #[test]
+    fn quality_rejects_bad_rows() {
+        let mut q = QualityConfig::default();
+        q.levels[0].fps = 0;
+        assert!(q.validate().is_err());
+        let mut q = QualityConfig::default();
+        q.levels[1].jpeg_quality = 200;
+        assert!(q.validate().is_err());
+        let mut q = QualityConfig::default();
+        q.levels[0].vp9_speed = 9;
+        assert!(q.validate().is_err());
+        let mut q = QualityConfig::default();
+        q.pressure_lo = 0.9;
+        assert!(q.validate().is_err(), "lo >= hi must fail");
     }
 
     #[test]

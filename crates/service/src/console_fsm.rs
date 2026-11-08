@@ -222,6 +222,7 @@ fn legacy_config() -> protocol::service_ipc::AgentConfig {
         stats_csv: String::new(),
         cam_sink: String::new(),
         mic_sink: String::new(),
+        quality: String::new(),
         fixed_resolution: (0, 0),
         allow_lock: false,
         wallpaper_off: false,

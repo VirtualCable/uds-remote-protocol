@@ -118,6 +118,9 @@ struct Args {
     /// when set, the agent does not bind its own TCP listener; it rebuilds
     /// the connected socket and serves exactly one session, then exits.
     handoff: Option<protocol::service_ipc::HandoffInfo>,
+    /// Quality policy from the `[quality]` config section (§18.69): ceilings,
+    /// floors, pressure weights and the level table.
+    quality: server::config::QualityConfig,
 }
 
 #[allow(clippy::too_many_lines)] // config file + CLI + agent-config frame seeding
@@ -148,6 +151,7 @@ fn parse_args() -> Result<Args> {
         allow_lock: false,
         wallpaper_off: false,
         handoff: None,
+        quality: server::config::QualityConfig::default(),
     };
     let mut key_seen = false;
     // A config file (reference/standalone mode) seeds the defaults first;
@@ -197,6 +201,11 @@ fn parse_args() -> Result<Args> {
             args.allow_lock = config.allow_lock;
             args.wallpaper_off = config.wallpaper_off;
             args.handoff = config.handoff;
+            if !config.quality.is_empty() {
+                args.quality =
+                    server::config::QualityConfig::from_wire(&config.quality)
+                        .context("bad quality policy in the agent config frame")?;
+            }
             args.source = "dxgi".to_string();
             key_seen = true;
             continue;
@@ -288,6 +297,9 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
     info!(path = %path.display(), "loaded config file");
     args.key = protocol::hex::decode(&config.shared_key).context("bad shared_key")?;
     args.bind = config.bind;
+    // [quality] is server policy (§18.69): top-level, independent of the
+    // connection method; validated at load time.
+    args.quality = config.quality;
     if config.connection_method == server::config::ConnectionMethod::Standalone {
         let standalone = config
             .standalone
@@ -1287,47 +1299,97 @@ fn handle_metrics(
             info!(fec, loss_permille, "audio FEC toggled");
         }
     }
-    let controller = ctl.quality.get_or_insert_with(|| {
-        info!(baseline_rtt_micros = rtt_micros, "quality baseline set");
-        protocol::QualityController::new(protocol::QualityPolicy::standard(rtt_micros))
-    });
-    let sample = protocol::Sample {
-        rtt_micros,
-        jitter_micros,
-        loss,
+    let now = Instant::now();
+    let (net_event, content_event) = {
+        let controller = ctl.quality.get_or_insert_with(|| {
+            info!(baseline_rtt_micros = rtt_micros, "quality baseline set");
+            protocol::QualityController::new(ctl.quality_cfg.network_policy(rtt_micros))
+        });
+        let net_event = controller.update(
+            now,
+            protocol::Sample {
+                rtt_micros,
+                jitter_micros,
+                loss,
+            },
+        );
+        // Content axis (§18.69): same cadence as the client reports; the
+        // pressure sample combines the encoder load, the content-change EMA
+        // and the bandwidth utilization (gated on measured congestion).
+        #[allow(clippy::cast_possible_truncation)] // clamped to 6
+        let max_level = controller.policy().levels.len().saturating_sub(1).min(6) as u8;
+        let pressure = ctl.pressure.get_or_insert_with(|| {
+            protocol::PressureController::new(ctl.quality_cfg.pressure_policy(), max_level)
+        });
+        let content_event = pressure.update(
+            now,
+            protocol::PressureSample {
+                change: encoder.change_ema_fraction().unwrap_or(0.0),
+                cpu: ctl.cpu_load_ema,
+                util: ctl.util_ema,
+                congested: controller.level() > protocol::LEVEL_FULL || net_event.is_some(),
+            },
+        );
+        (net_event, content_event)
     };
-    let Some(event) = controller.update(Instant::now(), sample) else {
-        return;
-    };
-    let t = protocol::targets(
-        event.level,
+    if let Some(event) = net_event {
+        // Network level changed (with or without a content change): full
+        // apply covers the content knobs too.
+        apply_targets(ctl, encoder, true);
+        apply_codec_force(ctl, encoder, event.force_video_codec);
+    } else if content_event.is_some() {
+        // Content-axis-only change: fps ceiling and codec knobs; bitrate
+        // and audio targets stay.
+        apply_targets(ctl, encoder, false);
+    }
+}
+
+/// Resolves the combined targets of both axes (§18.69) and applies them:
+/// bitrate/audio targets only on network-axis changes (`network` flag);
+/// fps ceiling and content knobs always.
+fn apply_targets(ctl: &mut ControlState, encoder: &mut ServerEncoder, network: bool) {
+    let Some(controller) = &ctl.quality else { return };
+    let content_level = ctl.pressure.as_ref().map_or(0, protocol::PressureController::level);
+    let t = protocol::resolve_targets(
+        controller.level(),
+        content_level,
         ctl.video_ceiling_kbps,
         ctl.audio_ceiling_kbps,
         controller.policy(),
     );
     info!(
-        level = event.level,
-        degraded = event.degraded,
+        network_level = controller.level(),
+        content_level,
+        network,
         video_kbps = t.video_kbps,
         audio_kbps = t.audio_kbps,
         fps = t.fps,
-        "quality level changed"
+        jpeg_quality = t.jpeg_quality,
+        vp9_speed = t.vp9_speed,
+        "quality targets applied"
     );
-    if let Err(e) = encoder.set_bitrate(t.video_kbps) {
-        warn!("set_bitrate failed: {e}");
+    if network {
+        if let Err(e) = encoder.set_bitrate(t.video_kbps) {
+            warn!("set_bitrate failed: {e}");
+        }
+        // UDP burst pacing follows the video target (§12.6): level changes
+        // move the token-bucket rate together with the encoder.
+        ctl.pacer_rate.set_from_video_kbps(t.video_kbps);
+        if let Some(ac) = &ctl.audio_control {
+            // The audio thread applies the new target at the next frame.
+            ac.set_target_kbps(t.audio_kbps);
+        }
     }
-    // UDP burst pacing follows the video target (§12.6): level changes move
-    // the token-bucket rate together with the encoder.
-    ctl.pacer_rate.set_from_video_kbps(t.video_kbps);
-    if let Some(ac) = &ctl.audio_control {
-        // The audio thread applies the new target at the next frame (§12.5).
-        ac.set_target_kbps(t.audio_kbps);
-    }
+    encoder.set_content_knobs(t.jpeg_quality, t.vp9_speed);
     // The quality target is a ceiling; the adaptive-fps controller (§12.7)
     // may still hold the capture below it when the encoder is the limit.
     ctl.quality_fps = t.fps;
     ctl.apply_fps();
-    match (event.force_video_codec, ctl.forced_video) {
+}
+
+/// Applies/removes the codec-ladder regime force on transitions only.
+fn apply_codec_force(ctl: &mut ControlState, encoder: &mut ServerEncoder, force: bool) {
+    match (force, ctl.forced_video) {
         (true, false) => {
             encoder.force_video_regime(true);
             ctl.forced_video = true;
@@ -1649,6 +1711,11 @@ async fn handle_frame<T: ReliableTransport>(
     stats.max_encode_micros = stats.max_encode_micros.max(encode_micros);
     // Adaptive fps (§12.7): the encoder's own cost steers the capture rate.
     ctl.observe_encode(Duration::from_micros(encode_micros));
+    // Content axis (§18.69): encoder load as a fraction of the frame budget.
+    let budget_micros = 1_000_000.0 / f64::from(ctl.effective_fps().max(1));
+    #[allow(clippy::cast_precision_loss)] // encode times are µs-scale, far under 2^52
+    let load = (encode_micros as f64 / budget_micros).min(4.0);
+    ctl.cpu_load_ema += 0.1 * (load - ctl.cpu_load_ema);
     if encoder.take_codec_change().is_some() {
         // Codec ladder switched regime: re-announce before the fragments so
         // the peer rebuilds its decoder (§8.5).
@@ -1656,9 +1723,17 @@ async fn handle_frame<T: ReliableTransport>(
     }
     if packet.data.is_empty() {
         stats.empty += 1;
+        // Content axis (§18.69): nothing sent, utilization samples to zero.
+        ctl.util_ema *= 0.9;
         return Ok(frame_id); // rect codecs: nothing changed on this frame
     }
     stats.encoded_bytes += packet.data.len() as u64;
+    // Content axis (§18.69): bandwidth utilization estimate (encoded rate
+    // at the current fps over the ceiling).
+    #[allow(clippy::cast_precision_loss)] // frame payloads are MiB-scale
+    let kbps = packet.data.len() as f64 * 8.0 * f64::from(ctl.effective_fps()) / 1000.0;
+    let util = (kbps / f64::from(ctl.video_ceiling_kbps)).min(2.0);
+    ctl.util_ema += 0.1 * (util - ctl.util_ema);
     stats.max_frame_bytes = stats.max_frame_bytes.max(packet.data.len());
     // Every fragment carries the frame's capture timestamp (§9.1), and the
     // payload opens with the wire id of the codec that produced it (§8.5):
@@ -2247,12 +2322,16 @@ async fn serve_stream<T: ReliableTransport>(
     // first reported RTT as the baseline.
     let mut ctl = ControlState {
         quality: None,
+        pressure: None,
+        quality_cfg: args.quality.clone(),
+        cpu_load_ema: 0.0,
+        util_ema: 0.0,
         forced_video: false,
         last_keyframe_req: None,
         last_lock_req: None,
         allow_lock: args.allow_lock,
         injector: new_injector(),
-        video_ceiling_kbps: args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS),
+        video_ceiling_kbps: video_ceiling_kbps(args),
         audio_ceiling_kbps,
         audio_control,
         fec_on: false,
@@ -2822,8 +2901,18 @@ async fn send_cursor_update<T: ReliableTransport>(
 
 /// Mutable session state for control/input handling (§10/§12).
 struct ControlState {
-    /// Quality controller; created on the first MetricsReport.
+    /// Quality controller (network axis, §18.69); created on the first
+    /// MetricsReport.
     quality: Option<protocol::QualityController>,
+    /// Content-axis controller (§18.69): created on the first MetricsReport
+    /// with the configured pressure policy.
+    pressure: Option<protocol::PressureController>,
+    /// The `[quality]` config in force (policies are derived per session).
+    quality_cfg: server::config::QualityConfig,
+    /// EMA of the encoder load: encode time / frame budget (0..1+, §18.69).
+    cpu_load_ema: f64,
+    /// EMA of the bandwidth utilization: encoded bitrate / ceiling (§18.69).
+    util_ema: f64,
     /// True while congestion forces the codec ladder into its video regime.
     forced_video: bool,
     /// Keyframe requests are rate-limited server-side too (riesgos §2.1).
@@ -3099,6 +3188,37 @@ impl ServerEncoder {
         let _ = (self, on);
     }
 
+    /// Applies the content-axis knobs (§18.69): JPEG quality of the rects
+    /// leg and `cpu_used` of the VP9 leg. No-op for plain encoders.
+    fn set_content_knobs(&mut self, jpeg_quality: i32, vp9_speed: i32) {
+        #[cfg(feature = "ladder")]
+        if let Self::Ladder(e) = self {
+            e.set_jpeg_quality(jpeg_quality);
+            if let Err(err) = e.set_vp9_speed(vp9_speed) {
+                warn!("set_vp9_speed failed: {err}");
+            }
+        }
+        #[cfg(not(feature = "ladder"))]
+        let _ = (self, jpeg_quality, vp9_speed);
+    }
+
+    /// Changed-area EMA as a fraction (0..1) for the content axis (§18.69);
+    /// `None` for plain encoders or before the first frame.
+    fn change_ema_fraction(&self) -> Option<f64> {
+        #[cfg(feature = "ladder")]
+        {
+            match self {
+                Self::Ladder(e) => e.change_ema_fraction(),
+                Self::Simple(_) => None,
+            }
+        }
+        #[cfg(not(feature = "ladder"))]
+        {
+            let _ = self;
+            None
+        }
+    }
+
     /// Current ladder regime and smoothed change-ratio for telemetry;
     /// `(None, None)` for plain encoders or builds without the ladder.
     fn ladder_snapshot(&self) -> (Option<codec::Level>, Option<f64>) {
@@ -3179,13 +3299,28 @@ fn ladder_knobs(spec: &str) -> Result<LadderKnobs> {
     Ok(knobs)
 }
 
+/// Video bitrate ceiling in kbps (§18.69): `--bitrate` wins, then
+/// `[quality] video_kbps`, else auto from the session resolution — 2000 at
+/// ≤1080p, scaling ~sqrt(pixels) above so 4K lands ≈ 4000 (not 4×).
+fn video_ceiling_kbps(args: &Args) -> u32 {
+    const BASE_PX: f64 = 1920.0 * 1080.0;
+    if let Some(kbps) = args.bitrate.or(args.quality.video_kbps) {
+        return kbps;
+    }
+    let px = f64::from(args.width) * f64::from(args.height);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped below
+    {
+        (2000.0 * (px / BASE_PX).sqrt()).round().clamp(1000.0, 16_000.0) as u32
+    }
+}
+
 /// Builds the display encoder from `--preset`: a named preset, or the codec
 /// ladder (`--preset ladder`, feature `ladder`) which starts in rects-JPEG
 /// and switches to VP9 on sustained video-like change (§8.5).
 fn build_encoder(args: &Args, width: u32, height: u32) -> Result<ServerEncoder> {
     #[cfg(feature = "ladder")]
     if args.preset == "ladder" {
-        let kbps = args.bitrate.unwrap_or(codec::DEFAULT_BITRATE_KBPS);
+        let kbps = video_ceiling_kbps(args);
         let knobs = ladder_knobs(&args.ladder)?;
         let encoder = match (knobs.vp9_cpu, knobs.threads) {
             (None, None) => codec::LadderEncoder::new(width, height, knobs.policy, kbps, 80)?,

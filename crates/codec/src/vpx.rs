@@ -223,6 +223,26 @@ impl VpxEncoder {
         }
     }
 
+    /// Re-programs the libvpx `cpu_used` speed/quality knob at runtime
+    /// (§18.69): the content quality axis trades encode speed for
+    /// quality-per-bit without recreating the encoder. Takes effect on the
+    /// next encoded frame.
+    #[cfg_attr(not(feature = "codec-ladder"), allow(dead_code))] // only the ladder calls it
+    pub fn set_cpu_used(&mut self, cpu_used: i32) -> Result<()> {
+        // SAFETY: ctx is live; the control id is shared by VP8/VP9 (≥1.15).
+        unsafe {
+            let e = sys::vpx_codec_control_(
+                &mut self.ctx,
+                sys::vp8e_enc_control_id_VP8E_SET_CPUUSED as i32,
+                cpu_used,
+            );
+            if e != sys::vpx_codec_err_t_VPX_CODEC_OK {
+                return Err(ctx_err(&self.ctx, "vpx_codec_control(CPUUSED)"));
+            }
+        }
+        Ok(())
+    }
+
     /// Packs the I420 planes contiguously and wraps them in a
     /// `vpx_image_t` valid for the duration of the call.
     fn wrap_image(&mut self, i420: &I420Frame) -> sys::vpx_image_t {

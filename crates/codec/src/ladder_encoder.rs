@@ -129,6 +129,25 @@ impl LadderEncoder {
         &self.ladder
     }
 
+    /// Sets the JPEG quality of the rects leg at runtime (§18.69, content
+    /// quality axis); applies from the next encoded frame.
+    pub fn set_jpeg_quality(&mut self, quality: i32) {
+        self.jpeg.set_quality(quality);
+    }
+
+    /// Re-programs the VP9 leg's `cpu_used` at runtime (§18.69, content
+    /// quality axis); applies from the next encoded frame.
+    pub fn set_vp9_speed(&mut self, cpu_used: i32) -> Result<()> {
+        self.vp9.set_cpu_used(cpu_used)
+    }
+
+    /// Changed-area EMA as a fraction (0..1) for the content quality axis;
+    /// `None` until the first frame feeds the ladder.
+    #[must_use]
+    pub fn change_ema_fraction(&self) -> Option<f64> {
+        self.ladder.ema().map(|pct| (pct / 100.0).clamp(0.0, 1.0))
+    }
+
     /// Forces a level from outside (congestion control). Bypasses the
     /// ladder's damping and does not feed its backoff; no-op when already
     /// there. The next frame goes as a keyframe of the new codec.

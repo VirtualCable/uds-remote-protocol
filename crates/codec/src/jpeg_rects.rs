@@ -44,6 +44,9 @@ pub struct JpegRectsEncoder {
     width: u32,
     height: u32,
     quality: i32,
+    /// True once the quality was set from outside (§18.69): the automatic
+    /// bitrate→quality mapping in `set_bitrate` then steps aside.
+    quality_explicit: bool,
     prev: Option<Vec<u8>>,
     force_full: bool,
 }
@@ -63,9 +66,17 @@ impl JpegRectsEncoder {
             width,
             height,
             quality: quality.clamp(1, 100),
+            quality_explicit: false,
             prev: None,
             force_full: false,
         })
+    }
+
+    /// Sets the JPEG quality (1-100) at runtime (§18.69): takes effect on the
+    /// next encoded rect and disables the automatic bitrate→quality mapping.
+    pub fn set_quality(&mut self, quality: i32) {
+        self.quality = quality.clamp(1, 100);
+        self.quality_explicit = true;
     }
 
     /// Encodes `frame` against a caller-computed dirty-rect set (used by the
@@ -183,7 +194,9 @@ impl VideoEncoder for JpegRectsEncoder {
         // (§8.4/§8.5) instead of tuning this knob. Map pressure onto quality
         // as a graceful degradation: below ~1.5 Mbps the base preset's
         // bandwidth is already unreachable, so step quality down.
-        self.quality = if kbps < 1500 { 50 } else { 80 };
+        if !self.quality_explicit {
+            self.quality = if kbps < 1500 { 50 } else { 80 };
+        }
         Ok(())
     }
 

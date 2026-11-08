@@ -52,8 +52,9 @@ pub use printer::{
 };
 pub use probe::{Probe, ProbeAck, ProbeError, compute_rtt};
 pub use quality::{
-    FEC_OFF_LOSS, FEC_ON_LOSS, LEVEL_DEGRADED, LEVEL_FULL, QualityController, QualityEvent,
-    QualityLevel, QualityPolicy, QualityTargets, Sample, fec_update, targets,
+    FEC_OFF_LOSS, FEC_ON_LOSS, LEVEL_DEGRADED, LEVEL_FULL, LevelSpec, PressureController,
+    PressurePolicy, PressureSample, QualityController, QualityEvent, QualityLevel, QualityPolicy,
+    QualityTargets, Sample, default_levels, fec_update, resolve_targets, targets,
 };
 pub use smartcard::{
     MAX_APDU_LEN, MAX_ATR_LEN, MAX_READER_NAME_LEN, MAX_READERS, MAX_STATES, ReaderState,
