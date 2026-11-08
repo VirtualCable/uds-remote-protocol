@@ -54,17 +54,19 @@ use windows::Win32::Media::MediaFoundation::{
     MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
     MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
     MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, METransformHaveOutput, METransformNeedInput,
+    MFT_CATEGORY_VIDEO_DECODER,
 };
 use windows::Win32::Media::MediaFoundation::{
     eAVEncH264VProfile_High, CODECAPI_AVEncCommonMeanBitRate,
     CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVDefaultBPictureCount,
     CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI,
-    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_MT_MPEG2_PROFILE,
+    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
+    MF_MT_MPEG2_PROFILE,
 };
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4};
 use windows::core::{GUID, Interface};
 
-use crate::video::{EncodedPacket, VideoCodecType, VideoEncoder, VideoFrame};
+use crate::video::{DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame};
 use crate::{CodecError, Result};
 
 /// Packs a SIZE attribute (MF_MT_FRAME_SIZE) the way MFSetAttributeSize did.
@@ -131,6 +133,57 @@ pub fn enumerate_encoders() -> Result<Vec<MftInfo>> {
         for act in enumerate_activates(subtype, false)? {
             out.push(read_info(&act, label));
         }
+    }
+    Ok(out)
+}
+
+/// Enumerates the registered H264 video-decoder MFTs (probe tool).
+pub fn enumerate_decoders() -> Result<Vec<MftInfo>> {
+    let mut out = Vec::new();
+    for act in enumerate_decoder_activates(&MFVideoFormat_H264, false)? {
+        out.push(read_info(&act, "H264"));
+    }
+    Ok(out)
+}
+
+/// Enumerates the activates of decoder MFTs consuming `subtype`.
+/// `hw_only` restricts to hardware transforms.
+fn enumerate_decoder_activates(subtype: &GUID, hw_only: bool) -> Result<Vec<IMFActivate>> {
+    let input = MFT_REGISTER_TYPE_INFO {
+        guidMajorType: MFMediaType_Video,
+        guidSubtype: *subtype,
+    };
+    let flags = if hw_only {
+        MFT_ENUM_FLAG(MFT_ENUM_FLAG_HARDWARE.0)
+    } else {
+        MFT_ENUM_FLAG(
+            MFT_ENUM_FLAG_SYNCMFT.0
+                | MFT_ENUM_FLAG_ASYNCMFT.0
+                | MFT_ENUM_FLAG_HARDWARE.0
+                | MFT_ENUM_FLAG_LOCALMFT.0,
+        )
+    };
+    let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+    let mut count = 0u32;
+    unsafe {
+        MFTEnumEx(
+            MFT_CATEGORY_VIDEO_DECODER,
+            flags,
+            Some(&raw const input),
+            None,
+            &raw mut activates,
+            &raw mut count,
+        )
+    }
+    .map_err(|e| CodecError::Backend(format!("MFTEnumEx (decoder): {e}")))?;
+    let entries = if activates.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(activates, count as usize) }
+    };
+    let out: Vec<IMFActivate> = entries.iter().flatten().cloned().collect();
+    if !activates.is_null() {
+        unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(activates.cast())) };
     }
     Ok(out)
 }
@@ -797,7 +850,7 @@ impl MfEncoder {
         let kind = unsafe { ev.GetType() }
             .map_err(|e| CodecError::Backend(format!("event type: {e}")))?;
         if std::env::var_os("MF_DEBUG").is_some() {
-            let what = match kind as i32 {
+            let what = match kind.cast_signed() {
                 k if k == METransformNeedInput.0 => "NeedInput",
                 k if k == METransformHaveOutput.0 => "HaveOutput",
                 _ => "other",
@@ -1015,5 +1068,369 @@ impl VideoEncoder for MfEncoder {
 
     fn codec_type(&self) -> VideoCodecType {
         self.codec
+    }
+}
+
+/// H264 video decoder through a Media Foundation transform (§18.75.8 H3):
+/// hardware MFTs (vendor-registered, DXVA2-backed) first, the Microsoft
+/// software decoder as fallback. Output is negotiated as I420, then NV12,
+/// and converted to tight BGRA like every other decoder backend.
+pub struct MfDecoder {
+    transform: IMFTransform,
+    events: Option<IMFMediaEventGenerator>,
+    in_stream: u32,
+    out_stream: u32,
+    /// Output layout actually negotiated: NV12 when true, I420 when false.
+    nv12: bool,
+    pending: VecDeque<DecodedFrame>,
+    frame_counter: u64,
+    mft_name: String,
+    _guard: MfGuard,
+}
+
+// COM interface pointers are not `Send` in the 0.62 crate; same argument
+// as the encoder: MFTs are free-threaded and access is `&mut self`.
+unsafe impl Send for MfDecoder {}
+
+impl MfDecoder {
+    /// Creates the decoder preferring hardware transforms; falls back to
+    /// any registered one (the Microsoft software decoder ships with the
+    /// OS). `CodecError::Unsupported` when no H264 decoder MFT exists.
+    pub fn new_h264() -> Result<Self> {
+        let guard = MfGuard::acquire()?;
+        let hw = enumerate_decoder_activates(&MFVideoFormat_H264, true)?;
+        let activates = if hw.is_empty() {
+            enumerate_decoder_activates(&MFVideoFormat_H264, false)?
+        } else {
+            hw
+        };
+        if activates.is_empty() {
+            return Err(CodecError::Unsupported(
+                "no H264 decoder MFT registered in the system",
+            ));
+        }
+        // Lab override: MF_PICK=<substring> forces a specific MFT by name.
+        let pick = std::env::var("MF_PICK").ok();
+        let act = if let Some(pick) = pick.as_deref() {
+            activates
+                .iter()
+                .find(|a| {
+                    read_info(a, "")
+                        .name
+                        .to_lowercase()
+                        .contains(&pick.to_lowercase())
+                })
+                .ok_or(CodecError::Unsupported("no MFT matches the MF_PICK filter"))?
+                .clone()
+        } else {
+            activates
+                .iter()
+                .max_by_key(|a| unsafe { a.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) })
+                .expect("non-empty")
+                .clone()
+        };
+        let info = read_info(&act, "H264");
+
+        let transform: IMFTransform = unsafe { act.ActivateObject() }
+            .map_err(|e| CodecError::Backend(format!("decoder MFT activate: {e}")))?;
+
+        // Async unlock before any synchronous call, same as the encoder.
+        if let Ok(attrs) = unsafe { transform.GetAttributes() } {
+            unsafe {
+                let _ = attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1);
+            }
+        }
+        let events: Option<IMFMediaEventGenerator> = transform.cast().ok();
+
+        let (mut in_stream, mut out_stream) = (0u32, 0u32);
+        unsafe {
+            let _ = transform.GetStreamIDs(
+                std::slice::from_mut(&mut in_stream),
+                std::slice::from_mut(&mut out_stream),
+            );
+        }
+
+        // Input: video/H264. No frame size: the decoder reads it from SPS.
+        let in_type = unsafe { MFCreateMediaType() }
+            .map_err(|e| CodecError::Backend(format!("MFCreateMediaType: {e}")))?;
+        unsafe {
+            in_type
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                .and_then(|()| in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264))
+                .map_err(|e| CodecError::Backend(format!("decoder input type: {e}")))?;
+            transform
+                .SetInputType(in_stream, &in_type, 0)
+                .map_err(|e| CodecError::Backend(format!("decoder SetInputType H264: {e}")))?;
+        }
+
+        // Output: I420 first (cheapest conversion), NV12 as fallback (most
+        // hardware decoders only offer NV12).
+        let mut nv12 = false;
+        let set_output = |subtype: &GUID| -> Result<()> {
+            let out_type = unsafe { MFCreateMediaType() }
+                .map_err(|e| CodecError::Backend(format!("MFCreateMediaType: {e}")))?;
+            unsafe {
+                out_type
+                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                    .and_then(|()| out_type.SetGUID(&MF_MT_SUBTYPE, subtype))
+                    .map_err(|e| CodecError::Backend(format!("decoder output type: {e}")))?;
+                transform
+                    .SetOutputType(out_stream, &out_type, 0)
+                    .map_err(|e| CodecError::Backend(format!("decoder SetOutputType: {e}")))?;
+            }
+            Ok(())
+        };
+        if set_output(&MFVideoFormat_I420).is_err() {
+            nv12 = true;
+            set_output(&MFVideoFormat_NV12)?;
+        }
+
+        unsafe {
+            transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                .and_then(|()| transform.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0))
+                .map_err(|e| CodecError::Backend(format!("decoder start streaming: {e}")))?;
+        }
+
+        Ok(Self {
+            transform,
+            events,
+            in_stream,
+            out_stream,
+            nv12,
+            pending: VecDeque::new(),
+            frame_counter: 0,
+            mft_name: info.name,
+            _guard: guard,
+        })
+    }
+
+    /// Friendly name of the chosen MFT (log line).
+    #[must_use]
+    pub fn mft_name(&self) -> &str {
+        &self.mft_name
+    }
+
+    /// Reads the current output frame size and stride from the negotiated
+    /// output type (resolution can change mid-stream; the type is the
+    /// source of truth).
+    fn output_shape(&self) -> Result<(u32, u32, usize)> {
+        let ty = unsafe { self.transform.GetOutputCurrentType(self.out_stream) }
+            .map_err(|e| CodecError::Backend(format!("decoder GetOutputCurrentType: {e}")))?;
+        let packed = unsafe { ty.GetUINT64(&MF_MT_FRAME_SIZE) }
+            .map_err(|e| CodecError::Backend(format!("decoder output frame size: {e}")))?;
+        let width = (packed >> 32) as u32;
+        let height = u32::try_from(packed & 0xFFFF_FFFF).expect("low 32 bits fit");
+        // Negative strides (bottom-up) are legal MF; none of our decoders
+        // produce them and the layout math below assumes top-down.
+        let raw = unsafe { ty.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.unwrap_or(width);
+        let stride = i32::try_from(raw)
+            .ok()
+            .and_then(|s| usize::try_from(s).ok())
+            .filter(|&s| s >= width as usize)
+            .ok_or_else(|| CodecError::Backend(format!("bad decoder stride: {raw}")))?;
+        Ok((width, height, stride))
+    }
+
+    /// Converts one output sample into a `DecodedFrame` and queues it.
+    fn collect_sample(&mut self, sample: &IMFSample) -> Result<()> {
+        let contiguous: IMFMediaBuffer = unsafe { sample.ConvertToContiguousBuffer() }
+            .map_err(|e| CodecError::Backend(format!("decoder contiguous: {e}")))?;
+        let data = unsafe {
+            let mut ptr = std::ptr::null_mut();
+            let mut len = 0u32;
+            contiguous
+                .Lock(&raw mut ptr, None, Some(&raw mut len))
+                .map_err(|e| CodecError::Backend(format!("decoder out lock: {e}")))?;
+            let data = std::slice::from_raw_parts(ptr, len as usize).to_vec();
+            let _ = contiguous.Unlock();
+            data
+        };
+        let (width, height, stride) = self.output_shape()?;
+        let (w, h) = (width as usize, height as usize);
+        let frame = if self.nv12 {
+            let y_len = stride * h;
+            if data.len() < y_len {
+                return Err(CodecError::Malformed);
+            }
+            crate::color::nv12_to_bgra(&data[..y_len], &data[y_len..], width, height, stride, stride)?
+        } else {
+            let y_len = stride * h;
+            let uv_stride = stride.div_ceil(2);
+            let uv_len = uv_stride * h.div_ceil(2);
+            if data.len() < y_len + 2 * uv_len {
+                return Err(CodecError::Malformed);
+            }
+            let i420 = crate::color::I420Frame {
+                width,
+                height,
+                y_stride: w,
+                uv_stride: w.div_ceil(2),
+                y: copy_rows(&data, 0, stride, w, h),
+                u: copy_rows(&data, y_len, uv_stride, w.div_ceil(2), h.div_ceil(2)),
+                v: copy_rows(&data, y_len + uv_len, uv_stride, w.div_ceil(2), h.div_ceil(2)),
+            };
+            crate::color::i420_to_bgra(&i420)?
+        };
+        self.pending.push_back(frame);
+        Ok(())
+    }
+
+    /// One `ProcessOutput` round; queues every produced frame.
+    fn drain_outputs(&mut self) -> Result<()> {
+        loop {
+            let (width, height, _) = self.output_shape().unwrap_or((0, 0, 0));
+            let cb_size = (width as usize * height as usize * 3 / 2).max(1 << 20);
+            let sample = unsafe { MFCreateSample() }
+                .map_err(|e| CodecError::Backend(format!("MFCreateSample: {e}")))?;
+            let buffer = unsafe {
+                MFCreateMemoryBuffer(u32::try_from(cb_size).map_err(|_| CodecError::Malformed)?)
+            }
+            .map_err(|e| CodecError::Backend(format!("MFCreateMemoryBuffer: {e}")))?;
+            unsafe {
+                sample
+                    .AddBuffer(&buffer)
+                    .map_err(|e| CodecError::Backend(format!("AddBuffer: {e}")))?;
+            }
+            let mut bufs = [MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: self.out_stream,
+                pSample: ManuallyDrop::new(Some(sample)),
+                dwStatus: 0,
+                pEvents: ManuallyDrop::new(None),
+            }];
+            let mut status = 0u32;
+            let result = unsafe { self.transform.ProcessOutput(0, &mut bufs, &raw mut status) };
+            match result {
+                Ok(()) => {
+                    let sample = unsafe { ManuallyDrop::take(&mut bufs[0].pSample) }
+                        .ok_or_else(|| CodecError::Backend("decoder output without sample".into()))?;
+                    self.collect_sample(&sample)?;
+                }
+                Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(()),
+                Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    // Resolution change mid-stream: take the format the
+                    // decoder offers for the new size and keep draining.
+                    // output_shape() re-reads size/stride from the type.
+                    let new_type = unsafe {
+                        self.transform.GetOutputAvailableType(self.out_stream, 0)
+                    }
+                    .map_err(|e| {
+                        CodecError::Backend(format!("decoder available output type: {e}"))
+                    })?;
+                    unsafe {
+                        self.transform
+                            .SetOutputType(self.out_stream, &new_type, 0)
+                            .map_err(|e| {
+                                CodecError::Backend(format!("decoder stream change: {e}"))
+                            })?;
+                    }
+                }
+                Err(e) => return Err(CodecError::Backend(format!("decoder ProcessOutput: {e}"))),
+            }
+        }
+    }
+
+    /// Waits for one async-MFT event; drains output on have-output and
+    /// re-arms the output type on a format change.
+    fn pump_event(&mut self) -> Result<()> {
+        let events = self
+            .events
+            .as_ref()
+            .ok_or_else(|| CodecError::Backend("async decoder MFT without events".into()))?;
+        let ev = unsafe { events.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)) }
+            .map_err(|e| CodecError::Backend(format!("decoder GetEvent: {e}")))?;
+        let kind = unsafe { ev.GetType() }
+            .map_err(|e| CodecError::Backend(format!("decoder event type: {e}")))?;
+        if kind == METransformHaveOutput.0 as u32 {
+            self.drain_outputs()?;
+        }
+        Ok(())
+    }
+}
+
+/// Copies `rows` rows of `cols` bytes out of a strided plane (tight packing).
+fn copy_rows(data: &[u8], offset: usize, stride: usize, cols: usize, rows: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(cols * rows);
+    for row in 0..rows {
+        let start = offset + row * stride;
+        out.extend_from_slice(&data[start..start + cols]);
+    }
+    out
+}
+
+impl VideoDecoder for MfDecoder {
+    fn decode(&mut self, packet: &EncodedPacket) -> Result<DecodedFrame> {
+        if packet.data.is_empty() {
+            return Err(CodecError::Malformed);
+        }
+        // Wrap the bitstream in a sample; timestamps are advisory for a
+        // decoder but keep the event plumbing happy.
+        let sample = unsafe { MFCreateSample() }
+            .map_err(|e| CodecError::Backend(format!("MFCreateSample: {e}")))?;
+        let buffer = unsafe {
+            MFCreateMemoryBuffer(
+                u32::try_from(packet.data.len()).map_err(|_| CodecError::Malformed)?,
+            )
+        }
+        .map_err(|e| CodecError::Backend(format!("MFCreateMemoryBuffer: {e}")))?;
+        unsafe {
+            let mut ptr = std::ptr::null_mut();
+            buffer
+                .Lock(&raw mut ptr, None, None)
+                .map_err(|e| CodecError::Backend(format!("decoder buffer lock: {e}")))?;
+            std::ptr::copy_nonoverlapping(packet.data.as_ptr(), ptr, packet.data.len());
+            buffer
+                .Unlock()
+                .and_then(|()| {
+                    buffer.SetCurrentLength(
+                        u32::try_from(packet.data.len()).unwrap_or(u32::MAX),
+                    )
+                })
+                .map_err(|e| CodecError::Backend(format!("decoder buffer commit: {e}")))?;
+            sample
+                .AddBuffer(&buffer)
+                .map_err(|e| CodecError::Backend(format!("AddBuffer: {e}")))?;
+            let t = self.frame_counter.cast_signed() * (10_000_000i64 / 30);
+            sample.SetSampleTime(t).ok();
+            sample.SetSampleDuration(10_000_000i64 / 30).ok();
+        }
+        self.frame_counter += 1;
+
+        let mut feed_attempts = 0u32;
+        loop {
+            match unsafe { self.transform.ProcessInput(self.in_stream, &sample, 0) } {
+                Ok(()) => break,
+                Err(e) if e.code() == MF_E_NOTACCEPTING => {
+                    if self.events.is_none() {
+                        return Err(CodecError::Backend(
+                            "sync decoder MFT refused input".into(),
+                        ));
+                    }
+                    self.pump_event()?;
+                    feed_attempts += 1;
+                    if feed_attempts > 100 {
+                        return Err(CodecError::Backend("decoder feed stall".into()));
+                    }
+                }
+                Err(e) => return Err(CodecError::Backend(format!("decoder ProcessInput: {e}"))),
+            }
+        }
+
+        if self.events.is_none() {
+            self.drain_outputs()?;
+        }
+        let mut stalls = 0u32;
+        while self.pending.is_empty() {
+            self.pump_event()?;
+            stalls += 1;
+            if stalls > 300 {
+                return Err(CodecError::Backend("decoder output stall".into()));
+            }
+        }
+        Ok(self.pending.pop_front().expect("non-empty"))
+    }
+
+    fn codec_type(&self) -> VideoCodecType {
+        VideoCodecType::H264
     }
 }

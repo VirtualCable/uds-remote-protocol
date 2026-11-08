@@ -176,3 +176,58 @@ pub fn i420_to_bgra(frame: &I420Frame) -> Result<crate::video::DecodedFrame> {
         data,
     })
 }
+
+/// Converts an NV12 (Y plane + interleaved UV plane) frame to tight BGRA.
+/// Used by the Windows MFT decoder, whose output is NV12 on most hardware.
+#[allow(clippy::many_single_char_names)] // Plane/stride names follow the NV12 spec.
+pub fn nv12_to_bgra(
+    y: &[u8],
+    uv: &[u8],
+    width: u32,
+    height: u32,
+    y_stride: usize,
+    uv_stride: usize,
+) -> Result<crate::video::DecodedFrame> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || y_stride < w || uv_stride < w.div_ceil(2) * 2 {
+        return Err(CodecError::BadDimensions {
+            width,
+            height,
+            stride: y_stride,
+            data_len: y.len() + uv.len(),
+        });
+    }
+    if y.len() < y_stride * h || uv.len() < uv_stride * h.div_ceil(2) {
+        return Err(CodecError::BadDimensions {
+            width,
+            height,
+            stride: y_stride,
+            data_len: y.len() + uv.len(),
+        });
+    }
+    let clamp = |v: i32| u8::try_from(v.clamp(0, 255)).expect("clamped to u8");
+    let mut data = vec![0u8; w * h * 4];
+    for py in 0..h {
+        for px in 0..w {
+            let luma = i32::from(y[py * y_stride + px]);
+            let uv_off = (py / 2) * uv_stride + (px & !1);
+            let cb = i32::from(uv[uv_off]) - 128;
+            let cr = i32::from(uv[uv_off + 1]) - 128;
+            let c = luma - 16;
+            let r = (298 * c + 409 * cr + 128) >> 8;
+            let g = (298 * c - 100 * cb - 208 * cr + 128) >> 8;
+            let b = (298 * c + 516 * cb + 128) >> 8;
+            let off = (py * w + px) * 4;
+            data[off] = clamp(b);
+            data[off + 1] = clamp(g);
+            data[off + 2] = clamp(r);
+            data[off + 3] = 255;
+        }
+    }
+    Ok(crate::video::DecodedFrame {
+        width,
+        height,
+        stride: w * 4,
+        data,
+    })
+}
