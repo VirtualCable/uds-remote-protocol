@@ -907,15 +907,18 @@ struct DecodeWorker {
     ctl_rx: flume::Receiver<DecodeJob>,
     events: flume::Sender<ClientEvent>,
     displays: Displays,
-    /// One decoder per display (§8.3); created from DisplayInfo
-    /// announcements, or Raw on first frame for servers that do not
-    /// announce (§8.4 compat).
-    decoders: HashMap<u8, Box<dyn VideoDecoder>>,
-    /// Codec whose decoder build already failed per display: frames are
-    /// dropped quietly instead of warning/retrying per frame (a broken
-    /// build does not fix itself between frames). Cleared when the codec
-    /// tag changes — the server may have switched regime.
-    decoder_failures: HashMap<u8, VideoCodecType>,
+    /// One decoder per (display, codec) pair (§8.3); created from DisplayInfo
+    /// announcements or on first frame carrying that codec's tag (§8.5).
+    /// Kept alive across ladder switches: in-flight frames of the old codec
+    /// legitimately arrive after the new codec starts, and rebuilding the
+    /// video decoder per tag flip would wipe its reference state — every
+    /// subsequent delta then decodes against nothing (§18.75.9 ghosting).
+    decoders: HashMap<(u8, VideoCodecType), Box<dyn VideoDecoder>>,
+    /// Codec whose decoder build already failed per (display, codec):
+    /// frames are dropped quietly instead of warning/retrying per frame
+    /// (a broken build does not fix itself between frames). Cleared when
+    /// the codec tag changes — the server may have switched regime.
+    decoder_failures: HashMap<(u8, VideoCodecType), VideoCodecType>,
     /// Shared with the network task: it drives the keyframe requests.
     recovery_awaiting: Arc<AtomicBool>,
     /// Audio playback cursor (capture-clock ms), for the A/V decisions.
@@ -1037,7 +1040,7 @@ impl DecodeWorker {
         match job {
             DecodeJob::Announce { display_id, codec } => match codec::build_decoder(codec) {
                 Ok(dec) => {
-                    self.decoders.insert(display_id, dec);
+                    self.decoders.insert((display_id, codec), dec);
                 }
                 Err(e) => {
                     warn!(codec = codec.wire_id(), "cannot build decoder: {e}");
@@ -1069,23 +1072,30 @@ impl DecodeWorker {
             warn!(codec_id, "frame with unknown codec tag; dropped");
             return;
         };
-        let needs_build = self
-            .decoders
-            .get(&complete.display_id)
-            .is_none_or(|d| d.codec_type() != codec_type);
-        if needs_build {
-            if self.decoder_failures.get(&complete.display_id) == Some(&codec_type) {
+        let key = (complete.display_id, codec_type);
+        // Predictive chain broken and a keyframe already requested: feeding
+        // more deltas to the decoder renders ghosts (a delta against a dead
+        // reference decodes "fine" into garbage), so drop them until the
+        // keyframe lands. Self-contained codecs carry no chain; they decode.
+        if self.recovery_awaiting.load(Ordering::Relaxed)
+            && matches!(codec_type, VideoCodecType::Vp8 | VideoCodecType::Vp9 | VideoCodecType::H264)
+            && !codec::packet_is_keyframe(codec_type, &payload)
+        {
+            return;
+        }
+        if !self.decoders.contains_key(&key) {
+            if self.decoder_failures.get(&key) == Some(&codec_type) {
                 return; // already failed for this codec; drop quietly
             }
             match codec::build_decoder(codec_type) {
                 Ok(dec) => {
-                    info!(display_id = complete.display_id, codec_id, "decoder (re)built from frame tag");
-                    self.decoder_failures.remove(&complete.display_id);
-                    self.decoders.insert(complete.display_id, dec);
+                    info!(display_id = complete.display_id, codec_id, "decoder built from frame tag");
+                    self.decoder_failures.remove(&key);
+                    self.decoders.insert(key, dec);
                 }
                 Err(e) => {
                     warn!(codec_id, "cannot build decoder: {e}");
-                    self.decoder_failures.insert(complete.display_id, codec_type);
+                    self.decoder_failures.insert(key, codec_type);
                     let _ = emit(
                         &self.events,
                         ClientEvent::Error(format!("cannot build video decoder: {e}")),
@@ -1094,10 +1104,7 @@ impl DecodeWorker {
                 }
             }
         }
-        let decoder = self
-            .decoders
-            .get_mut(&complete.display_id)
-            .expect("inserted above");
+        let decoder = self.decoders.get_mut(&key).expect("inserted above");
         match decoder.decode(&EncodedPacket {
             data: payload,
             keyframe: true,

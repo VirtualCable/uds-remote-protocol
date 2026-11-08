@@ -11,7 +11,7 @@
 //! capability announces `codec + backend`.
 
 /// Video codec identifier, with stable wire IDs for capability negotiation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VideoCodecType {
     /// Uncompressed BGRA (reference implementation for tests; never
     /// negotiated in production).
@@ -55,6 +55,44 @@ impl VideoCodecType {
             5 => Some(Self::JpegRects),
             _ => None,
         }
+    }
+}
+
+/// Cheap keyframe sniffing of an encoded packet, for broken-chain drop
+/// decisions (client): self-contained codecs always count as keyframes.
+#[must_use]
+pub fn packet_is_keyframe(codec: VideoCodecType, data: &[u8]) -> bool {
+    match codec {
+        VideoCodecType::Vp8 | VideoCodecType::Vp9 => {
+            // VP8/VP9 uncompressed header, LSB-first in the first byte:
+            // frame_marker(2 bits, must be 0b10), profile(2), reserved(1),
+            // show_existing(1), frame_type(1) at bit 6 — 0 means keyframe.
+            data.first()
+                .is_some_and(|b0| (b0 & 0b11) == 0b10 && (b0 >> 6) & 1 == 0)
+        }
+        VideoCodecType::H264 => {
+            // Annex B stream: keyframe iff any NAL has nal_unit_type 5 (IDR).
+            let mut i = 0;
+            while i + 4 < data.len() {
+                let sc = if data[i..].starts_with(&[0, 0, 0, 1]) {
+                    4
+                } else if data[i..].starts_with(&[0, 0, 1]) {
+                    3
+                } else {
+                    0
+                };
+                if sc == 0 {
+                    i += 1;
+                } else {
+                    if data[i + sc] & 0x1F == 5 {
+                        return true;
+                    }
+                    i += sc + 1;
+                }
+            }
+            false
+        }
+        VideoCodecType::Raw | VideoCodecType::Av1 | VideoCodecType::JpegRects => true,
     }
 }
 

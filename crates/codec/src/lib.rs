@@ -69,6 +69,7 @@ pub use opus::{OpusDecoder, OpusEncoder};
 pub use raw::{RawDecoder, RawEncoder};
 pub use video::{
     DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame,
+    packet_is_keyframe,
 };
 #[cfg(feature = "codec-vp9")]
 pub use vpx::{Vp9Decoder, Vp9Encoder};
