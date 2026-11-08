@@ -24,6 +24,8 @@ mod error;
 mod jpeg_rects;
 #[cfg(feature = "codec-ladder")]
 mod ladder_encoder;
+#[cfg(all(windows, feature = "codec-mf"))]
+pub mod mf;
 #[cfg(feature = "codec-opus")]
 mod opus;
 mod preset;

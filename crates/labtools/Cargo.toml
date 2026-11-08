@@ -11,8 +11,12 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+codec = { workspace = true, optional = true }
 udsscard-proto = { path = "../udsscard-proto" }
 udscredprov = { path = "../udscredprov" }
+
+[features]
+mf-probe = ["codec/codec-mf"]
 
 [target.'cfg(windows)'.dependencies]
 widestring = "1.2"
@@ -39,3 +43,7 @@ path = "src/bin/udsscard-ctl.rs"
 [[bin]]
 name = "udscredprov-ctl"
 path = "src/bin/udscredprov-ctl.rs"
+
+[[bin]]
+name = "mf-probe"
+path = "src/bin/mf-probe.rs"

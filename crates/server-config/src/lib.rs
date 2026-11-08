@@ -1134,8 +1134,7 @@ video_factor = 1.0
         let mut q = QualityConfig::default();
         q.levels[0].vp9_speed = 9;
         assert!(q.validate().is_err());
-        let mut q = QualityConfig::default();
-        q.pressure_lo = 0.9;
+        let q = QualityConfig { pressure_lo: 0.9, ..QualityConfig::default() };
         assert!(q.validate().is_err(), "lo >= hi must fail");
     }
 

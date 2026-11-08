@@ -16,6 +16,7 @@ codec-vp8 = ["dep:vpx-sys"]
 codec-jpeg = ["dep:turbojpeg"]
 codec-ladder = ["codec-jpeg", "codec-vp9"]
 codec-opus = ["dep:opus"]
+codec-mf = ["dep:windows"]
 
 [dependencies]
 thiserror.workspace = true
@@ -23,6 +24,14 @@ anyhow.workspace = true
 vpx-sys = { workspace = true, optional = true }
 turbojpeg = { workspace = true, optional = true }
 opus = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, optional = true, features = [
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = ["Win32_System_Threading"] }
