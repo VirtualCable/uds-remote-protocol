@@ -187,8 +187,11 @@ pub fn build_decoder(codec: VideoCodecType) -> crate::Result<Box<dyn VideoDecode
 #[cfg(any(feature = "codec-h264", all(windows, feature = "codec-mf")))]
 #[allow(unreachable_code, unused_variables, clippy::needless_return)]
 fn build_h264_decoder() -> crate::Result<Box<dyn VideoDecoder>> {
+    // Lab override: UDSRP_H264_DECODER=openh264|mft forces the backend
+    // (A/B testing of decode paths; production leaves it unset).
+    let forced = std::env::var("UDSRP_H264_DECODER").ok();
     #[cfg(all(windows, feature = "codec-mf"))]
-    {
+    if forced.as_deref() != Some("openh264") {
         match crate::mf::MfDecoder::new_h264() {
             Ok(dec) => {
                 tracing::info!(mft = dec.mft_name(), "H264 decoder: Media Foundation");
@@ -200,7 +203,7 @@ fn build_h264_decoder() -> crate::Result<Box<dyn VideoDecoder>> {
         }
     }
     #[cfg(feature = "codec-h264")]
-    {
+    if forced.as_deref() != Some("mft") {
         return Ok(Box::new(crate::OpenH264Decoder::new()?));
     }
     Err(crate::CodecError::Unsupported(
@@ -253,7 +256,7 @@ mod tests {
         };
         let packet = enc.encode(&frame).unwrap();
         let mut dec = build_decoder(VideoCodecType::Raw).unwrap();
-        let decoded = dec.decode(&packet).unwrap();
+        let decoded = dec.decode(&packet).unwrap().expect("frame");
         assert_eq!((decoded.width, decoded.height), (64, 64));
         assert_eq!(decoded.data[0], 7);
     }

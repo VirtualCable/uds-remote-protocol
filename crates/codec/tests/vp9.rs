@@ -45,7 +45,7 @@ fn vp9_roundtrip_preserves_geometry_and_rough_color() {
     assert_ne!(packet.data.len(), 0);
 
     let mut dec = Vp9Decoder::new().expect("decoder init");
-    let decoded = dec.decode(&packet).expect("decode");
+    let decoded = dec.decode(&packet).expect("decode").expect("frame");
     assert_eq!((decoded.width, decoded.height), (w, h));
 
     // Lossy + color conversion: compare averages with generous tolerance.

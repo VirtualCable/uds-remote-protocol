@@ -1192,6 +1192,14 @@ impl MfDecoder {
             }
         }
         let events: Option<IMFMediaEventGenerator> = transform.cast().ok();
+        // Low-latency mode: without it the MS H264 decoder holds several
+        // frames before producing the first output. Supported by the MS
+        // decoder; vendor MFTs may ignore it.
+        if let Ok(codec_api) = transform.cast::<ICodecAPI>() {
+            unsafe {
+                let _ = codec_api.SetValue(&CODECAPI_AVLowLatencyMode, &variant_bool(true));
+            }
+        }
 
         let (mut in_stream, mut out_stream) = (0u32, 0u32);
         unsafe {
@@ -1386,21 +1394,25 @@ impl MfDecoder {
         }
     }
 
-    /// Waits for one async-MFT event; drains output on have-output and
-    /// re-arms the output type on a format change.
-    fn pump_event(&mut self) -> Result<()> {
-        let events = self
-            .events
-            .as_ref()
-            .ok_or_else(|| CodecError::Backend("async decoder MFT without events".into()))?;
-        let ev = unsafe { events.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)) }
-            .map_err(|e| CodecError::Backend(format!("decoder GetEvent: {e}")))?;
+    /// Drains one pending async-MFT event without blocking; returns `false`
+    /// when there are no events (or no event generator: sync MFT), so the
+    /// caller can stop pumping. Decoder latency is normal flow, never an
+    /// error: with no events ready we simply have no frame yet.
+    fn pump_event(&mut self) -> Result<bool> {
+        let Some(events) = self.events.as_ref() else {
+            return Ok(false);
+        };
+        // MF_EVENT_FLAG_NO_WAIT = 0x1; a plain "no events" answer is fine.
+        let Ok(ev) = (unsafe { events.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0x1)) })
+        else {
+            return Ok(false);
+        };
         let kind = unsafe { ev.GetType() }
             .map_err(|e| CodecError::Backend(format!("decoder event type: {e}")))?;
         if kind == METransformHaveOutput.0 as u32 {
             self.drain_outputs()?;
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1415,7 +1427,7 @@ fn copy_rows(data: &[u8], offset: usize, stride: usize, cols: usize, rows: usize
 }
 
 impl VideoDecoder for MfDecoder {
-    fn decode(&mut self, packet: &EncodedPacket) -> Result<DecodedFrame> {
+    fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {
         if packet.data.is_empty() {
             return Err(CodecError::Malformed);
         }
@@ -1457,12 +1469,13 @@ impl VideoDecoder for MfDecoder {
             match unsafe { self.transform.ProcessInput(self.in_stream, &sample, 0) } {
                 Ok(()) => break,
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
+                    // MFT momentarily full: free it by draining what it has
+                    // (sync) or consuming pending events (async), then retry.
                     if self.events.is_none() {
-                        return Err(CodecError::Backend(
-                            "sync decoder MFT refused input".into(),
-                        ));
+                        self.drain_outputs()?;
+                    } else {
+                        while self.pump_event()? {}
                     }
-                    self.pump_event()?;
                     feed_attempts += 1;
                     if feed_attempts > 100 {
                         return Err(CodecError::Backend("decoder feed stall".into()));
@@ -1472,18 +1485,15 @@ impl VideoDecoder for MfDecoder {
             }
         }
 
+        // Decoder latency is normal flow (Ok(None)), not a broken stream:
+        // hardware/OS decoders hold frames before the first output. Drain
+        // whatever is ready and return what we have.
         if self.events.is_none() {
             self.drain_outputs()?;
+        } else {
+            while self.pump_event()? {}
         }
-        let mut stalls = 0u32;
-        while self.pending.is_empty() {
-            self.pump_event()?;
-            stalls += 1;
-            if stalls > 300 {
-                return Err(CodecError::Backend("decoder output stall".into()));
-            }
-        }
-        Ok(self.pending.pop_front().expect("non-empty"))
+        Ok(self.pending.pop_front())
     }
 
     fn codec_type(&self) -> VideoCodecType {

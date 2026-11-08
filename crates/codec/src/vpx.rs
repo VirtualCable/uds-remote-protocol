@@ -438,7 +438,7 @@ impl Drop for VpxDecoder {
 }
 
 impl VideoDecoder for VpxDecoder {
-    fn decode(&mut self, packet: &EncodedPacket) -> Result<DecodedFrame> {
+    fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {
         // SAFETY: ctx initialized; packet data valid for the call; frame
         // iteration per libvpx contract.
         unsafe {
@@ -482,7 +482,7 @@ impl VideoDecoder for VpxDecoder {
                 u: plane(img.planes[1], uv_stride, uv_h),
                 v: plane(img.planes[2], uv_stride, uv_h),
             };
-            i420_to_bgra(&i420)
+            i420_to_bgra(&i420).map(Some)
         }
     }
 
@@ -569,7 +569,7 @@ impl Vp9Decoder {
 }
 
 impl VideoDecoder for Vp9Decoder {
-    fn decode(&mut self, packet: &EncodedPacket) -> Result<DecodedFrame> {
+    fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {
         self.0.decode(packet)
     }
 
@@ -637,7 +637,7 @@ impl Vp8Decoder {
 
 #[cfg(feature = "codec-vp8")]
 impl VideoDecoder for Vp8Decoder {
-    fn decode(&mut self, packet: &EncodedPacket) -> Result<DecodedFrame> {
+    fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {
         self.0.decode(packet)
     }
 

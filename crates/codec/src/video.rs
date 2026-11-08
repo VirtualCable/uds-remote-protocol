@@ -171,8 +171,12 @@ pub trait VideoEncoder: Send {
 /// may run on any task/thread (§15.3). Each decoder is still used from a
 /// single thread at a time.
 pub trait VideoDecoder: Send {
-    /// Decodes one packet.
-    fn decode(&mut self, packet: &EncodedPacket) -> crate::Result<DecodedFrame>;
+    /// Decodes one packet. `Ok(None)` means the decoder buffered the packet
+    /// but produced no frame yet (hardware/OS decoders have inherent
+    /// latency — e.g. the MS H264 MFT holds several frames before the first
+    /// output); that is normal flow, not a broken stream. Errors are
+    /// reserved for real decode failures.
+    fn decode(&mut self, packet: &EncodedPacket) -> crate::Result<Option<DecodedFrame>>;
 
     /// Codec implemented by this decoder.
     fn codec_type(&self) -> VideoCodecType;

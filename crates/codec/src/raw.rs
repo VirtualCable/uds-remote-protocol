@@ -85,7 +85,7 @@ impl RawDecoder {
 }
 
 impl VideoDecoder for RawDecoder {
-    fn decode(&mut self, packet: &EncodedPacket) -> Result<DecodedFrame> {
+    fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {
         if packet.data.len() < 8 {
             return Err(CodecError::Malformed);
         }
@@ -99,12 +99,12 @@ impl VideoDecoder for RawDecoder {
         if width == 0 || height == 0 || data.len() != expected {
             return Err(CodecError::Malformed);
         }
-        Ok(DecodedFrame {
+        Ok(Some(DecodedFrame {
             width,
             height,
             stride,
             data: data.to_vec(),
-        })
+        }))
     }
 
     fn codec_type(&self) -> VideoCodecType {

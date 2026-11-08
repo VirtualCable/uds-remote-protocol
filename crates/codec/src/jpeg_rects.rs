@@ -253,7 +253,7 @@ fn u32_at(buf: &mut &[u8]) -> Result<u32> {
 const MAX_FRAME_DIM: u32 = 8192;
 
 impl VideoDecoder for JpegRectsDecoder {
-    fn decode(&mut self, packet: &EncodedPacket) -> Result<DecodedFrame> {
+    fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {
         let mut buf: &[u8] = &packet.data;
         if buf.is_empty() {
             // "No changes" packet: return the canvas as-is (must exist).
@@ -295,12 +295,12 @@ impl VideoDecoder for JpegRectsDecoder {
                 }
             }
         }
-        Ok(DecodedFrame {
+        Ok(Some(DecodedFrame {
             width: self.width,
             height: self.height,
             stride: self.width as usize * 4,
             data: self.canvas.clone(),
-        })
+        }))
     }
 
     fn codec_type(&self) -> VideoCodecType {
@@ -331,7 +331,7 @@ mod tests {
         let vf1 = VideoFrame { width: w, height: h, stride: w as usize * 4, data: &f1 };
         let p1 = enc.encode(&vf1).unwrap();
         assert!(p1.keyframe); // first frame is a full-screen rect
-        let d1 = dec.decode(&p1).unwrap();
+        let d1 = dec.decode(&p1).unwrap().expect("frame");
         assert_eq!((d1.width, d1.height), (w, h));
         // JPEG is lossy: allow a small per-channel error.
         assert!(d1.data.chunks_exact(4).all(|c| {
@@ -351,7 +351,7 @@ mod tests {
         let p2 = enc.encode(&vf2).unwrap();
         assert!(!p2.keyframe);
         assert!(p2.data.len() < p1.data.len());
-        let d2 = dec.decode(&p2).unwrap();
+        let d2 = dec.decode(&p2).unwrap().expect("frame");
         let changed = (72 * w as usize + 72) * 4;
         assert!((i16::from(d2.data[changed]) - 200).abs() <= 8);
         let untouched = (10 * w as usize + 10) * 4;

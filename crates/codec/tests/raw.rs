@@ -45,7 +45,7 @@ fn raw_roundtrip_strips_stride_padding() {
     // Every raw frame is independent: always a keyframe.
     assert!(packet.keyframe);
 
-    let decoded: DecodedFrame = dec.decode(&packet).unwrap();
+    let decoded: DecodedFrame = dec.decode(&packet).unwrap().expect("frame");
     assert_eq!((decoded.width, decoded.height), (4, 2));
     // Tight stride in the decoded frame (padding is wire overhead).
     assert_eq!(decoded.stride, 16);

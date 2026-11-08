@@ -604,7 +604,7 @@ mod tests {
 
         // A VP9 decoder accepts the stream from the forced switch.
         let mut dec = Vp9Decoder::new().unwrap();
-        let d = dec.decode(&p).unwrap();
+        let d = dec.decode(&p).unwrap().expect("frame");
         assert_eq!((d.width, d.height), (w, h));
     }
 

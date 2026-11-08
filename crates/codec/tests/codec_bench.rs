@@ -182,7 +182,7 @@ fn sweep(name: &str, preset: codec::CodecPreset, frames: &[Vec<u8>], w: u32, h: 
         total_bytes += packet.data.len();
         #[cfg(any(target_os = "linux", windows))]
         let c1 = process_cpu_ms();
-        decoded.push(dec.decode(&packet).expect("decode"));
+        decoded.push(dec.decode(&packet).expect("decode").expect("frame"));
         #[cfg(any(target_os = "linux", windows))]
         {
             dec_cpu += cpu_since(c1);

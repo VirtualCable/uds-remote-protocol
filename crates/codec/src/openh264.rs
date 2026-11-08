@@ -281,7 +281,7 @@ impl OpenH264Decoder {
 }
 
 impl VideoDecoder for OpenH264Decoder {
-    fn decode(&mut self, packet: &EncodedPacket) -> Result<DecodedFrame> {
+    fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {
         if packet.data.is_empty() {
             return Err(CodecError::Malformed);
         }
@@ -356,7 +356,7 @@ impl VideoDecoder for OpenH264Decoder {
             u: copy_plane(dst[1], uv_stride, h.div_ceil(2), w.div_ceil(2)),
             v: copy_plane(dst[2], uv_stride, h.div_ceil(2), w.div_ceil(2)),
         };
-        i420_to_bgra(&frame)
+        i420_to_bgra(&frame).map(Some)
     }
 
     fn codec_type(&self) -> VideoCodecType {
@@ -423,7 +423,7 @@ mod tests {
         let mut decoded = 0;
         for w in starts.windows(2) {
             let nal = data[w[0]..w[1]].to_vec();
-            if let Ok(frame) = dec.decode(&EncodedPacket {
+            if let Ok(Some(frame)) = dec.decode(&EncodedPacket {
                 data: nal,
                 keyframe: decoded == 0,
             }) {

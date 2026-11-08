@@ -410,7 +410,8 @@ fn rects_vs_fullframe() {
             .as_mut()
             .expect("inited")
             .decode(&pkt)
-            .expect("vp9 decode");
+            .expect("vp9 decode")
+            .expect("frame");
         for r in &rects {
             if let Some((src_rect, w, h)) = crop(&frame, r) {
                 let row_bytes = w as usize * 4;

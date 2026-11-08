@@ -217,13 +217,15 @@ impl CamPump {
             keyframe: false, // irrelevant for decoding
         };
         match self.decoder.decode(&packet) {
-            Ok(decoded) => {
+            Ok(Some(decoded)) => {
                 self.signals.frames_decoded.fetch_add(1, Ordering::Relaxed);
                 self.sink
                     .lock()
                     .expect("cam sink")
                     .write_frame(&decoded, frame.capture_ts_ms);
             }
+            // Decoder latency: packet accepted, no frame yet (normal).
+            Ok(None) => {}
             Err(e) => warn!(len = packet.data.len(), "webcam decode failed: {e}"),
         }
     }

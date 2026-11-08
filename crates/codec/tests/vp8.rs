@@ -39,7 +39,7 @@ fn vp8_roundtrip_preserves_geometry() {
     let packet = enc.encode(&frame).expect("encode");
     assert!(packet.keyframe);
     let mut dec = Vp8Decoder::new().expect("decoder init");
-    let decoded = dec.decode(&packet).expect("decode");
+    let decoded = dec.decode(&packet).expect("decode").expect("frame");
     assert_eq!((decoded.width, decoded.height), (w, h));
 }
 

@@ -1109,12 +1109,17 @@ impl DecodeWorker {
             data: payload,
             keyframe: true,
         }) {
-            Ok(frame) => {
+            Ok(Some(frame)) => {
                 self.recovery_awaiting.store(false, Ordering::Relaxed);
                 // Every display is presented into its own framebuffer
                 // (§8.3, §15.3); the A/V sync decision (§9.1) decides:
                 // present, hold for the audio clock, or drop.
                 self.present_or_hold(complete.display_id, frame, complete.capture_ts_ms);
+            }
+            Ok(None) => {
+                // Decoder buffering (hardware/OS decoder latency): the
+                // packet was accepted, no frame yet — normal flow, the
+                // stream is not broken.
             }
             Err(e) => {
                 // A lost fragment breaks the predictive chain: tolerate

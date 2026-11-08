@@ -38,6 +38,7 @@ fn decode_frame(data: Vec<u8>) -> DecodedFrame {
             keyframe: true,
         })
         .expect("decode")
+        .expect("frame")
 }
 
 /// Pushes one frame through the whole pipeline and returns the decoded

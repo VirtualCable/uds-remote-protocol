@@ -104,7 +104,7 @@ fn bench_vp9(width: u32, height: u32) -> (Stats, f64) {
         let packet = enc.encode(&frame).expect("encode");
         total_bytes += packet.data.len();
         let t0 = Instant::now();
-        let decoded = dec.decode(&packet).expect("decode");
+        let decoded = dec.decode(&packet).expect("decode").expect("frame");
         let elapsed = t0.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(decoded.width, width);
         if tick >= 5 {
@@ -139,7 +139,7 @@ fn bench_jpeg(width: u32, height: u32) -> (Stats, f64) {
             .expect("encode");
         total_bytes += packet.data.len();
         let t0 = Instant::now();
-        let decoded = dec.decode(&packet).expect("decode");
+        let decoded = dec.decode(&packet).expect("decode").expect("frame");
         let elapsed = t0.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(decoded.width, width);
         if tick >= 5 {
