@@ -532,10 +532,11 @@ pub struct StandaloneConfig {
     pub fps: u32,
     /// Codec preset name (from `codec::PRESETS`).
     pub preset: String,
-    /// VP9 encoder backend: "" / `"auto"` (Media Foundation only when a
-    /// *hardware* MFT exists; the Store software MFT is not better than
-    /// tuned libvpx), `"mf"` (force MF even if software; lab use) or
-    /// `"software"` (force libvpx). MF init failure falls back to libvpx.
+    /// VP9 encoder backend: "" / `"auto"` (Media Foundation when a
+    /// *hardware* MFT exists), `"mf"` (same hardware-only rule, explicit)
+    /// or `"software"` (force libvpx). The Microsoft Store software MFT is
+    /// never used — it measured clearly worse than tuned libvpx. No or
+    /// failing HW MFT falls back to libvpx with a warning in the log.
     pub encoder: String,
     /// Which desktop output to capture: case-insensitive substring of the
     /// adapter description or GDI device string. `None` captures the UDS

@@ -113,10 +113,10 @@ pub struct AgentConfig {
     /// the level table). Empty keeps the agent's §12.5 defaults.
     pub quality: String,
     /// VP9 encoder backend selector: "" or "auto" uses Media Foundation
-    /// only when a *hardware* MFT exists (the Store software MFT is not
-    /// better than tuned libvpx), "mf" forces MF even if it is software,
-    /// "software" forces libvpx. MF init failure always falls back to
-    /// libvpx with a warning.
+    /// only when a *hardware* MFT exists; "mf" asks for it explicitly
+    /// (same hardware-only rule); "software" forces libvpx. The Microsoft
+    /// Store software MFT is never used — it measured clearly worse than
+    /// our tuned libvpx. No/failing HW MFT falls back with a warning.
     pub encoder: String,
     /// Server-fixed console resolution (§18.37); `(0, 0)` means the agent
     /// approaches the client's preferred mode instead.
