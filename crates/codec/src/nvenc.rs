@@ -131,6 +131,7 @@ const FN_UNLOCK_INPUT_BUFFER: usize = 20;
 const FN_DESTROY_ENCODER: usize = 27;
 const FN_OPEN_SESSION_EX: usize = 29;
 const FN_RECONFIGURE_ENCODER: usize = 32;
+const FN_GET_LAST_ERROR: usize = 37;
 
 #[repr(C)]
 struct OpenSessionExParams {
@@ -299,6 +300,7 @@ type LockInputBufferFn = unsafe extern "C" fn(Ptr, *mut LockInputBuffer) -> u32;
 type BufferFn = unsafe extern "C" fn(Ptr, Ptr) -> u32;
 type DestroyEncoderFn = unsafe extern "C" fn(Ptr) -> u32;
 type ReconfigureFn = unsafe extern "C" fn(Ptr, *mut ReconfigureParams) -> u32;
+type GetLastErrorFn = unsafe extern "C" fn(Ptr) -> *const std::ffi::c_char;
 
 struct NvencApi {
     list: Box<FunctionList>,
@@ -368,6 +370,22 @@ pub fn nvenc_available() -> bool {
 
 fn nv_err(op: &str, status: u32) -> CodecError {
     CodecError::Backend(format!("nvenc {op} failed: status {status}"))
+}
+
+/// Driver-provided description of the last failure on this session, when
+/// the function table exposes `nvEncGetLastErrorString` (it should).
+fn last_error(api: &NvencApi, encoder: Ptr) -> String {
+    if api.list.fns[FN_GET_LAST_ERROR] == 0 {
+        return String::new();
+    }
+    unsafe {
+        let f: GetLastErrorFn = api.fptr(FN_GET_LAST_ERROR);
+        let p = f(encoder);
+        if p.is_null() {
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+    }
 }
 
 /// Creates a D3D11 device on the NVIDIA adapter. Modern drivers reject a
@@ -708,7 +726,10 @@ impl VideoEncoder for NvencEncoder {
         let reconfigure: ReconfigureFn = unsafe { self.api.fptr(FN_RECONFIGURE_ENCODER) };
         let status = unsafe { reconfigure(self.encoder, &raw mut reconf) };
         if status != NV_ENC_SUCCESS {
-            return Err(nv_err("reconfigure", status));
+            let detail = last_error(&self.api, self.encoder);
+            return Err(CodecError::Backend(format!(
+                "nvenc reconfigure failed: status {status} ({detail})"
+            )));
         }
         self.force_idr = true;
         Ok(())
