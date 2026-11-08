@@ -1416,8 +1416,10 @@ fn apply_targets(ctl: &mut ControlState, encoder: &mut ServerEncoder, network: b
         fps = t.fps,
         jpeg_quality = t.jpeg_quality,
         vp9_speed = t.vp9_speed,
+        kf_secs = t.kf_secs,
         "quality targets applied"
     );
+    ctl.keyframe_interval = Duration::from_secs(u64::from(t.kf_secs));
     if network {
         if let Err(e) = encoder.set_bitrate(t.video_kbps) {
             warn!("set_bitrate failed: {e}");
@@ -1743,7 +1745,7 @@ async fn handle_frame<T: ReliableTransport>(
     }
     // Periodic safety-net keyframe: bounds the worst-case recovery time even
     // if the whole loss-detection/request path fails (§12.2).
-    if last_keyframe.elapsed() >= KEYFRAME_SAFETY_INTERVAL {
+    if last_keyframe.elapsed() >= ctl.keyframe_interval {
         encoder.request_keyframe();
     }
     let encode_start = Instant::now();
@@ -2382,6 +2384,7 @@ async fn serve_stream<T: ReliableTransport>(
         allow_lock: args.allow_lock,
         injector: new_injector(),
         video_ceiling_kbps: video_ceiling_kbps(args, width, height),
+        keyframe_interval: KEYFRAME_SAFETY_INTERVAL,
         audio_ceiling_kbps,
         audio_control,
         fec_on: false,
@@ -2981,6 +2984,9 @@ struct ControlState {
     injector_input: Option<InjectorSlot>,
     /// Negotiated video bitrate ceiling for quality targets.
     video_ceiling_kbps: u32,
+    /// Safety-net keyframe interval of the current quality level (§18.74);
+    /// retuned on every `apply_targets` from the level's `kf_secs`.
+    keyframe_interval: Duration,
     /// Negotiated audio bitrate ceiling for quality targets (the active
     /// preset's bitrate, §12.5).
     audio_ceiling_kbps: u32,

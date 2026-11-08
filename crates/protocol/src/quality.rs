@@ -182,22 +182,31 @@ pub struct LevelSpec {
     pub jpeg_quality: i32,
     /// libvpx `cpu_used` (0 best/slowest .. 8 fastest) for the VP9 regime.
     pub vp9_speed: i32,
+    /// Safety-net keyframe interval in seconds at this level (§18.74): at
+    /// low bitrates the predictive chain degrades visibly between clean
+    /// frames, so degraded levels refresh more often.
+    pub kf_secs: u32,
 }
 
 /// The default table: the fixed §12.5 ladder as data (same factors/fps).
 /// JPEG quality steps 80→50 (70 stays "quite good", 60 "reasonable", §18.69);
-/// `vp9_speed` stays at the low-latency 8 on every level.
+/// `vp9_speed` stays at the low-latency 8 on every level. Keyframe safety
+/// interval shrinks with the level (§18.74): 30 s at full quality down to
+/// 4 s at the most degraded level, where a 256 kbps predictive chain turns
+/// to mush between clean frames.
 #[must_use]
 pub fn default_levels() -> Vec<LevelSpec> {
     LADDER
         .iter()
         .zip([80, 75, 70, 65, 60, 55, 50])
-        .map(|(&(vfactor, fps, afactor), jpeg_quality)| LevelSpec {
+        .zip([30, 30, 20, 12, 8, 5, 4])
+        .map(|((&(vfactor, fps, afactor), jpeg_quality), kf_secs)| LevelSpec {
             video_factor: vfactor,
             fps,
             audio_factor: afactor,
             jpeg_quality,
             vp9_speed: 8,
+            kf_secs,
         })
         .collect()
 }
@@ -259,6 +268,8 @@ pub struct QualityTargets {
     pub jpeg_quality: i32,
     /// libvpx `cpu_used` to apply in the VP9 regime at this level (§18.69).
     pub vp9_speed: i32,
+    /// Safety-net keyframe interval in seconds at this level (§18.74).
+    pub kf_secs: u32,
 }
 
 /// Resolves a level into absolute targets given the negotiated ceilings.
@@ -277,6 +288,7 @@ pub fn targets(
         audio_factor: 1.0,
         jpeg_quality: 80,
         vp9_speed: 8,
+        kf_secs: 30,
     });
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // factors are 0..1
     QualityTargets {
@@ -289,6 +301,7 @@ pub fn targets(
             && policy.levels.len() > 1,
         jpeg_quality: row.jpeg_quality,
         vp9_speed: row.vp9_speed,
+        kf_secs: row.kf_secs,
     }
 }
 
@@ -989,17 +1002,19 @@ mod tests {
         // A custom 2-level table ("cheap jpegrects" policy, §18.69).
         let p = QualityPolicy {
             levels: vec![
-                LevelSpec { video_factor: 1.0, fps: 30, audio_factor: 1.0, jpeg_quality: 70, vp9_speed: 8 },
-                LevelSpec { video_factor: 0.2, fps: 12, audio_factor: 0.5, jpeg_quality: 55, vp9_speed: 8 },
+                LevelSpec { video_factor: 1.0, fps: 30, audio_factor: 1.0, jpeg_quality: 70, vp9_speed: 8, kf_secs: 30 },
+                LevelSpec { video_factor: 0.2, fps: 12, audio_factor: 0.5, jpeg_quality: 55, vp9_speed: 8, kf_secs: 4 },
             ],
             ..policy()
         };
         let n0 = targets(0, 4_000, 64, &p);
         assert_eq!((n0.video_kbps, n0.fps, n0.jpeg_quality, n0.vp9_speed), (4_000, 30, 70, 8));
+        assert_eq!(n0.kf_secs, 30);
         assert!(!n0.degraded_resolution);
         let n1 = targets(1, 4_000, 64, &p);
         assert_eq!((n1.video_kbps, n1.fps, n1.audio_kbps), (800, 12, 32));
         assert_eq!((n1.jpeg_quality, n1.vp9_speed), (55, 8));
+        assert_eq!(n1.kf_secs, 4, "degraded level refreshes keyframes sooner (§18.74)");
         assert!(n1.degraded_resolution, "last row of the table is the degraded one");
         // The network controller never steps past the last configured row.
         let mut c = QualityController::new(p);

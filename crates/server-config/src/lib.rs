@@ -91,6 +91,8 @@ pub struct QualityLevelConfig {
     pub jpeg_quality: i32,
     /// libvpx `cpu_used` for the VP9 regime (0-8).
     pub vp9_speed: i32,
+    /// Safety-net keyframe interval in seconds at this level (§18.74).
+    pub kf_secs: u32,
 }
 
 impl Default for QualityLevelConfig {
@@ -101,6 +103,7 @@ impl Default for QualityLevelConfig {
             audio_factor: 1.0,
             jpeg_quality: 80,
             vp9_speed: 8,
+            kf_secs: 30,
         }
     }
 }
@@ -189,6 +192,7 @@ impl Default for QualityConfig {
                     audio_factor: l.audio_factor,
                     jpeg_quality: l.jpeg_quality,
                     vp9_speed: l.vp9_speed,
+                    kf_secs: l.kf_secs,
                 })
                 .collect(),
         }
@@ -228,6 +232,10 @@ impl QualityConfig {
                 (0..=8).contains(&l.vp9_speed),
                 "quality.levels[{i}].vp9_speed must be in 0..=8"
             );
+            anyhow::ensure!(
+                (1..=300).contains(&l.kf_secs),
+                "quality.levels[{i}].kf_secs must be in 1..=300"
+            );
             if let Some(prev) = i.checked_sub(1).map(|p| &self.levels[p]) {
                 anyhow::ensure!(
                     l.video_factor <= prev.video_factor
@@ -266,7 +274,7 @@ impl QualityConfig {
 
     /// Compact wire form for the service→agent config frame (§18.69):
     /// `key=value` pairs plus the level table as
-    /// `levels=vf:fps:af:jq:vs;...`. Parsed back by [`Self::from_wire`].
+    /// `levels=vf:fps:af:jq:vs:kf;...`. Parsed back by [`Self::from_wire`].
     #[must_use]
     pub fn to_wire(&self) -> String {
         let levels = self
@@ -274,8 +282,8 @@ impl QualityConfig {
             .iter()
             .map(|l| {
                 format!(
-                    "{}:{}:{}:{}:{}",
-                    l.video_factor, l.fps, l.audio_factor, l.jpeg_quality, l.vp9_speed
+                    "{}:{}:{}:{}:{}:{}",
+                    l.video_factor, l.fps, l.audio_factor, l.jpeg_quality, l.vp9_speed, l.kf_secs
                 )
             })
             .collect::<Vec<_>>()
@@ -354,8 +362,8 @@ impl QualityConfig {
                     for row in value.split(';').map(str::trim).filter(|r| !r.is_empty()) {
                         let fields: Vec<&str> = row.split(':').collect();
                         anyhow::ensure!(
-                            fields.len() == 5,
-                            "bad levels row (expected vf:fps:af:jq:vs): {row}"
+                            fields.len() == 5 || fields.len() == 6,
+                            "bad levels row (expected vf:fps:af:jq:vs[:kf]): {row}"
                         );
                         rows.push(QualityLevelConfig {
                             video_factor: fields[0].parse().context("bad levels video_factor")?,
@@ -363,6 +371,12 @@ impl QualityConfig {
                             audio_factor: fields[2].parse().context("bad levels audio_factor")?,
                             jpeg_quality: fields[3].parse().context("bad levels jpeg_quality")?,
                             vp9_speed: fields[4].parse().context("bad levels vp9_speed")?,
+                            // 5-field rows come from a pre-§18.74 service: keep
+                            // the old fixed 30 s safety interval for them.
+                            kf_secs: match fields.get(5) {
+                                Some(f) => f.parse().context("bad levels kf_secs")?,
+                                None => 30,
+                            },
                         });
                     }
                     q.levels = rows;
@@ -398,6 +412,7 @@ impl QualityConfig {
                 audio_factor: l.audio_factor,
                 jpeg_quality: l.jpeg_quality,
                 vp9_speed: l.vp9_speed,
+                kf_secs: l.kf_secs,
             }).collect(),
             min_fps_guaranteed: self.min_fps_guaranteed,
             budget_kbps: self.budget_kbps,
@@ -1085,8 +1100,8 @@ video_factor = 1.0
             video_kbps: Some(8_000),
             weight_change: 0.0,
             levels: vec![
-                QualityLevelConfig { video_factor: 1.0, fps: 30, audio_factor: 1.0, jpeg_quality: 70, vp9_speed: 8 },
-                QualityLevelConfig { video_factor: 0.3, fps: 12, audio_factor: 0.5, jpeg_quality: 55, vp9_speed: 6 },
+                QualityLevelConfig { video_factor: 1.0, fps: 30, audio_factor: 1.0, jpeg_quality: 70, vp9_speed: 8, kf_secs: 30 },
+                QualityLevelConfig { video_factor: 0.3, fps: 12, audio_factor: 0.5, jpeg_quality: 55, vp9_speed: 6, kf_secs: 4 },
             ],
             ..QualityConfig::default()
         };
@@ -1096,6 +1111,11 @@ video_factor = 1.0
         assert_eq!(back.levels.len(), 2);
         assert_eq!(back.levels[1].jpeg_quality, 55);
         assert_eq!(back.levels[1].vp9_speed, 6);
+        assert_eq!(back.levels[0].kf_secs, 30);
+        assert_eq!(back.levels[1].kf_secs, 4);
+        // Pre-§18.74 5-field rows stay parseable, with the old 30 s default.
+        let legacy = QualityConfig::from_wire("levels=1.0:30:1.0:70:8;0.3:12:0.5:55:6").expect("legacy");
+        assert!(legacy.levels.iter().all(|l| l.kf_secs == 30));
         // Empty wire = defaults; garbage is rejected.
         assert_eq!(QualityConfig::from_wire("").expect("defaults").levels.len(), 7);
         assert!(QualityConfig::from_wire("vkbps=abc").is_err());
