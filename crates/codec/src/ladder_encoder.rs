@@ -51,6 +51,11 @@ pub struct LadderEncoder {
     jpeg_bps_ema: Option<f64>,
     /// Timestamp of the previous Low-level encode (for the bit-rate EMA).
     last_low_encode: Option<Instant>,
+    /// EMA of the JPEG cost per dirty pixel (bytes/px) measured on past
+    /// Low-level delta frames — the cost model of the down path (§18.75.19).
+    jpeg_bpp_ema: Option<f64>,
+    /// EMA of the VP9 packet size (bytes) while in `Level::High`.
+    vp9_bytes_ema: Option<f64>,
 }
 
 /// Video-regime backend of the ladder (§18.75): libvpx VP9 software always,
@@ -132,6 +137,23 @@ const BW_UP_RATIO: f64 = 2.0;
 /// bursts are what this trigger exists to catch.
 const BW_EMA_ALPHA: f64 = 0.2;
 
+/// Down-path cost veto (§18.75.19): the area metric is thresholded and
+/// reads low on slow video, but the JPEG leg's cost follows the *exact*
+/// byte diff (decode shimmer dirties nearly every tile), so on video the
+/// Low regime is ~20× dearer than VP9 even at tiny "meaningful" change.
+/// While in High, a switch down is vetoed unless the estimated JPEG frame
+/// cost (measured bytes/dirty-pixel × this frame's exact dirty area) is
+/// strictly below the measured VP9 frame cost times this margin.
+const DOWN_COST_MARGIN: f64 = 1.0;
+
+/// Burst guard (§18.75.19): in Low, one frame whose instantaneous rate
+/// exceeds `BURST_MULT` × the up-trigger rate (scene cut flooding the paced
+/// queue with 1080p JPEGs) switches back to High immediately, no hold.
+const BURST_MULT: f64 = 1.5;
+
+/// EMA smoothing for the cost models (JPEG bytes/px, VP9 bytes/frame).
+const COST_EMA_ALPHA: f64 = 0.2;
+
 /// Maps the JPEG bit-rate EMA to an area-equivalent percentage for the
 /// ladder: `BW_UP_RATIO` × `vp9_kbps` → `up_threshold_pct`, linear.
 fn bw_pressure_pct(jpeg_bps_ema: Option<f64>, vp9_kbps: u32, up_threshold_pct: f64) -> f64 {
@@ -141,6 +163,11 @@ fn bw_pressure_pct(jpeg_bps_ema: Option<f64>, vp9_kbps: u32, up_threshold_pct: f
         return 0.0;
     }
     bps / (vp9_rate_bps * BW_UP_RATIO) * up_threshold_pct
+}
+
+/// Total area (pixels) covered by a dirty-rect list.
+fn dirty_area_px(dirty: &[rects::Rect]) -> u64 {
+    dirty.iter().map(|r| r.area().cast_unsigned()).sum()
 }
 
 impl LadderEncoder {
@@ -195,6 +222,8 @@ impl LadderEncoder {
             vp9_kbps,
             jpeg_bps_ema: None,
             last_low_encode: None,
+            jpeg_bpp_ema: None,
+            vp9_bytes_ema: None,
         })
     }
 
@@ -231,6 +260,8 @@ impl LadderEncoder {
             vp9_kbps,
             jpeg_bps_ema: None,
             last_low_encode: None,
+            jpeg_bpp_ema: None,
+            vp9_bytes_ema: None,
         })
     }
 
@@ -267,6 +298,8 @@ impl LadderEncoder {
             vp9_kbps: h264_kbps,
             jpeg_bps_ema: None,
             last_low_encode: None,
+            jpeg_bpp_ema: None,
+            vp9_bytes_ema: None,
         })
     }
 
@@ -316,6 +349,18 @@ impl LadderEncoder {
         Ok(())
     }
 
+    /// Down-path cost veto (§18.75.19): true when the estimated JPEG cost
+    /// of this frame's exact dirty area is not cheaper than the measured
+    /// VP9 frame cost. Without measurements on both legs yet, no veto (the
+    /// ladder starts in Low, so the JPEG cost model fills quickly).
+    fn down_switch_vetoed(&self, dirty: &[rects::Rect]) -> bool {
+        let (Some(bpp), Some(vp9_bytes)) = (self.jpeg_bpp_ema, self.vp9_bytes_ema) else {
+            return false;
+        };
+        let est_jpeg = bpp * dirty_area_px(dirty).max(1) as f64;
+        est_jpeg >= vp9_bytes * DOWN_COST_MARGIN
+    }
+
     /// Marks the pending switch: keyframe + codec-change notification.
     fn begin_level(&mut self, level: Level) {
         self.force_full = true;
@@ -361,16 +406,20 @@ impl VideoEncoder for LadderEncoder {
         // bandwidth. A small window playing video changes little area but
         // costs far more than the VP9 regime — the bandwidth term (only
         // meaningful in Low, where egress is area-proportional) covers it.
-        // In High the down path stays area-only (hysteresis band).
-        let sample = if self.ladder.level() == Level::Low {
-            area_pct.max(bw_pressure_pct(
+        // In High the down path is area-driven but cost-vetoed (§18.75.19):
+        // the area metric is thresholded and under-reads slow video, while
+        // the JPEG cost follows the exact diff — without the veto the ladder
+        // drops into a regime that is measurably dearer on the same content.
+        let mut sample = area_pct;
+        if self.ladder.level() == Level::Low {
+            sample = sample.max(bw_pressure_pct(
                 self.jpeg_bps_ema,
                 self.vp9_kbps,
                 self.ladder.policy().up_threshold_pct,
-            ))
-        } else {
-            area_pct
-        };
+            ));
+        } else if self.down_switch_vetoed(&dirty) {
+            sample = sample.max(self.ladder.policy().up_threshold_pct);
+        }
 
         if let Some(switch) = self.ladder.update(Instant::now(), sample) {
             self.begin_level(switch.to);
@@ -391,17 +440,45 @@ impl VideoEncoder for LadderEncoder {
             // its rate control and reference chain must stay alive.
             Level::High => self.vp9.encode(frame)?,
         };
-        if self.ladder.level() == Level::Low {
-            let now = Instant::now();
-            if let Some(prev_t) = self.last_low_encode.replace(now) {
-                let dt = now.duration_since(prev_t).as_secs_f64();
-                if dt > 0.0 {
-                    let bps = packet.data.len() as f64 * 8.0 / dt;
-                    self.jpeg_bps_ema = Some(match self.jpeg_bps_ema {
-                        None => bps,
-                        Some(ema) => ema + BW_EMA_ALPHA * (bps - ema),
+        match self.ladder.level() {
+            Level::Low => {
+                let now = Instant::now();
+                if let Some(prev_t) = self.last_low_encode.replace(now) {
+                    let dt = now.duration_since(prev_t).as_secs_f64();
+                    if dt > 0.0 {
+                        let bps = packet.data.len() as f64 * 8.0 / dt;
+                        self.jpeg_bps_ema = Some(match self.jpeg_bps_ema {
+                            None => bps,
+                            Some(ema) => ema + BW_EMA_ALPHA * (bps - ema),
+                        });
+                        // Burst guard: a scene cut at 1080p turns the JPEG
+                        // leg into a ~25 Mbps flood; bail to the video
+                        // regime at once instead of riding out the hold.
+                        let burst_rate =
+                            f64::from(self.vp9_kbps) * 1000.0 * BW_UP_RATIO * BURST_MULT;
+                        if bps > burst_rate {
+                            self.force_level(Level::High);
+                        }
+                    }
+                }
+                // Cost model of the down veto: bytes per dirty pixel on
+                // delta frames (full frames would bias it upward).
+                let full = dirty_area_px(&dirty) >= u64::from(self.width) * u64::from(self.height);
+                if !full {
+                    let area = dirty_area_px(&dirty).max(1) as f64;
+                    let bpp = packet.data.len() as f64 / area;
+                    self.jpeg_bpp_ema = Some(match self.jpeg_bpp_ema {
+                        None => bpp,
+                        Some(ema) => ema + COST_EMA_ALPHA * (bpp - ema),
                     });
                 }
+            }
+            Level::High => {
+                let bytes = packet.data.len() as f64;
+                self.vp9_bytes_ema = Some(match self.vp9_bytes_ema {
+                    None => bytes,
+                    Some(ema) => ema + COST_EMA_ALPHA * (bytes - ema),
+                });
             }
         }
         self.prev = Some(frame.data.to_vec());
@@ -509,6 +586,44 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         false
+    }
+
+    #[test]
+    fn down_switch_vetoed_when_jpeg_cost_exceeds_vp9() {
+        // Cost model: JPEG measured at 0.5 bytes/px, VP9 at 1000 bytes/frame;
+        // a half-screen dirty frame at 128x64 (4096 px) estimates 2048 bytes
+        // of JPEG — dearer than VP9, so the down switch is vetoed.
+        let (w, h) = (128u32, 64u32);
+        let mut enc = LadderEncoder::new(w, h, policy(), 1000, 80).unwrap();
+        enc.jpeg_bpp_ema = Some(0.5);
+        enc.vp9_bytes_ema = Some(1000.0);
+        let half = vec![rects::Rect { left: 0, top: 0, right: 128, bottom: 32 }];
+        assert!(enc.down_switch_vetoed(&half));
+        // Cheap JPEG (0.1 bytes/px -> 409 estimated) passes the veto.
+        enc.jpeg_bpp_ema = Some(0.1);
+        assert!(!enc.down_switch_vetoed(&half));
+        // No measurements yet: no veto (bootstrap behaviour).
+        enc.jpeg_bpp_ema = None;
+        assert!(!enc.down_switch_vetoed(&half));
+    }
+
+    #[test]
+    fn burst_guard_bails_to_high_immediately() {
+        // In Low, one frame way over the burst rate flips to High without
+        // any hold: simulate by seeding the cost EMAs and forcing Low, then
+        // encoding a frame whose JPEG output dwarfs 3x the VP9 target.
+        let (w, h) = (128u32, 64u32);
+        let mut enc = LadderEncoder::new(w, h, policy(), 1, 80).unwrap();
+        // Two frames to get a Low-level delta encode timing sample.
+        let a = solid(w, h, [10, 20, 30, 255]);
+        enc.encode(&vf(w, h, &a)).unwrap();
+        std::thread::sleep(Duration::from_millis(2));
+        let b = solid(w, h, [200, 100, 50, 255]);
+        enc.encode(&vf(w, h, &b)).unwrap();
+        // vp9_kbps = 1 -> burst rate = 1000 * 2.0 * 1.5 = 3000 bps; any
+        // non-trivial packet at ~2 ms intervals is hundreds of kbps.
+        assert_eq!(enc.ladder.level(), Level::High, "burst guard fired");
+        assert_eq!(enc.codec_type(), VideoCodecType::Vp9);
     }
 
     #[test]
