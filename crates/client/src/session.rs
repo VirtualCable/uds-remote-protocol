@@ -903,6 +903,10 @@ const DECODE_QUEUE_CAPACITY: usize = 4;
 /// before the presentation loop stops gating on it (§9.1 dead-clock guard).
 const DEAD_CLOCK_AFTER: Duration = Duration::from_millis(1500);
 
+/// How long an unbroken run of stale drops is tolerated before the stale
+/// valve opens and frames present anyway (§18.75.16).
+const STALE_VALVE_AFTER: Duration = Duration::from_secs(1);
+
 /// Decode + presentation worker (§15.3): owns the decoders, the recovery
 /// state and the A/V presentation queue so video decode and framebuffer
 /// writes never block the network task (audio datagrams and probe acks
@@ -948,6 +952,14 @@ struct DecodeWorker {
     present_queue: PresentQueue,
     avsync_stats: SyncStats,
     avsync_log: Instant,
+    /// Stale-valve state (§18.75.16): when every decoded frame has been
+    /// dropped as stale for [`STALE_VALVE_AFTER`], the sync basis itself is
+    /// broken (audio clock ahead, a server-side backlog) and the video
+    /// would stay black forever. The valve then presents frames anyway —
+    /// a slightly late picture beats a black screen — until a frame
+    /// arrives in sync again and normal gating resumes.
+    stale_since: Option<Instant>,
+    stale_valve_open: bool,
     stats: Arc<crate::stats::SessionStats>,
 }
 
@@ -979,6 +991,8 @@ impl DecodeWorker {
             present_queue: PresentQueue::new(),
             avsync_stats: SyncStats::default(),
             avsync_log: Instant::now(),
+            stale_since: None,
+            stale_valve_open: false,
             stats,
         };
         std::thread::Builder::new()
@@ -1182,6 +1196,8 @@ impl DecodeWorker {
         let audio_now = self.effective_audio_now();
         match avsync::decide(video_ts_ms, audio_now.unwrap_or(0), audio_now.is_some()) {
             avsync::PresentDecision::PresentNow => {
+                self.stale_since = None;
+                self.stale_valve_open = false;
                 if let Some(now) = audio_now {
                     self.avsync_stats
                         .record_present(i64::from(video_ts_ms) - i64::from(now));
@@ -1190,6 +1206,8 @@ impl DecodeWorker {
                 let _ = self.present(display_id, &frame);
             }
             avsync::PresentDecision::HoldUntil(ts) => {
+                self.stale_since = None;
+                self.stale_valve_open = false;
                 self.stats.record_hold();
                 if let Some(evicted) = self
                     .present_queue
@@ -1201,8 +1219,25 @@ impl DecodeWorker {
                 }
             }
             avsync::PresentDecision::Drop => {
-                self.avsync_stats.record_stale_drop();
-                self.stats.record_stale_drop();
+                // Stale valve (§18.75.16): an unbroken stale run longer than
+                // STALE_VALVE_AFTER means the sync basis itself is broken —
+                // present anyway until a frame arrives in sync again.
+                let now = Instant::now();
+                let since = self.stale_since.get_or_insert(now);
+                if self.stale_valve_open || now.duration_since(*since) >= STALE_VALVE_AFTER {
+                    if !self.stale_valve_open {
+                        self.stale_valve_open = true;
+                        warn!("A/V sync broken (all frames stale >1s); presenting ungated");
+                    }
+                    if let Some(an) = audio_now {
+                        self.avsync_stats
+                            .record_present(i64::from(video_ts_ms) - i64::from(an));
+                    }
+                    let _ = self.present(display_id, &frame);
+                } else {
+                    self.avsync_stats.record_stale_drop();
+                    self.stats.record_stale_drop();
+                }
             }
         }
     }

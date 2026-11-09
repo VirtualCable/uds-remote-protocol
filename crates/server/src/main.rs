@@ -3305,11 +3305,18 @@ impl codec::VideoEncoder for ServerEncoder {
 
 impl ServerEncoder {
     /// Orders the codec ladder into its video regime (VP9, real rate control)
-    /// or releases it back to the base regime. No-op for plain encoders.
+    /// when congestion demands it; releasing (`on = false`) is a no-op: the
+    /// ladder's own metric decides from there. Forcing a drop to the base
+    /// regime on release stamped the ladder into JPEG even over video
+    /// content, where the big rects saturated the paced queue and every
+    /// frame arrived stale at the client (§18.75.16 freeze chain).
+    /// No-op for plain encoders.
     fn force_video_regime(&mut self, on: bool) {
         #[cfg(feature = "ladder")]
-        if let Self::Ladder(e) = self {
-            e.force_level(if on { codec::Level::High } else { codec::Level::Low });
+        if on
+            && let Self::Ladder(e) = self
+        {
+            e.force_level(codec::Level::High);
         }
         #[cfg(not(feature = "ladder"))]
         let _ = (self, on);
