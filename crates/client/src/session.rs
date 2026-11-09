@@ -178,7 +178,8 @@ impl Session {
         }
         // H.264 decode (§18.75.8): the server only enables H.264 hardware
         // encoders when we advertise a decoder for them.
-        if codec::h264_decode_available() {
+        // Lab override: UDSRP_NO_H264=1 hides the capability (A/B vs VP9).
+        if codec::h264_decode_available() && std::env::var_os("UDSRP_NO_H264").is_none() {
             flags |= protocol::FLAG_H264_DECODE;
         }
         let mut stream: EncryptedStream<Box<dyn ReliableTransport>> =
