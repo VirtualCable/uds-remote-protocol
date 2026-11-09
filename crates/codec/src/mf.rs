@@ -1301,6 +1301,18 @@ impl MfDecoder {
 
     /// Converts one output sample into a `DecodedFrame` and queues it.
     fn collect_sample(&mut self, sample: &IMFSample) -> Result<()> {
+        // Safety net: re-read the negotiated subtype per sample so a vendor
+        // MFT that changes layout without a stream-change event cannot leave
+        // us reading NV12 as I420 (gray, misaligned chroma).
+        if let Ok(ty) = unsafe { self.transform.GetOutputCurrentType(self.out_stream) }
+            && let Ok(subtype) = unsafe { ty.GetGUID(&MF_MT_SUBTYPE) }
+        {
+            let now_nv12 = subtype == MFVideoFormat_NV12;
+            if now_nv12 != self.nv12 {
+                tracing::warn!("decoder output subtype drifted; resyncing layout flag");
+                self.nv12 = now_nv12;
+            }
+        }
         let contiguous: IMFMediaBuffer = unsafe { sample.ConvertToContiguousBuffer() }
             .map_err(|e| CodecError::Backend(format!("decoder contiguous: {e}")))?;
         let data = unsafe {
@@ -1398,22 +1410,14 @@ impl MfDecoder {
                 }
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(()),
                 Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
-                    // Resolution change mid-stream: take the format the
-                    // decoder offers for the new size and keep draining.
+                    // Format/resolution change mid-stream: renegotiate the
+                    // output type and, critically, refresh the negotiated
+                    // layout flag — decoders that accepted I420 up front can
+                    // switch to NV12 once they read the SPS, and reading an
+                    // NV12 buffer as planar I420 garbles the chroma.
                     // output_shape() re-reads size/stride from the type.
-                    let new_type = unsafe {
-                        self.transform.GetOutputAvailableType(self.out_stream, 0)
-                    }
-                    .map_err(|e| {
-                        CodecError::Backend(format!("decoder available output type: {e}"))
-                    })?;
-                    unsafe {
-                        self.transform
-                            .SetOutputType(self.out_stream, &new_type, 0)
-                            .map_err(|e| {
-                                CodecError::Backend(format!("decoder stream change: {e}"))
-                            })?;
-                    }
+                    self.nv12 = select_decoder_output(&self.transform, self.out_stream)?;
+                    tracing::info!(nv12 = self.nv12, "decoder output format changed mid-stream");
                 }
                 Err(e) => return Err(CodecError::Backend(format!("decoder ProcessOutput: {e}"))),
             }
