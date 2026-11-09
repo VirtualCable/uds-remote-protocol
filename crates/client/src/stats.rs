@@ -225,6 +225,9 @@ pub(crate) fn write_csv_row(snap: &StatsSnapshot) {
         snap.audio_underrun_samples,
         snap.audio_buffered_samples,
     );
+    // One row per second — flush eagerly. Statics never run Drop on process
+    // exit, so a large BufWriter silently loses the whole session otherwise.
+    let _ = w.flush();
 }
 
 #[cfg(test)]
