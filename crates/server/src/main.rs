@@ -3679,13 +3679,19 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
         // back to the normal backend chain with a warning when the GPU,
         // driver or client capability is missing); "auto" prefers it over
         // Media Foundation when everything lines up.
+        //
+        // Hardware legs run WITHOUT the ladder (§18.75.21): jpegrects only
+        // pays off as the cheap leg of a CPU-bound regime. A hardware
+        // encoder emits near-empty P-frames on static content at ~0 CPU,
+        // so the base regime buys nothing and every switch costs a
+        // keyframe plus a decoder rebuild on the client (observed: menu
+        // openings bouncing rects-jpeg <-> h264 within seconds).
         #[cfg(all(windows, feature = "codec-nvenc"))]
         if matches!(args.encoder.as_str(), "" | "auto" | "nvenc") && client_h264 {
-            match codec::LadderEncoder::with_nvenc_h264(width, height, knobs.policy.clone(), kbps, 80)
-            {
+            match codec::NvencEncoder::new(width, height, 30, kbps) {
                 Ok(encoder) => {
-                    info!(width, height, kbps, "codec ladder ready (rects-jpeg <-> h264 via NVENC)");
-                    return Ok(ServerEncoder::Ladder(Box::new(encoder)));
+                    info!(width, height, kbps, "h264 via NVENC ready (no ladder: hardware leg)");
+                    return Ok(ServerEncoder::Simple(Box::new(encoder)));
                 }
                 Err(err) => {
                     warn!(error = %format!("{err:#}"), "NVENC H.264 unavailable; falling back");
