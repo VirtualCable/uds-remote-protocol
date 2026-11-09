@@ -1073,6 +1073,11 @@ impl DecodeWorker {
             return;
         };
         let key = (complete.display_id, codec_type);
+        // Lab aid: dump the reassembled H264 payloads (what actually enters
+        // the decoder) so ffmpeg can validate the wire/reassembly path.
+        if codec_type == VideoCodecType::H264 {
+            dump_h264_payload(&payload);
+        }
         // Predictive chain broken and a keyframe already requested: feeding
         // more deltas to the decoder renders ghosts (a delta against a dead
         // reference decodes "fine" into garbage), so drop them until the
@@ -1637,5 +1642,27 @@ impl Core {
             }
             _ => {}
         }
+    }
+}
+
+/// Lab helper: appends reassembled H264 payloads to the file named by
+/// `UDSRP_DUMP_H264` (client side) so ffmpeg can validate what the decoder
+/// was actually fed (wire + reassembly path). Lab builds only; unset in
+/// production.
+fn dump_h264_payload(payload: &[u8]) {
+    use std::io::Write as _;
+    use std::sync::{Mutex, OnceLock};
+    static DUMP: OnceLock<Option<Mutex<std::fs::File>>> = OnceLock::new();
+    let file = DUMP.get_or_init(|| {
+        std::env::var("UDSRP_DUMP_H264")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| std::fs::File::create(p).ok())
+            .map(Mutex::new)
+    });
+    if let Some(f) = file
+        && let Ok(mut g) = f.lock()
+    {
+        let _ = g.write_all(payload);
     }
 }
