@@ -481,10 +481,14 @@ impl Session {
         // discards that self-inflicted pollution (the max inflates, the min
         // stays the true path RTT); the server's baseline windows it again.
         let mut rtt_period_min: Option<f64> = None;
-        // The first ack is delayed by the server's session bring-up (capture
-        // thread, encoder init), so it is discarded as warm-up and never
-        // feeds the EWMA/baseline.
-        let mut warmup_acks = 1u8;
+        // Warm-up: the server's session bring-up (capture thread, encoder
+        // init, first keyframe) delays every probe ack for well over a
+        // second, so discarding just the first ack is not enough — the
+        // poisoned sample (e.g. a 157 ms "RTT" on a LAN) enters the first
+        // report and the jitter EWMA needs ~20 s to decay, during which the
+        // server's quality controller steps the network level all the way
+        // down. No ack feeds the filters until the warm-up window elapsed.
+        let warmup_until = Instant::now() + Duration::from_millis(2500);
         let mut prev_lost = 0u64;
         let mut prev_received = 0u64;
         let mut present_tick = tokio::time::interval(PRESENT_TICK);
@@ -503,8 +507,7 @@ impl Session {
                         let rtt = protocol::compute_rtt(ack.t1, ack.t2, ack.t3, clock());
                         #[allow(clippy::cast_precision_loss)] // micros fit in f64
                         let rtt = rtt as f64;
-                        if warmup_acks > 0 {
-                            warmup_acks -= 1;
+                        if Instant::now() < warmup_until {
                             continue;
                         }
                         rtt_period_min = Some(rtt_period_min.map_or(rtt, |m: f64| m.min(rtt)));
