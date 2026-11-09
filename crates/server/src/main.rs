@@ -1840,10 +1840,12 @@ async fn handle_encoded<T: ReliableTransport>(
     // ladder state from here now that the encoder lives on its own thread.
     ctl.ladder_cache = out.ladder;
     ctl.change_ema_cache = out.change_ema;
-    if out.codec_change.is_some() {
+    if let Some(new_codec) = out.codec_change {
         // Codec ladder switched regime: re-announce before the fragments so
-        // the peer rebuilds its decoder (§8.5).
-        announce_display(legs, enc.codec(), width, height).await?;
+        // the peer rebuilds its decoder (§8.5). The announced codec must be
+        // the one the thread stamped on THIS output — the handle's cached
+        // codec only tracks wholesale encoder swaps, not ladder switches.
+        announce_display(legs, new_codec, width, height).await?;
     }
     if out.packet.data.is_empty() {
         stats.empty += 1;
