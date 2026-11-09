@@ -63,12 +63,23 @@ impl VideoCodecType {
 #[must_use]
 pub fn packet_is_keyframe(codec: VideoCodecType, data: &[u8]) -> bool {
     match codec {
-        VideoCodecType::Vp8 | VideoCodecType::Vp9 => {
-            // VP8/VP9 uncompressed header, LSB-first in the first byte:
-            // frame_marker(2 bits, must be 0b10), profile(2), reserved(1),
-            // show_existing(1), frame_type(1) at bit 6 — 0 means keyframe.
+        VideoCodecType::Vp9 => {
+            // VP9 uncompressed header, MSB-first in the first byte:
+            // frame_marker(2, must be 0b10), profile(2), reserved(1),
+            // frame_type(1, 0 = keyframe), show_frame(1),
+            // error_resilient(1) — 8 bits, so the keyframe sync code
+            // (49 83 42) lands byte-aligned at offset 1. Verified against
+            // libvpx output: key = 0x83, delta = 0x87 — they differ only
+            // in bit 2. (The old LSB-first reading matched neither, so no
+            // VP9 packet was ever seen as a keyframe and stream recovery
+            // could never converge.)
             data.first()
-                .is_some_and(|b0| (b0 & 0b11) == 0b10 && (b0 >> 6) & 1 == 0)
+                .is_some_and(|b0| (b0 >> 6) == 0b10 && b0 & 0b100 == 0)
+        }
+        VideoCodecType::Vp8 => {
+            // VP8 frame tag, little-endian: bit 0 of the first byte is the
+            // frame type — 0 means keyframe.
+            data.first().is_some_and(|b0| b0 & 1 == 0)
         }
         VideoCodecType::H264 => {
             // Annex B stream: keyframe iff any NAL has nal_unit_type 5 (IDR).

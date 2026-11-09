@@ -676,4 +676,32 @@ mod tests {
         assert_eq!(scaled_kbps_for(2000, 0.5), 60_000);
         assert_eq!(scaled_kbps_for(10_000, 1.0), 100_000); // absolute cap
     }
+
+    #[test]
+    fn vp9_keyframe_detection_matches_libvpx_bitstream() {
+        use crate::video::{VideoCodecType, VideoEncoder, VideoFrame, packet_is_keyframe};
+        let (w, h) = (64_u32, 64_u32);
+        let data = vec![128_u8; (w * h * 4) as usize];
+        let frame = VideoFrame {
+            width: w,
+            height: h,
+            stride: (w * 4) as usize,
+            data: &data,
+        };
+        let mut enc = super::Vp9Encoder::new(w, h, 500).expect("encoder");
+        let first = enc.encode(&frame).expect("encode key");
+        let delta = enc.encode(&frame).expect("encode delta");
+        assert!(first.keyframe, "first libvpx frame must be a keyframe");
+        assert!(!delta.keyframe, "second libvpx frame must be a delta");
+        assert!(
+            packet_is_keyframe(VideoCodecType::Vp9, &first.data),
+            "keyframe not detected, first byte {:#06b}",
+            first.data[0]
+        );
+        assert!(
+            !packet_is_keyframe(VideoCodecType::Vp9, &delta.data),
+            "delta misdetected as keyframe, first byte {:#06b}",
+            delta.data[0]
+        );
+    }
 }
