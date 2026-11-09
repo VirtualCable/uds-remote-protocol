@@ -168,6 +168,65 @@ impl SessionStats {
     }
 }
 
+/// Lab diagnostics (§12.8): per-second CSV mirror of the emitted
+/// snapshots, for crossed client/server graphs. Same opt-in spirit as the
+/// audio dump — never for production sessions.
+static STATS_CSV: std::sync::Mutex<Option<std::io::BufWriter<std::fs::File>>> =
+    std::sync::Mutex::new(None);
+
+const STATS_CSV_HEADER: &str = "time,rtt_ms,jitter_ms,loss_permille,dgrams_recv,dgrams_lost,presented,held,dropped_overflow,dropped_stale,keyframe_requests,present_queue_len,audio_clock_live,skew_avg_ms,skew_max_abs_ms,audio_decoded,audio_plc,audio_resyncs,audio_underrun_samples,audio_buffered_samples";
+
+/// Opens the per-second stats CSV (replaces any previous file).
+pub fn set_stats_csv(path: &std::path::Path) {
+    use std::io::Write as _;
+    match std::fs::File::create(path) {
+        Ok(mut file) => {
+            if let Err(e) = writeln!(file, "{STATS_CSV_HEADER}") {
+                tracing::warn!(path = %path.display(), "cannot write the stats CSV header: {e}");
+                return;
+            }
+            tracing::info!(path = %path.display(), "writing per-second stats CSV");
+            *STATS_CSV.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some(std::io::BufWriter::with_capacity(1 << 16, file));
+        }
+        Err(e) => tracing::warn!(path = %path.display(), "cannot open the stats CSV: {e}"),
+    }
+}
+
+/// Appends one snapshot row to the CSV (no-op when disabled). The `time`
+/// column is unix seconds, matching the server's stats CSV.
+pub(crate) fn write_csv_row(snap: &StatsSnapshot) {
+    use std::io::Write as _;
+    let mut guard = STATS_CSV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(w) = guard.as_mut() else { return };
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let _ = writeln!(
+        w,
+        "{time},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        snap.rtt_ms,
+        snap.jitter_ms,
+        snap.loss_permille,
+        snap.dgrams_recv,
+        snap.dgrams_lost,
+        snap.presented,
+        snap.held,
+        snap.dropped_overflow,
+        snap.dropped_stale,
+        snap.keyframe_requests,
+        snap.present_queue_len,
+        u8::from(snap.audio_clock_live),
+        snap.skew_avg_ms,
+        snap.skew_max_abs_ms,
+        snap.audio_decoded,
+        snap.audio_plc,
+        snap.audio_resyncs,
+        snap.audio_underrun_samples,
+        snap.audio_buffered_samples,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

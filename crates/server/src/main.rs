@@ -1538,7 +1538,7 @@ const STATS_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 /// CSV header of the per-interval telemetry rows (§12.8). Keep it in sync
 /// with [`FrameStats::csv_row`].
-const STATS_CSV_HEADER: &str = "time,frames,sent,empty,skipped_bp,dropped_whole,avg_encode_ms,max_encode_ms,avg_kb,max_kb,min_queue_free,pacer_mbps,ladder_level,ladder_ema_pct,quality_fps,effective_fps,adaptive_load,rtt_ms,jitter_ms,loss_permille,proc_cpu_ms";
+const STATS_CSV_HEADER: &str = "time,frames,sent,empty,skipped_bp,dropped_whole,avg_encode_ms,max_encode_ms,avg_kb,max_kb,min_queue_free,pacer_mbps,ladder_level,ladder_ema_pct,quality_fps,effective_fps,adaptive_load,rtt_ms,jitter_ms,loss_permille,proc_cpu_ms,net_level,content_level,video_kbps_target,audio_kbps_target,cpu_load_ema,util_ema";
 
 /// Process CPU time (user+kernel) in milliseconds, Windows `GetProcessTimes`
 /// or Linux `/proc/self/stat`. `None` on platforms without an implementation.
@@ -1654,8 +1654,29 @@ impl FrameStats {
         let cpu_ms = self
             .cpu_ms_window
             .map_or_else(String::new, |c| c.to_string());
+        // Quality axes (§12.8): resolved targets recomputed from the live
+        // levels, so the CSV explains *what* the controller wanted.
+        let (net_level, content_level, vkbps, akbps) = ctl.quality.as_ref().map_or_else(
+            || (String::new(), String::new(), String::new(), String::new()),
+            |controller| {
+                let clevel = ctl.pressure.as_ref().map_or(0, protocol::PressureController::level);
+                let t = protocol::resolve_targets(
+                    controller.level(),
+                    clevel,
+                    ctl.video_ceiling_kbps,
+                    ctl.audio_ceiling_kbps,
+                    controller.policy(),
+                );
+                (
+                    controller.level().to_string(),
+                    clevel.to_string(),
+                    t.video_kbps.to_string(),
+                    t.audio_kbps.to_string(),
+                )
+            },
+        );
         format!(
-            "{time},{},{sent},{},{},{},{avg_encode_ms},{},{avg_kb},{},{},{},{level},{ema},{},{},{load},{rtt_ms},{jitter_ms},{loss},{cpu_ms}",
+            "{time},{},{sent},{},{},{},{avg_encode_ms},{},{avg_kb},{},{},{},{level},{ema},{},{},{load},{rtt_ms},{jitter_ms},{loss},{cpu_ms},{net_level},{content_level},{vkbps},{akbps},{:.3},{:.3}",
             self.frames,
             self.empty,
             self.skipped_bp,
@@ -1666,6 +1687,8 @@ impl FrameStats {
             ctl.pacer_rate.bps() / 1_000_000,
             ctl.quality_fps,
             ctl.effective_fps(),
+            ctl.cpu_load_ema,
+            ctl.util_ema,
         )
     }
 

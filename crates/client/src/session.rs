@@ -35,6 +35,7 @@ use crate::command::{COMMAND_CHANNEL_CAPACITY, ClientCommand, CommandReceiver, C
 use crate::events::ClientEvent;
 use crate::framebuffer::Displays;
 use crate::mic::{MicClient, MicMode};
+use crate::stats;
 use crate::webcam::CamClient;
 
 /// Keyframe requests on unrecoverable frame loss are rate-limited to one
@@ -442,6 +443,7 @@ impl Session {
                 _ = stats_tick.tick() => {
                     let snap = core.stats.snapshot();
                     Self::log_present_fps(&mut prev_fps_stats, &snap);
+                    stats::write_csv_row(&snap);
                     if !emit(&core.events, ClientEvent::Stats(snap)) {
                         return Ok(());
                     }
@@ -639,6 +641,7 @@ impl Session {
                 _ = stats_tick.tick() => {
                     let snap = core.stats.snapshot();
                     Self::log_present_fps(&mut prev_fps_stats, &snap);
+                    stats::write_csv_row(&snap);
                     if !emit(&core.events, ClientEvent::Stats(snap)) {
                         return Ok(());
                     }

@@ -61,6 +61,10 @@ fn run() -> Result<()> {
                 flags.printer_save = Some(take(&mut it, "--printer-save")?.into());
             }
             "--audio-dump" => flags.audio_dump = Some(take(&mut it, "--audio-dump")?.into()),
+            // §12.8: per-second stats CSV (crossed client/server graphs).
+            "--stats-csv" => {
+                client::stats::set_stats_csv(std::path::Path::new(&take(&mut it, "--stats-csv")?));
+            }
             // §9.2: capture the default input device.
             "--mic" => flags.mic = labclient::gui::MicMode::Device,
             // Lab aid: synthetic sine instead of a real device (Hz).
