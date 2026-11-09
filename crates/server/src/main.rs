@@ -2502,6 +2502,10 @@ async fn serve_stream<T: ReliableTransport>(
                                 );
                                 width = ready.width;
                                 height = ready.height;
+                                // The quality ceiling derives from the
+                                // capture resolution; refresh it or every
+                                // level stays scaled to the old mode.
+                                ctl.video_ceiling_kbps = video_ceiling_kbps(args, width, height);
                                 encoder = build_encoder(args, width, height, client_h264)?;
                                 announce_display(&mut legs, &mut encoder, width, height).await?;
                             }
@@ -2545,6 +2549,9 @@ async fn serve_stream<T: ReliableTransport>(
                             );
                             width = frame.width;
                             height = frame.height;
+                            // Same ceiling refresh as the capture-restart
+                            // path above.
+                            ctl.video_ceiling_kbps = video_ceiling_kbps(args, width, height);
                             encoder = build_encoder(args, width, height, client_h264)?;
                             announce_display(&mut legs, &mut encoder, width, height).await?;
                         }
