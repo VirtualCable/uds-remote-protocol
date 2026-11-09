@@ -1300,7 +1300,7 @@ const DISPLAY_QUEUE_DGRAMS: usize = 2048;
 /// codec-ladder regime force and the audio thread's bitrate knob (§12.5).
 fn handle_metrics(
     ctl: &mut ControlState,
-    encoder: &mut ServerEncoder,
+    enc: &EncoderHandle,
     rtt_micros: u64,
     jitter_micros: u64,
     loss_permille: u16,
@@ -1372,7 +1372,7 @@ fn handle_metrics(
             protocol::PressureController::new(ctl.quality_cfg.pressure_policy(), max_level)
         });
         let psample = protocol::PressureSample {
-            change: encoder.change_ema_fraction().unwrap_or(0.0),
+            change: ctl.change_ema_cache.unwrap_or(0.0),
             cpu: ctl.cpu_load_ema,
             util: ctl.util_ema,
             congested: controller.level() > protocol::LEVEL_FULL || net_event.is_some(),
@@ -1395,19 +1395,19 @@ fn handle_metrics(
     if let Some(event) = net_event {
         // Network level changed (with or without a content change): full
         // apply covers the content knobs too.
-        apply_targets(ctl, encoder, true);
-        apply_codec_force(ctl, encoder, event.force_video_codec);
+        apply_targets(ctl, enc, true);
+        apply_codec_force(ctl, enc, event.force_video_codec);
     } else if content_event.is_some() {
         // Content-axis-only change: fps ceiling and codec knobs; bitrate
         // and audio targets stay.
-        apply_targets(ctl, encoder, false);
+        apply_targets(ctl, enc, false);
     }
 }
 
 /// Resolves the combined targets of both axes (§18.69) and applies them:
 /// bitrate/audio targets only on network-axis changes (`network` flag);
 /// fps ceiling and content knobs always.
-fn apply_targets(ctl: &mut ControlState, encoder: &mut ServerEncoder, network: bool) {
+fn apply_targets(ctl: &mut ControlState, enc: &EncoderHandle, network: bool) {
     let Some(controller) = &ctl.quality else { return };
     let content_level = ctl.pressure.as_ref().map_or(0, protocol::PressureController::level);
     let t = protocol::resolve_targets(
@@ -1431,9 +1431,7 @@ fn apply_targets(ctl: &mut ControlState, encoder: &mut ServerEncoder, network: b
     );
     ctl.keyframe_interval = Duration::from_secs(u64::from(t.kf_secs));
     if network {
-        if let Err(e) = encoder.set_bitrate(t.video_kbps) {
-            warn!("set_bitrate failed: {e}");
-        }
+        enc.send(EncoderCmd::SetBitrate(t.video_kbps));
         // UDP burst pacing follows the video target (§12.6): level changes
         // move the token-bucket rate together with the encoder.
         ctl.pacer_rate.set_from_video_kbps(t.video_kbps);
@@ -1442,7 +1440,10 @@ fn apply_targets(ctl: &mut ControlState, encoder: &mut ServerEncoder, network: b
             ac.set_target_kbps(t.audio_kbps);
         }
     }
-    encoder.set_content_knobs(t.jpeg_quality, t.vp9_speed);
+    enc.send(EncoderCmd::SetContentKnobs {
+        jpeg_quality: t.jpeg_quality,
+        vp9_speed: t.vp9_speed,
+    });
     // The quality target is a ceiling; the adaptive-fps controller (§12.7)
     // may still hold the capture below it when the encoder is the limit.
     ctl.quality_fps = t.fps;
@@ -1450,14 +1451,14 @@ fn apply_targets(ctl: &mut ControlState, encoder: &mut ServerEncoder, network: b
 }
 
 /// Applies/removes the codec-ladder regime force on transitions only.
-fn apply_codec_force(ctl: &mut ControlState, encoder: &mut ServerEncoder, force: bool) {
+fn apply_codec_force(ctl: &mut ControlState, enc: &EncoderHandle, force: bool) {
     match (force, ctl.forced_video) {
         (true, false) => {
-            encoder.force_video_regime(true);
+            enc.send(EncoderCmd::ForceVideoRegime(true));
             ctl.forced_video = true;
         }
         (false, true) => {
-            encoder.force_video_regime(false);
+            enc.send(EncoderCmd::ForceVideoRegime(false));
             ctl.forced_video = false;
         }
         _ => {}
@@ -1625,12 +1626,12 @@ impl FrameStats {
     /// empty (ladder on plain encoders, adaptive load without the adapter,
     /// link metrics before the first client report).
     #[allow(clippy::cast_precision_loss)] // telemetry rounding is fine
-    fn csv_row(&self, encoder: &ServerEncoder, ctl: &ControlState) -> String {
+    fn csv_row(&self, ctl: &ControlState) -> String {
         let sent = self.frames - self.empty - self.skipped_bp - self.dropped_whole;
         let n_encoded = self.frames - self.skipped_bp;
         let avg_encode_ms = self.encode_micros.checked_div(n_encoded).unwrap_or(0) / 1000;
         let avg_kb = self.encoded_bytes.checked_div(sent).unwrap_or(0) / 1000;
-        let (level, ema) = encoder.ladder_snapshot();
+        let (level, ema) = ctl.ladder_cache;
         let level = level.map_or(String::new(), |l| format!("{l:?}").to_lowercase());
         let ema = ema.map_or(String::new(), |e| format!("{e:.1}"));
         let load = ctl
@@ -1694,13 +1695,13 @@ impl FrameStats {
 
     /// Emits the period line (and CSV row when active) and resets the
     /// accumulators.
-    fn log_and_reset(&mut self, encoder: &ServerEncoder, ctl: &ControlState) {
+    fn log_and_reset(&mut self, ctl: &ControlState) {
         let sent = self.frames - self.empty - self.skipped_bp - self.dropped_whole;
         let n_encoded = self.frames - self.skipped_bp;
         #[allow(clippy::cast_possible_truncation)] // micros per frame fit u64
         let avg_encode_ms = self.encode_micros.checked_div(n_encoded).unwrap_or(0) / 1000;
         let avg_kb = self.encoded_bytes.checked_div(sent).unwrap_or(0) / 1000;
-        let (level, ema) = encoder.ladder_snapshot();
+        let (level, ema) = ctl.ladder_cache;
         info!(
             frames = self.frames,
             sent,
@@ -1730,7 +1731,7 @@ impl FrameStats {
         }
         if self.csv.is_some() {
             use std::io::Write as _;
-            let row = self.csv_row(encoder, ctl);
+            let row = self.csv_row(ctl);
             if let Some(csv) = &mut self.csv {
                 // Flush per row: at one row per 5 s the BufWriter would
                 // otherwise hold the whole session (~KBs) and lose it all if
@@ -1771,14 +1772,54 @@ fn dump_h264_packet(codec: codec::VideoCodecType, packet: &codec::EncodedPacket)
     }
 }
 
-/// Encodes one captured frame and sends its fragments; also re-announces
-/// the display when the codec ladder switched regime (§8.5). Returns the
-/// next frame id.
+/// Hands one captured frame to the encoder thread (§18.75.17). Returns
+/// `false` when the frame was skipped (backpressure) and nothing was
+/// queued. The frame id is NOT assigned here: ids are handed out in output
+/// order by [`handle_encoded`], so empty frames keep consuming no id.
 #[allow(clippy::too_many_arguments)] // session state travels as separate locals
-async fn handle_frame<T: ReliableTransport>(
-    frame: &OwnedFrame,
+fn submit_frame<T: ReliableTransport>(
+    frame: Box<OwnedFrame>,
+    legs: &Legs<T>,
+    enc: &EncoderHandle,
+    in_flight: &mut usize,
+    ctl: &mut ControlState,
+    stats: &mut FrameStats,
+    last_keyframe: &mut Instant,
+) {
+    if let Some(free) = legs.frag_queue_free() {
+        stats.min_queue_free = stats.min_queue_free.min(free);
+    }
+    // Backpressure (§12.6): the paced queue is congested — skip this frame
+    // entirely (no encode CPU burned, no latency piled up) and force the
+    // next sent frame to be a keyframe, since the peer may be missing the
+    // deltas we are skipping.
+    stats.frames += 1; // every capture event, so `sent` never underflows
+    if legs.frag_queue_limited() || *in_flight >= ENCODER_MAX_IN_FLIGHT {
+        // Same skip when the encoder itself is the bottleneck (§18.75.17):
+        // queueing the capture would only add latency the fps adapter then
+        // has to bleed off anyway.
+        enc.send(EncoderCmd::RequestKeyframe);
+        stats.skipped_bp += 1;
+        return;
+    }
+    // Periodic safety-net keyframe: bounds the worst-case recovery time even
+    // if the whole loss-detection/request path fails (§12.2).
+    if last_keyframe.elapsed() >= ctl.keyframe_interval {
+        enc.send(EncoderCmd::RequestKeyframe);
+    }
+    *in_flight += 1;
+    enc.send(EncoderCmd::Frame(frame));
+}
+
+/// Processes one encoded frame coming back from the encoder thread
+/// (§18.75.17): re-announces the display on a ladder regime switch (§8.5),
+/// updates the quality EMAs and sends the fragments. Returns the next
+/// frame id.
+#[allow(clippy::too_many_arguments)] // session state travels as separate locals
+async fn handle_encoded<T: ReliableTransport>(
+    out: EncoderOutput,
     legs: &mut Legs<T>,
-    encoder: &mut ServerEncoder,
+    enc: &EncoderHandle,
     frame_id: u32,
     width: u32,
     height: u32,
@@ -1786,57 +1827,33 @@ async fn handle_frame<T: ReliableTransport>(
     stats: &mut FrameStats,
     last_keyframe: &mut Instant,
 ) -> Result<u32> {
-    if let Some(free) = legs.frag_queue_free() {
-        stats.min_queue_free = stats.min_queue_free.min(free);
-    }
-    // Backpressure (§12.6): the paced queue is congested — skip this frame
-    // entirely (no encode CPU burned, no latency piled up) and force the
-    // next sent frame to be a keyframe, since the peer may be missing the
-    // deltas we are skipping. The frame id is reused: nothing of it left.
-    stats.frames += 1; // every capture event, so `sent` never underflows
-    if legs.frag_queue_limited() {
-        encoder.request_keyframe();
-        stats.skipped_bp += 1;
-        return Ok(frame_id);
-    }
-    // Periodic safety-net keyframe: bounds the worst-case recovery time even
-    // if the whole loss-detection/request path fails (§12.2).
-    if last_keyframe.elapsed() >= ctl.keyframe_interval {
-        encoder.request_keyframe();
-    }
-    let encode_start = Instant::now();
-    let packet = encoder.encode(&codec::VideoFrame {
-        width: frame.width,
-        height: frame.height,
-        stride: frame.stride,
-        data: &frame.data,
-    })?;
-    let encode_micros = u64::try_from(encode_start.elapsed().as_micros()).unwrap_or(u64::MAX);
-    if encode_micros > 500_000 {
-        warn!(frame_id, encode_ms = encode_micros / 1000, "encode slow (encoder wedged?)");
-    }
-    stats.encode_micros += encode_micros;
-    stats.max_encode_micros = stats.max_encode_micros.max(encode_micros);
+    stats.encode_micros += out.encode_micros;
+    stats.max_encode_micros = stats.max_encode_micros.max(out.encode_micros);
     // Adaptive fps (§12.7): the encoder's own cost steers the capture rate.
-    ctl.observe_encode(Duration::from_micros(encode_micros));
+    ctl.observe_encode(Duration::from_micros(out.encode_micros));
     // Content axis (§18.69): encoder load as a fraction of the frame budget.
     let budget_micros = 1_000_000.0 / f64::from(ctl.effective_fps().max(1));
     #[allow(clippy::cast_precision_loss)] // encode times are µs-scale, far under 2^52
-    let load = (encode_micros as f64 / budget_micros).min(4.0);
+    let load = (out.encode_micros as f64 / budget_micros).min(4.0);
     ctl.cpu_load_ema += 0.1 * (load - ctl.cpu_load_ema);
-    if encoder.take_codec_change().is_some() {
+    // Telemetry caches: the metrics handler and the stats log read the
+    // ladder state from here now that the encoder lives on its own thread.
+    ctl.ladder_cache = out.ladder;
+    ctl.change_ema_cache = out.change_ema;
+    if out.codec_change.is_some() {
         // Codec ladder switched regime: re-announce before the fragments so
         // the peer rebuilds its decoder (§8.5).
-        announce_display(legs, encoder, width, height).await?;
+        announce_display(legs, enc.codec(), width, height).await?;
     }
-    if packet.data.is_empty() {
+    if out.packet.data.is_empty() {
         stats.empty += 1;
         // Content axis (§18.69): nothing sent, utilization samples to zero.
         ctl.util_ema *= 0.9;
         return Ok(frame_id); // rect codecs: nothing changed on this frame
     }
+    let packet = out.packet;
     stats.encoded_bytes += packet.data.len() as u64;
-    dump_h264_packet(encoder.codec_type(), &packet);
+    dump_h264_packet(out.codec, &packet);
     // Content axis (§18.69): bandwidth utilization estimate (encoded rate
     // at the current fps over the ceiling).
     #[allow(clippy::cast_precision_loss)] // frame payloads are MiB-scale
@@ -1851,9 +1868,9 @@ async fn handle_frame<T: ReliableTransport>(
     // tag is what the client trusts to pick the decoder. Frames go out
     // all-or-nothing: a partial frame is undecodable waste.
     let mut tagged = Vec::with_capacity(packet.data.len() + 2);
-    tagged.extend_from_slice(&encoder.codec_type().wire_id().to_be_bytes());
+    tagged.extend_from_slice(&out.codec.wire_id().to_be_bytes());
     tagged.extend_from_slice(&packet.data);
-    let frags = Fragmenter::split(0, frame_id, frame.capture_ts_ms, &tagged);
+    let frags = Fragmenter::split(0, frame_id, out.capture_ts_ms, &tagged);
     let send_start = Instant::now();
     let frame_sent = legs.send_frame(frags, packet.keyframe).await?;
     let send_wait = send_start.elapsed();
@@ -1870,14 +1887,14 @@ async fn handle_frame<T: ReliableTransport>(
         // one (the client's loss recovery would ask for it anyway).
         stats.dropped_whole += 1;
         warn!(frame_id, "paced queue congested; whole frame dropped, keyframe forced");
-        encoder.request_keyframe();
+        enc.send(EncoderCmd::RequestKeyframe);
         return Ok(frame_id);
     }
     if packet.keyframe {
         *last_keyframe = Instant::now();
     }
     if stats.last_log.elapsed() >= STATS_LOG_INTERVAL {
-        stats.log_and_reset(encoder, ctl);
+        stats.log_and_reset(ctl);
     }
     Ok(frame_id.wrapping_add(1))
 }
@@ -2325,10 +2342,19 @@ async fn serve_stream<T: ReliableTransport>(
         }
     };
     let (mut width, mut height) = (ready.width, ready.height);
-    let mut encoder = build_encoder(args, width, height, client_h264)?;
+    let encoder = build_encoder(args, width, height, client_h264)?;
 
     // Announce the display codec/geometry before the first frame (§8.3/§8.4).
-    announce_display(&mut legs, &mut encoder, width, height).await?;
+    announce_display(&mut legs, encoder.codec_type(), width, height).await?;
+
+    // The encoder works on its own thread (§18.75.17): an inline encode
+    // stalled every socket read of this loop for tens of milliseconds per
+    // frame, polluting the probe RTT with the server's own encode time and
+    // delaying audio datagrams behind it.
+    let (enc, mut enc_out) = spawn_encoder_thread(encoder);
+    // Frames handed to the encoder thread and not yet back (bounded by
+    // ENCODER_MAX_IN_FLIGHT in `submit_frame`).
+    let mut enc_in_flight = 0usize;
 
     // Audio endpoint policy (§9, driver-audio plan §8): point the session
     // default render endpoint at the UDS virtual speakers so app audio
@@ -2474,6 +2500,8 @@ async fn serve_stream<T: ReliableTransport>(
         injector_input: Some(spawn_injector_pipe(session_id)),
         cam_caps: None,
         last_cam_key_req: None,
+        ladder_cache: (None, None),
+        change_ema_cache: None,
     };
 
     let mut udp_buf = vec![0u8; 2048];
@@ -2529,8 +2557,10 @@ async fn serve_stream<T: ReliableTransport>(
                                 // capture resolution; refresh it or every
                                 // level stays scaled to the old mode.
                                 ctl.video_ceiling_kbps = video_ceiling_kbps(args, width, height);
-                                encoder = build_encoder(args, width, height, client_h264)?;
-                                announce_display(&mut legs, &mut encoder, width, height).await?;
+                                let new_encoder = build_encoder(args, width, height, client_h264)?;
+                                announce_display(&mut legs, new_encoder.codec_type(), width, height)
+                                    .await?;
+                                enc.send(EncoderCmd::Swap(Box::new(new_encoder)));
                             }
                             Err(e) => {
                                 // The fresh capture could not initialize on
@@ -2575,25 +2605,20 @@ async fn serve_stream<T: ReliableTransport>(
                             // Same ceiling refresh as the capture-restart
                             // path above.
                             ctl.video_ceiling_kbps = video_ceiling_kbps(args, width, height);
-                            encoder = build_encoder(args, width, height, client_h264)?;
-                            announce_display(&mut legs, &mut encoder, width, height).await?;
+                            let new_encoder = build_encoder(args, width, height, client_h264)?;
+                            announce_display(&mut legs, new_encoder.codec_type(), width, height)
+                                .await?;
+                            enc.send(EncoderCmd::Swap(Box::new(new_encoder)));
                         }
-                        frame_id = handle_frame(
-                            &frame,
-                            &mut legs,
-                            &mut encoder,
-                            frame_id,
-                            width,
-                            height,
+                        submit_frame(
+                            Box::new(frame),
+                            &legs,
+                            &enc,
+                            &mut enc_in_flight,
                             &mut ctl,
                             &mut frame_stats,
                             &mut last_keyframe,
-                        )
-                        .await?;
-                        if args.max_frames.is_some_and(|max| frame_id >= max) {
-                            info!(frame_id, "max frames reached, closing session");
-                            return Ok(());
-                        }
+                        );
                     }
                     Some(CaptureMsg::Cursor(update)) => {
                         send_cursor_update(&mut legs, &update).await?;
@@ -2612,6 +2637,31 @@ async fn serve_stream<T: ReliableTransport>(
                             bail!("capture thread ended ({other:?})");
                         }
                     }
+                }
+            }
+            out = enc_out.recv() => {
+                // Encoded frames come back in submission order (single
+                // encoder thread), so frame ids stay gapless for the frames
+                // that actually leave (§18.75.17).
+                let Some(out) = out else {
+                    bail!("encoder thread ended");
+                };
+                enc_in_flight = enc_in_flight.saturating_sub(1);
+                frame_id = handle_encoded(
+                    out,
+                    &mut legs,
+                    &enc,
+                    frame_id,
+                    width,
+                    height,
+                    &mut ctl,
+                    &mut frame_stats,
+                    &mut last_keyframe,
+                )
+                .await?;
+                if args.max_frames.is_some_and(|max| frame_id >= max) {
+                    info!(frame_id, "max frames reached, closing session");
+                    return Ok(());
                 }
             }
             msg = recv_audio(&mut audio_rx) => {
@@ -2686,7 +2736,7 @@ async fn serve_stream<T: ReliableTransport>(
                     forward_cam(&mut cam, &ctrl_buf[..n]);
                     maybe_request_cam_keyframe(&mut legs, &mut ctl, cam.as_ref()).await;
                 } else {
-                    handle_stream_packet(&mut ctl, &mut encoder, ch, &ctrl_buf[..n]);
+                    handle_stream_packet(&mut ctl, &enc, ch, &ctrl_buf[..n]);
                 }
                 // A WebcamCaps (handled above, sync) is answered here with
                 // the async config/start pair.
@@ -3090,6 +3140,12 @@ struct ControlState {
     cam_caps: Option<(u32, u32, u8, Vec<u16>)>,
     /// Webcam keyframe requests are rate-limited like display ones.
     last_cam_key_req: Option<Instant>,
+    /// Latest ladder level/EMA snapshot from the encoder thread (§18.75.17);
+    /// refreshed on every encoded frame, read by the stats log/CSV.
+    ladder_cache: (Option<codec::Level>, Option<f64>),
+    /// Latest changed-area EMA from the encoder thread, for the content
+    /// axis (§18.69).
+    change_ema_cache: Option<f64>,
 }
 
 impl ControlState {
@@ -3129,7 +3185,7 @@ impl ControlState {
 /// control messages (§12).
 fn handle_stream_packet(
     ctl: &mut ControlState,
-    encoder: &mut ServerEncoder,
+    enc: &EncoderHandle,
     ch: u16,
     buf: &[u8],
 ) {
@@ -3179,12 +3235,12 @@ fn handle_stream_packet(
     }
     match ControlMessage::decode(buf) {
         Ok(ControlMessage::MetricsReport { rtt_micros, jitter_micros, loss_permille }) => {
-            handle_metrics(ctl, encoder, rtt_micros, jitter_micros, loss_permille);
+            handle_metrics(ctl, enc, rtt_micros, jitter_micros, loss_permille);
         }
         Ok(ControlMessage::RequestKeyframe { display_id }) => {
             if ctl.last_keyframe_req.is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {
                 info!(display_id, "keyframe requested by client (frame loss)");
-                encoder.request_keyframe();
+                enc.send(EncoderCmd::RequestKeyframe);
                 ctl.last_keyframe_req = Some(Instant::now());
             }
         }
@@ -3238,7 +3294,7 @@ fn lock_workstation() {
 /// also used after a codec-ladder regime switch (§8.5).
 async fn announce_display<T: ReliableTransport>(
     legs: &mut Legs<T>,
-    encoder: &mut ServerEncoder,
+    codec: codec::VideoCodecType,
     width: u32,
     height: u32,
 ) -> Result<()> {
@@ -3246,7 +3302,7 @@ async fn announce_display<T: ReliableTransport>(
         display_id: 0,
         width,
         height,
-        codec: encoder.codec_type().wire_id(),
+        codec: codec.wire_id(),
     };
     legs.send_control(&info.encode()?).await?;
     Ok(())
@@ -3369,6 +3425,155 @@ impl ServerEncoder {
             (None, None)
         }
     }
+}
+
+/// Frames waiting on the encoder thread beyond which new captures are
+/// skipped (§18.75.17): one encoding + one queued. More would pile up
+/// latency; the fps adapter (§12.7) lowers the capture rate to match the
+/// encoder's real speed anyway.
+const ENCODER_MAX_IN_FLIGHT: usize = 2;
+
+/// Commands the session loop sends to the dedicated encoder thread
+/// (§18.75.17). Encoding a 1080p VP9 frame blocks for tens of milliseconds;
+/// run inline in the session loop it stalled every socket read behind it,
+/// so probe acks waited in the kernel queue and the client's RTT samples
+/// measured the server's own encode time (the LAN "RTT spikes"), and audio
+/// datagrams queued behind the same wait.
+enum EncoderCmd {
+    /// One captured frame to encode.
+    Frame(Box<OwnedFrame>),
+    /// Force the next encoded frame to be a keyframe.
+    RequestKeyframe,
+    /// Retarget the video bitrate (quality targets, §12.5).
+    SetBitrate(u32),
+    /// Content-axis knobs (§18.69): JPEG quality and VP9 speed.
+    SetContentKnobs {
+        /// JPEG quality of the rects leg.
+        jpeg_quality: i32,
+        /// `cpu_used` of the VP9 leg.
+        vp9_speed: i32,
+    },
+    /// Force/release the ladder's video regime (§12.5).
+    ForceVideoRegime(bool),
+    /// Replace the encoder wholesale (geometry change / capture restart).
+    Swap(Box<ServerEncoder>),
+}
+
+/// One encoded frame coming back from the encoder thread, plus the
+/// telemetry the session loop caches for its own decisions.
+struct EncoderOutput {
+    /// The encoded packet (may be empty: rect codecs with no changes).
+    packet: codec::EncodedPacket,
+    /// Wall time of the encode call.
+    encode_micros: u64,
+    /// Ladder regime switch pending announcement (§8.5).
+    codec_change: Option<codec::VideoCodecType>,
+    /// Codec that produced `packet` (tags the fragments, §8.5).
+    codec: codec::VideoCodecType,
+    /// Capture timestamp of the source frame (§9.1 lip-sync).
+    capture_ts_ms: u32,
+    /// Ladder level + change EMA snapshot for the stats log/CSV.
+    ladder: (Option<codec::Level>, Option<f64>),
+    /// Changed-area EMA as a fraction, for the content axis (§18.69).
+    change_ema: Option<f64>,
+}
+
+/// Handle the session loop uses to talk to the encoder thread.
+#[derive(Clone)]
+struct EncoderHandle {
+    /// Command channel to the thread.
+    cmd_tx: std::sync::mpsc::Sender<EncoderCmd>,
+    /// Codec of the encoder currently installed (for display announces).
+    codec: std::sync::Arc<std::sync::Mutex<codec::VideoCodecType>>,
+}
+
+impl EncoderHandle {
+    /// Sends a command; a dead encoder thread is logged, not fatal (the next
+    /// encode result will simply never arrive and the session dies on its
+    /// own error paths).
+    fn send(&self, cmd: EncoderCmd) {
+        if self.cmd_tx.send(cmd).is_err() {
+            warn!("encoder thread ended; command dropped");
+        }
+    }
+
+    /// Codec of the installed encoder.
+    fn codec(&self) -> codec::VideoCodecType {
+        *self.codec.lock().expect("encoder codec")
+    }
+}
+
+/// Moves the display encoder onto its own thread (§18.75.17): the session
+/// loop stays a pure I/O router and never waits behind an encode. Returns
+/// the command handle and the receiver of encoded outputs. The thread ends
+/// when the command channel closes (session teardown drops the handle).
+fn spawn_encoder_thread(
+    encoder: ServerEncoder,
+) -> (
+    EncoderHandle,
+    tokio::sync::mpsc::UnboundedReceiver<EncoderOutput>,
+) {
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<EncoderCmd>();
+    let (out_tx, out_rx) = tokio::sync::mpsc::unbounded_channel::<EncoderOutput>();
+    let codec = std::sync::Arc::new(std::sync::Mutex::new(encoder.codec_type()));
+    let thread_codec = std::sync::Arc::clone(&codec);
+    std::thread::Builder::new()
+        .name("display-encoder".into())
+        .spawn(move || {
+            let mut encoder = encoder;
+            while let Ok(cmd) = cmd_rx.recv() {
+                match cmd {
+                    EncoderCmd::Frame(frame) => {
+                        let start = Instant::now();
+                        let packet = match encoder.encode(&codec::VideoFrame {
+                            width: frame.width,
+                            height: frame.height,
+                            stride: frame.stride,
+                            data: &frame.data,
+                        }) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                warn!("encode failed: {e}");
+                                continue;
+                            }
+                        };
+                        let encode_micros =
+                            u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+                        if encode_micros > 500_000 {
+                            warn!(encode_ms = encode_micros / 1000, "encode slow (encoder wedged?)");
+                        }
+                        let out = EncoderOutput {
+                            packet,
+                            encode_micros,
+                            codec_change: encoder.take_codec_change(),
+                            codec: encoder.codec_type(),
+                            capture_ts_ms: frame.capture_ts_ms,
+                            ladder: encoder.ladder_snapshot(),
+                            change_ema: encoder.change_ema_fraction(),
+                        };
+                        if out_tx.send(out).is_err() {
+                            return; // session gone
+                        }
+                    }
+                    EncoderCmd::RequestKeyframe => encoder.request_keyframe(),
+                    EncoderCmd::SetBitrate(kbps) => {
+                        if let Err(e) = encoder.set_bitrate(kbps) {
+                            warn!("set_bitrate failed: {e}");
+                        }
+                    }
+                    EncoderCmd::SetContentKnobs { jpeg_quality, vp9_speed } => {
+                        encoder.set_content_knobs(jpeg_quality, vp9_speed);
+                    }
+                    EncoderCmd::ForceVideoRegime(on) => encoder.force_video_regime(on),
+                    EncoderCmd::Swap(new) => {
+                        encoder = *new;
+                        *thread_codec.lock().expect("encoder codec") = encoder.codec_type();
+                    }
+                }
+            }
+        })
+        .expect("spawn display-encoder thread");
+    (EncoderHandle { cmd_tx, codec }, out_rx)
 }
 
 /// Ladder tuning parsed from the `--ladder` spec: the sensitivity policy
