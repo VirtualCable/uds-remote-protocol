@@ -64,7 +64,7 @@ use windows::Win32::Media::MediaFoundation::{
     MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
     MF_MT_MPEG2_PROFILE,
 };
-use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4};
+use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_UI4};
 use windows::core::{GUID, Interface};
 
 use crate::video::{DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame};
@@ -85,23 +85,6 @@ fn variant_u32(v: u32) -> VARIANT {
                 wReserved2: 0,
                 wReserved3: 0,
                 Anonymous: VARIANT_0_0_0 { ulVal: v },
-            }),
-        },
-    }
-}
-
-/// Builds a VT_BOOL variant.
-fn variant_bool(v: bool) -> VARIANT {
-    VARIANT {
-        Anonymous: VARIANT_0 {
-            Anonymous: ManuallyDrop::new(VARIANT_0_0 {
-                vt: VT_BOOL,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: VARIANT_0_0_0 {
-                    boolVal: windows::Win32::Foundation::VARIANT_BOOL(v.into()),
-                },
             }),
         },
     }
@@ -662,7 +645,11 @@ impl MfEncoder {
         let knobs = std::env::var("MF_KNOBS").ok().as_deref() != Some("0");
         unsafe {
             if knobs {
-                let _ = codec_api.SetValue(&CODECAPI_AVLowLatencyMode, &variant_bool(true));
+                // DWORD property: VT_BOOL is rejected (E_INVALIDARG).
+                let r = codec_api.SetValue(&CODECAPI_AVLowLatencyMode, &variant_u32(1));
+                if let Err(e) = r {
+                    tracing::warn!("encoder rejected AVLowLatencyMode: {e}");
+                }
                 // CBR rate control; some hardware MFTs reject streams
                 // without an explicit rate-control mode.
                 let _ = codec_api.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(0));
@@ -1197,11 +1184,13 @@ impl MfDecoder {
         }
         let events: Option<IMFMediaEventGenerator> = transform.cast().ok();
         // Low-latency mode: without it the MS H264 decoder holds several
-        // frames before producing the first output. Supported by the MS
-        // decoder; vendor MFTs may ignore it.
+        // frames before producing the first output (multi-second freeze on
+        // stream start). The property is a DWORD; a VT_BOOL here is rejected
+        // and the decoder keeps its default latency. Vendor MFTs may ignore it.
         if let Ok(codec_api) = transform.cast::<ICodecAPI>() {
-            unsafe {
-                let _ = codec_api.SetValue(&CODECAPI_AVLowLatencyMode, &variant_bool(true));
+            let r = unsafe { codec_api.SetValue(&CODECAPI_AVLowLatencyMode, &variant_u32(1)) };
+            if let Err(e) = r {
+                tracing::warn!("decoder rejected AVLowLatencyMode: {e}");
             }
         }
 
