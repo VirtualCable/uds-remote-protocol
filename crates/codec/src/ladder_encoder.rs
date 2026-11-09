@@ -56,6 +56,8 @@ pub struct LadderEncoder {
     jpeg_bpp_ema: Option<f64>,
     /// EMA of the VP9 packet size (bytes) while in `Level::High`.
     vp9_bytes_ema: Option<f64>,
+    /// Rate samples taken since entering `Level::Low` (burst-guard warm-up).
+    low_rate_samples: u32,
 }
 
 /// Video-regime backend of the ladder (§18.75): libvpx VP9 software always,
@@ -149,7 +151,24 @@ const DOWN_COST_MARGIN: f64 = 1.0;
 /// Burst guard (§18.75.19): in Low, one frame whose instantaneous rate
 /// exceeds `BURST_MULT` × the up-trigger rate (scene cut flooding the paced
 /// queue with 1080p JPEGs) switches back to High immediately, no hold.
+///
+/// The rate alone cannot tell a scene cut from ordinary interactivity: at
+/// high capture fps ANY content-bearing frame tops the rate (a menu with
+/// its drop shadow is ~40-80 KB, i.e. >6 Mbps at 50 ms intervals), so the
+/// guard is gated on the dirty area — a flood requires a big change —
+/// and on a warm-up of rate samples after entering Low (the first frames
+/// after connect or a codec switch are full-screen by definition and
+/// would trip it instantly, bypassing every damping layer via `force`).
 const BURST_MULT: f64 = 1.5;
+
+/// Minimum rate samples after entering `Level::Low` before the burst guard
+/// may fire (connect/switch calibration window).
+const BURST_WARMUP_SAMPLES: u32 = 3;
+
+/// Area gate of the burst guard: only a change covering at least a third
+/// of the screen can be a scene-cut flood. Menus, tooltips and window
+/// drags are the JPEG leg's normal job and must never trip it.
+const BURST_AREA_FRAC: f64 = 1.0 / 3.0;
 
 /// EMA smoothing for the cost models (JPEG bytes/px, VP9 bytes/frame).
 const COST_EMA_ALPHA: f64 = 0.2;
@@ -224,6 +243,7 @@ impl LadderEncoder {
             last_low_encode: None,
             jpeg_bpp_ema: None,
             vp9_bytes_ema: None,
+            low_rate_samples: 0,
         })
     }
 
@@ -262,6 +282,7 @@ impl LadderEncoder {
             last_low_encode: None,
             jpeg_bpp_ema: None,
             vp9_bytes_ema: None,
+            low_rate_samples: 0,
         })
     }
 
@@ -300,6 +321,7 @@ impl LadderEncoder {
             last_low_encode: None,
             jpeg_bpp_ema: None,
             vp9_bytes_ema: None,
+            low_rate_samples: 0,
         })
     }
 
@@ -363,6 +385,14 @@ impl LadderEncoder {
 
     /// Marks the pending switch: keyframe + codec-change notification.
     fn begin_level(&mut self, level: Level) {
+        if level == Level::Low {
+            // Re-arm the burst-guard calibration: the first frames of a
+            // Low visit are full-screen by definition, and a stale
+            // `last_low_encode` would measure a `dt` spanning the whole
+            // High visit.
+            self.low_rate_samples = 0;
+            self.last_low_encode = None;
+        }
         self.force_full = true;
         let codec = match level {
             Level::Low => VideoCodecType::JpegRects,
@@ -454,9 +484,19 @@ impl VideoEncoder for LadderEncoder {
                         // Burst guard: a scene cut at 1080p turns the JPEG
                         // leg into a ~25 Mbps flood; bail to the video
                         // regime at once instead of riding out the hold.
+                        // Gated on warm-up (post-connect/switch calibration)
+                        // and on a big dirty area — small-area bursts are
+                        // ordinary interactivity, not floods.
+                        self.low_rate_samples += 1;
                         let burst_rate =
                             f64::from(self.vp9_kbps) * 1000.0 * BW_UP_RATIO * BURST_MULT;
-                        if bps > burst_rate {
+                        let screen_px = u64::from(self.width) * u64::from(self.height);
+                        let big_change =
+                            dirty_area_px(&dirty) as f64 >= screen_px as f64 * BURST_AREA_FRAC;
+                        if self.low_rate_samples >= BURST_WARMUP_SAMPLES
+                            && big_change
+                            && bps > burst_rate
+                        {
                             self.force_level(Level::High);
                         }
                     }
@@ -609,21 +649,72 @@ mod tests {
 
     #[test]
     fn burst_guard_bails_to_high_immediately() {
-        // In Low, one frame way over the burst rate flips to High without
-        // any hold: simulate by seeding the cost EMAs and forcing Low, then
-        // encoding a frame whose JPEG output dwarfs 3x the VP9 target.
+        // In Low, sustained full-screen frames way over the burst rate flip
+        // to High without any hold (scene cut flooding the paced queue).
         let (w, h) = (128u32, 64u32);
         let mut enc = LadderEncoder::new(w, h, policy(), 1, 80).unwrap();
-        // Two frames to get a Low-level delta encode timing sample.
-        let a = solid(w, h, [10, 20, 30, 255]);
-        enc.encode(&vf(w, h, &a)).unwrap();
-        std::thread::sleep(Duration::from_millis(2));
-        let b = solid(w, h, [200, 100, 50, 255]);
-        enc.encode(&vf(w, h, &b)).unwrap();
         // vp9_kbps = 1 -> burst rate = 1000 * 2.0 * 1.5 = 3000 bps; any
         // non-trivial packet at ~2 ms intervals is hundreds of kbps.
+        // Full-screen change every frame (100 % dirty passes the area
+        // gate); the warm-up needs 3 rate samples, so frame 4 fires.
+        let a = solid(w, h, [10, 20, 30, 255]);
+        enc.encode(&vf(w, h, &a)).unwrap();
+        for i in 0..5 {
+            std::thread::sleep(Duration::from_millis(2));
+            let b = solid(w, h, [200, 100 + i, 50, 255]);
+            enc.encode(&vf(w, h, &b)).unwrap();
+        }
         assert_eq!(enc.ladder.level(), Level::High, "burst guard fired");
         assert_eq!(enc.codec_type(), VideoCodecType::Vp9);
+    }
+
+    #[test]
+    fn burst_guard_ignores_small_area_bursts() {
+        // A menu popping up: huge instantaneous rate but a small dirty
+        // area. The guard must NOT fire — this is the JPEG leg's job.
+        // Frame big enough that one 64x64 diff tile stays under the 1/3
+        // area gate (640x480: one tile = 1.3 % of the screen).
+        let (w, h) = (640u32, 480u32);
+        let mut enc = LadderEncoder::new(w, h, policy(), 1, 80).unwrap();
+        let base = solid(w, h, [10, 20, 30, 255]);
+        enc.encode(&vf(w, h, &base)).unwrap();
+        // Dirty a 32x16 patch (6 % of the screen) with new content every
+        // frame, back to back: the instantaneous rate is astronomic, so
+        // without the area gate the guard would fire on the 3rd sample.
+        // No sleeps: the whole run stays inside the initial dwell, so the
+        // metric/bw-pressure path (which WOULD legitimately escalate a
+        // persistent hot spot) cannot interfere with the assertion.
+        let mut patched = base.clone();
+        let wu = w as usize;
+        for i in 0..6u8 {
+            for row in 8..24usize {
+                for x in 8..40usize {
+                    patched[(row * wu + x) * 4..][..4]
+                        .copy_from_slice(&[200, 100 + i * 20, 50, 255]);
+                }
+            }
+            enc.encode(&vf(w, h, &patched)).unwrap();
+        }
+        assert_eq!(enc.ladder.level(), Level::Low, "menu burst must not fire the guard");
+    }
+
+    #[test]
+    fn burst_guard_warmup_covers_connect() {
+        // The frames right after entering Low are full-screen by
+        // definition: even at burst rates the guard stays disarmed until
+        // the warm-up samples are in.
+        let (w, h) = (128u32, 64u32);
+        let mut enc = LadderEncoder::new(w, h, policy(), 1, 80).unwrap();
+        let a = solid(w, h, [10, 20, 30, 255]);
+        enc.encode(&vf(w, h, &a)).unwrap();
+        // First two delta frames at burst rate with full-screen change:
+        // inside the warm-up (3 samples needed), no fire yet.
+        for i in 0..2u8 {
+            std::thread::sleep(Duration::from_millis(2));
+            let b = solid(w, h, [200, 100 + i * 40, 50, 255]);
+            enc.encode(&vf(w, h, &b)).unwrap();
+            assert_eq!(enc.ladder.level(), Level::Low, "warm-up frame {i} must not fire");
+        }
     }
 
     #[test]
