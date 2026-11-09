@@ -349,8 +349,13 @@ impl VideoEncoder for LadderEncoder {
         } else {
             rects::dirty_rects(self.prev.as_deref(), frame.data, self.width, self.height, frame.stride)
         };
-        let area_pct = 100.0 * dirty.iter().map(rects::Rect::area).sum::<i64>() as f64
-            / (f64::from(self.width) * f64::from(self.height));
+        // Changed-area metric (§18.75.18): sampled and delta-thresholded,
+        // NOT the exact encoding diff above — byte-exact diffing reports
+        // ~100 % of the screen as "changed" on video (recompression
+        // shimmer) and leaves the controllers without a working signal.
+        let area_pct = 100.0
+            * rects::changed_area_fraction(self.prev.as_deref(), frame.data, self.width, self.height, frame.stride)
+                .unwrap_or(1.0);
 
         // The ladder sees the worst of two pressures: changed area and JPEG
         // bandwidth. A small window playing video changes little area but

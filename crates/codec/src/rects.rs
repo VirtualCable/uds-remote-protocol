@@ -82,6 +82,63 @@ impl Rect {
 /// the rect count low.
 pub const DIFF_TILE: u32 = 64;
 
+/// Pixel sampling stride of [`changed_area_fraction`]: one pixel every 8
+/// per axis (1/64 of the frame) is plenty for a percentage metric and
+/// costs ~32k channel comparisons at 1080p.
+const CHANGE_SAMPLE_STEP: usize = 8;
+
+/// Per-channel delta (0-255) below which a pixel counts as unchanged for
+/// [`changed_area_fraction`]. Video decode/recompression shimmer moves
+/// almost every pixel by a couple of levels; 8 keeps real content changes
+/// while filtering that noise floor.
+const CHANGE_DELTA_THRESHOLD: u8 = 8;
+
+/// Fraction (0.0-1.0) of pixels that changed *meaningfully* between two
+/// BGRA frames of the same geometry, sampled sparsely (§18.75.18).
+///
+/// The exact byte diff used for encoding decisions ([`dirty_rects`])
+/// flags any ±1 shimmer as changed, so on video content the changed-area
+/// metric saturates at ~100 % and stops being discriminative — the
+/// content axis reads "everything always changes" and keeps the bitrate
+/// ceiling high. This metric is strictly for the ladder / pressure
+/// controllers; encoding keeps the exact diff. `None` when there is no
+/// previous frame.
+#[must_use]
+pub fn changed_area_fraction(
+    prev: Option<&[u8]>,
+    cur: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+) -> Option<f64> {
+    let prev = prev?;
+    let (cols, rows) = (width as usize, height as usize);
+    let mut changed = 0u64;
+    let mut sampled = 0u64;
+    let mut row = 0;
+    while row < rows {
+        let row_off = row * stride;
+        let mut col = 0;
+        while col < cols {
+            let off = row_off + col * 4;
+            let (before, after) = (&prev[off..off + 3], &cur[off..off + 3]);
+            let dirty = before
+                .iter()
+                .zip(after)
+                .any(|(a, b)| a.abs_diff(*b) > CHANGE_DELTA_THRESHOLD);
+            changed += u64::from(dirty);
+            sampled += 1;
+            col += CHANGE_SAMPLE_STEP;
+        }
+        row += CHANGE_SAMPLE_STEP;
+    }
+    if sampled == 0 {
+        return Some(0.0);
+    }
+    #[allow(clippy::cast_precision_loss)] // counters are tiny next to 2^52
+    Some(changed as f64 / sampled as f64)
+}
+
 /// Maximum rects per frame before collapsing to the bounding box (the
 /// per-rect container overhead dominates beyond this).
 pub const MAX_RECTS: usize = 64;
@@ -222,6 +279,37 @@ mod tests {
     fn no_changes_yields_no_rects() {
         let a = vec![7u8; 128 * 128 * 4];
         assert_eq!(dirty_rects(Some(&a), &a, 128, 128, 128 * 4), vec![]);
+    }
+
+    #[test]
+    fn changed_area_none_without_previous_frame() {
+        let a = vec![0u8; 64 * 64 * 4];
+        assert_eq!(changed_area_fraction(None, &a, 64, 64, 64 * 4), None);
+    }
+
+    #[test]
+    fn changed_area_ignores_shimmer_below_threshold() {
+        // Every pixel moves ±4 (video recompression noise): the exact diff
+        // would flag 100 % of the screen; the metric must report ~0.
+        let a = vec![100u8; 64 * 64 * 4];
+        let b = vec![104u8; 64 * 64 * 4];
+        assert_eq!(
+            changed_area_fraction(Some(&a), &b, 64, 64, 64 * 4),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn changed_area_measures_real_changes() {
+        // Half the screen jumps by 40 levels: the sampled metric must land
+        // near 0.5 (sampling granularity aside).
+        let a = vec![100u8; 64 * 64 * 4];
+        let mut b = a.clone();
+        for px in b.chunks_exact_mut(4).take(64 * 32) {
+            px[0] = px[0].saturating_add(40);
+        }
+        let f = changed_area_fraction(Some(&a), &b, 64, 64, 64 * 4).expect("prev");
+        assert!((f - 0.5).abs() < 0.05, "expected ~0.5, got {f}");
     }
 
     #[test]
