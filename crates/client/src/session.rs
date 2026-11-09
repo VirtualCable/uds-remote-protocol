@@ -16,7 +16,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -691,7 +691,8 @@ impl Session {
                 .last_key_req
                 .is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_MIN_INTERVAL)
         {
-            info!(dropped, awaiting, "stream broken; requesting keyframe");
+            let chain_dropped = core.chain_dropped.swap(0, Ordering::Relaxed);
+            info!(dropped, awaiting, chain_dropped, "stream broken; requesting keyframe");
             let req = ControlMessage::RequestKeyframe { display_id: 0 };
             stream.send(channel::CONTROL, &req.encode()?).await?;
             core.stats.record_keyframe_request();
@@ -921,6 +922,8 @@ struct DecodeWorker {
     decoder_failures: HashMap<(u8, VideoCodecType), VideoCodecType>,
     /// Shared with the network task: it drives the keyframe requests.
     recovery_awaiting: Arc<AtomicBool>,
+    /// Predictive packets dropped while awaiting a keyframe (debug aid).
+    chain_dropped: Arc<AtomicU64>,
     /// Audio playback cursor (capture-clock ms), for the A/V decisions.
     audio_clock: Arc<AtomicI64>,
     /// Dead-clock guard (§9.1): last published audio cursor and when it
@@ -947,10 +950,11 @@ impl DecodeWorker {
         displays: Displays,
         audio_clock: Arc<AtomicI64>,
         stats: Arc<crate::stats::SessionStats>,
-    ) -> (flume::Sender<DecodeJob>, flume::Sender<DecodeJob>, Arc<AtomicBool>) {
+    ) -> (flume::Sender<DecodeJob>, flume::Sender<DecodeJob>, Arc<AtomicBool>, Arc<AtomicU64>) {
         let (tx, rx) = flume::bounded(DECODE_QUEUE_CAPACITY);
         let (ctl_tx, ctl_rx) = flume::unbounded();
         let recovery_awaiting = Arc::new(AtomicBool::new(false));
+        let chain_dropped = Arc::new(AtomicU64::new(0));
         let mut worker = Self {
             rx,
             ctl_rx,
@@ -959,6 +963,7 @@ impl DecodeWorker {
             decoders: HashMap::new(),
             decoder_failures: HashMap::new(),
             recovery_awaiting: Arc::clone(&recovery_awaiting),
+            chain_dropped: Arc::clone(&chain_dropped),
             audio_clock,
             audio_now_last: None,
             audio_now_changed_at: Instant::now(),
@@ -973,7 +978,7 @@ impl DecodeWorker {
             .name("decode-worker".into())
             .spawn(move || worker.run())
             .expect("spawning the decode worker");
-        (tx, ctl_tx, recovery_awaiting)
+        (tx, ctl_tx, recovery_awaiting, chain_dropped)
     }
 
     fn audio_now_ms(&self) -> Option<u32> {
@@ -1073,11 +1078,6 @@ impl DecodeWorker {
             return;
         };
         let key = (complete.display_id, codec_type);
-        // Lab aid: dump the reassembled H264 payloads (what actually enters
-        // the decoder) so ffmpeg can validate the wire/reassembly path.
-        if codec_type == VideoCodecType::H264 {
-            dump_h264_payload(&payload);
-        }
         // Predictive chain broken and a keyframe already requested: feeding
         // more deltas to the decoder renders ghosts (a delta against a dead
         // reference decodes "fine" into garbage), so drop them until the
@@ -1086,7 +1086,14 @@ impl DecodeWorker {
             && matches!(codec_type, VideoCodecType::Vp8 | VideoCodecType::Vp9 | VideoCodecType::H264)
             && !codec::packet_is_keyframe(codec_type, &payload)
         {
+            self.chain_dropped.fetch_add(1, Ordering::Relaxed);
             return;
+        }
+        // Lab aid: dump the reassembled H264 payloads exactly as fed to the
+        // decoder (after the broken-chain drop), so ffmpeg can validate the
+        // wire/reassembly path.
+        if codec_type == VideoCodecType::H264 {
+            dump_h264_payload(&payload);
         }
         if !self.decoders.contains_key(&key) {
             if self.decoder_failures.get(&key) == Some(&codec_type) {
@@ -1253,6 +1260,9 @@ struct Core {
     decode_ctl_tx: flume::Sender<DecodeJob>,
     /// Decode-error recovery flag, owned by the decode thread (§12.2).
     recovery_awaiting: Arc<AtomicBool>,
+    /// Predictive packets dropped by the decode thread while awaiting a
+    /// keyframe; logged with the keyframe request line.
+    chain_dropped: Arc<AtomicU64>,
     audio: AudioClient,
     mic: MicClient,
     /// Webcam streaming endpoint (§18.57).
@@ -1309,7 +1319,7 @@ impl Core {
             std::sync::Arc::clone(&stats),
             config.integrations.audio_out.take(),
         );
-        let (decode_tx, decode_ctl_tx, recovery_awaiting) = DecodeWorker::spawn(
+        let (decode_tx, decode_ctl_tx, recovery_awaiting, chain_dropped) = DecodeWorker::spawn(
             events.clone(),
             displays.clone(),
             audio.shared_clock(),
@@ -1323,6 +1333,7 @@ impl Core {
             decode_tx,
             decode_ctl_tx,
             recovery_awaiting,
+            chain_dropped,
             audio,
             mic: MicClient::new(config.mic, config.integrations.mic.take(), clock_start),
             cam: CamClient::new(cam_source),
