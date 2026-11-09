@@ -1085,6 +1085,8 @@ pub struct MfDecoder {
     nv12: bool,
     pending: VecDeque<DecodedFrame>,
     frame_counter: u64,
+    /// Lab-only raw-dump sample counter (UDSRP_DUMP_RAW).
+    dump_count: u64,
     mft_name: String,
     _guard: MfGuard,
 }
@@ -1124,6 +1126,7 @@ fn select_decoder_output(transform: &IMFTransform, out_stream: u32) -> Result<bo
                     .SetOutputType(out_stream, &t, 0)
                     .map_err(|e| CodecError::Backend(format!("decoder SetOutputType: {e}")))?;
             }
+            tracing::info!(decoder_output = "I420", "MFT decoder output negotiated");
             return Ok(false);
         }
         if subtype == MFVideoFormat_NV12 && nv12_choice.is_none() {
@@ -1140,6 +1143,7 @@ fn select_decoder_output(transform: &IMFTransform, out_stream: u32) -> Result<bo
             .SetOutputType(out_stream, &t, 0)
             .map_err(|e| CodecError::Backend(format!("decoder SetOutputType: {e}")))?;
     }
+    tracing::info!(decoder_output = "NV12", "MFT decoder output negotiated");
     Ok(true)
 }
 
@@ -1239,6 +1243,7 @@ impl MfDecoder {
             nv12,
             pending: VecDeque::new(),
             frame_counter: 0,
+            dump_count: 0,
             mft_name: info.name,
             _guard: guard,
         })
@@ -1310,6 +1315,27 @@ impl MfDecoder {
         };
         let (width, height, alloc_h, stride) = self.output_shape()?;
         let (w, h, ah) = (width as usize, height as usize, alloc_h as usize);
+        // Lab hook (UDSRP_DUMP_RAW=<path>): appends the first raw samples
+        // with a text header each, to inspect the MFT's real buffer layout.
+        if let Ok(path) = std::env::var("UDSRP_DUMP_RAW") {
+            self.dump_count += 1;
+            if self.dump_count <= 5
+                && let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+            {
+                use std::io::Write as _;
+                let header = format!(
+                    "sample={} nv12={} w={w} h={h} alloc_h={ah} stride={stride} data_len={}\n",
+                    self.dump_count,
+                    self.nv12,
+                    data.len()
+                );
+                let _ = f.write_all(header.as_bytes());
+                let _ = f.write_all(&data);
+            }
+        }
         let frame = if self.nv12 {
             // Plane offsets use the allocated height; conversion crops to
             // the visible one.
