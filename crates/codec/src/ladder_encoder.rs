@@ -24,7 +24,8 @@
     clippy::cast_possible_truncation
 )]
 
-use std::time::Instant;
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 use crate::jpeg_rects::JpegRectsEncoder;
 use crate::ladder::{Ladder, LadderPolicy, Level};
@@ -58,6 +59,12 @@ pub struct LadderEncoder {
     vp9_bytes_ema: Option<f64>,
     /// Rate samples taken since entering `Level::Low` (burst-guard warm-up).
     low_rate_samples: u32,
+    /// Consecutive samples currently over both burst gates (rate + area).
+    burst_hot_run: u32,
+    /// Recent samples within [`DOWN_MIN_WINDOW`] (down-path spike filter).
+    recent_samples: VecDeque<(Instant, f64)>,
+    /// Throttle for the dirty-region diagnostic line (lab diagnostics).
+    last_dirty_diag: Option<Instant>,
 }
 
 /// Video-regime backend of the ladder (§18.75): libvpx VP9 software always,
@@ -148,22 +155,32 @@ const BW_EMA_ALPHA: f64 = 0.2;
 /// strictly below the measured VP9 frame cost times this margin.
 const DOWN_COST_MARGIN: f64 = 1.0;
 
-/// Burst guard (§18.75.19): in Low, one frame whose instantaneous rate
-/// exceeds `BURST_MULT` × the up-trigger rate (scene cut flooding the paced
-/// queue with 1080p JPEGs) switches back to High immediately, no hold.
+/// Burst guard (§18.75.19, §18.75.24): in Low, a SUSTAINED run of frames
+/// whose instantaneous rate exceeds `BURST_MULT` × the up-trigger rate
+/// (scene cut flooding the paced queue with 1080p JPEGs) switches back to
+/// High immediately, no hold.
 ///
 /// The rate alone cannot tell a scene cut from ordinary interactivity: at
 /// high capture fps ANY content-bearing frame tops the rate (a menu with
 /// its drop shadow is ~40-80 KB, i.e. >6 Mbps at 50 ms intervals), so the
 /// guard is gated on the dirty area — a flood requires a big change —
-/// and on a warm-up of rate samples after entering Low (the first frames
+/// on a warm-up of rate samples after entering Low (the first frames
 /// after connect or a codec switch are full-screen by definition and
-/// would trip it instantly, bypassing every damping layer via `force`).
+/// would trip it instantly, bypassing every damping layer via `force`),
+/// and on PERSISTENCE: a menu-open animation dirties a third of the
+/// screen for ~300-400 ms at >13 Mbps and the pacer absorbs it; only a
+/// flood that keeps flooding (~8 hot frames, ~400 ms at 20 fps) is worth
+/// short-cutting the bandwidth EMA's regular 2 s hold for.
 const BURST_MULT: f64 = 1.5;
 
 /// Minimum rate samples after entering `Level::Low` before the burst guard
 /// may fire (connect/switch calibration window).
 const BURST_WARMUP_SAMPLES: u32 = 3;
+
+/// Consecutive hot samples (rate AND area over their gates) required to
+/// fire the burst guard. Transient bursts (menu/tooltip animations) end
+/// before this; scene cuts and video do not.
+const BURST_PERSIST_SAMPLES: u32 = 8;
 
 /// Area gate of the burst guard: only a change covering at least a third
 /// of the screen can be a scene-cut flood. Menus, tooltips and window
@@ -172,6 +189,17 @@ const BURST_AREA_FRAC: f64 = 1.0 / 3.0;
 
 /// EMA smoothing for the cost models (JPEG bytes/px, VP9 bytes/frame).
 const COST_EMA_ALPHA: f64 = 0.2;
+
+/// Down-path spike filter (§18.75.25): a periodically bursty source (a
+/// log console scrolling at 1 Hz, a clock, a blinking caret) spikes the
+/// area sample once a second, and the continuous `hold_down` then never
+/// completes — the regime sticks in High while VP9 spends ~10× what the
+/// JPEG leg would. While in High the ladder is fed the MINIMUM sample of
+/// the last second instead of the raw one: periodic bursts have quiet
+/// frames inside every window (min ≈ 0 → the regime can come down);
+/// sustained video has none (min stays hot → it stays up). The up path
+/// keeps the raw sample — going up is urgent.
+const DOWN_MIN_WINDOW: Duration = Duration::from_secs(1);
 
 /// Maps the JPEG bit-rate EMA to an area-equivalent percentage for the
 /// ladder: `BW_UP_RATIO` × `vp9_kbps` → `up_threshold_pct`, linear.
@@ -244,6 +272,9 @@ impl LadderEncoder {
             jpeg_bpp_ema: None,
             vp9_bytes_ema: None,
             low_rate_samples: 0,
+            burst_hot_run: 0,
+            recent_samples: VecDeque::new(),
+            last_dirty_diag: None,
         })
     }
 
@@ -283,6 +314,9 @@ impl LadderEncoder {
             jpeg_bpp_ema: None,
             vp9_bytes_ema: None,
             low_rate_samples: 0,
+            burst_hot_run: 0,
+            recent_samples: VecDeque::new(),
+            last_dirty_diag: None,
         })
     }
 
@@ -322,6 +356,9 @@ impl LadderEncoder {
             jpeg_bpp_ema: None,
             vp9_bytes_ema: None,
             low_rate_samples: 0,
+            burst_hot_run: 0,
+            recent_samples: VecDeque::new(),
+            last_dirty_diag: None,
         })
     }
 
@@ -398,6 +435,7 @@ impl LadderEncoder {
             self.low_rate_samples = 0;
             self.last_low_encode = None;
             self.jpeg_bps_ema = None;
+            self.burst_hot_run = 0;
         }
         self.force_full = true;
         let codec = match level {
@@ -448,6 +486,34 @@ impl VideoEncoder for LadderEncoder {
                     .unwrap_or(1.0)
         };
 
+        // Lab diagnostics: every 5 s, what the diff is actually seeing —
+        // how much of the screen is dirty and where the biggest rect sits.
+        // Answers "what keeps changing on a static desktop?" without a
+        // frame dump.
+        if self
+            .last_dirty_diag
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(5))
+        {
+            self.last_dirty_diag = Some(Instant::now());
+            let biggest = dirty.iter().max_by_key(|r| r.area());
+            tracing::info!(
+                target: "ladder",
+                level = ?self.ladder.level(),
+                n_rects = dirty.len(),
+                dirty_frac = format_args!(
+                    "{:.3}",
+                    dirty_area_px(&dirty) as f64
+                        / (u64::from(self.width) * u64::from(self.height)) as f64
+                ),
+                biggest = biggest.map_or_else(
+                    || "-".to_string(),
+                    |r| format!("({},{})-({},{})", r.left, r.top, r.right, r.bottom)
+                ),
+                area_pct = format_args!("{area_pct:.2}"),
+                "dirty diag"
+            );
+        }
+
         // The ladder sees the worst of two pressures: changed area and JPEG
         // bandwidth. A small window playing video changes little area but
         // costs far more than the VP9 regime — the bandwidth term (only
@@ -467,7 +533,29 @@ impl VideoEncoder for LadderEncoder {
             sample = sample.max(self.ladder.policy().up_threshold_pct);
         }
 
-        if let Some(switch) = self.ladder.update(Instant::now(), sample) {
+        // Down-path spike filter (§18.75.25): in High, feed the minimum
+        // sample of the last second so periodic bursts (a scrolling log
+        // console) cannot reset the down-hold forever; sustained video
+        // keeps a hot minimum and stays up.
+        let now = Instant::now();
+        self.recent_samples.push_back((now, sample));
+        while self
+            .recent_samples
+            .front()
+            .is_some_and(|(t, _)| now.duration_since(*t) > DOWN_MIN_WINDOW)
+        {
+            self.recent_samples.pop_front();
+        }
+        let fed = if self.ladder.level() == Level::High {
+            self.recent_samples
+                .iter()
+                .map(|(_, s)| *s)
+                .fold(sample, f64::min)
+        } else {
+            sample
+        };
+
+        if let Some(switch) = self.ladder.update(now, fed) {
             tracing::info!(
                 target: "ladder",
                 to = ?switch.to,
@@ -517,16 +605,17 @@ impl VideoEncoder for LadderEncoder {
                         let burst_rate =
                             f64::from(self.vp9_kbps) * 1000.0 * BW_UP_RATIO * BURST_MULT;
                         let screen_px = u64::from(self.width) * u64::from(self.height);
-                        let big_change =
-                            dirty_area_px(&dirty) as f64 >= screen_px as f64 * BURST_AREA_FRAC;
+                        let hot = bps > burst_rate
+                            && dirty_area_px(&dirty) as f64 >= screen_px as f64 * BURST_AREA_FRAC;
+                        self.burst_hot_run = if hot { self.burst_hot_run + 1 } else { 0 };
                         if self.low_rate_samples >= BURST_WARMUP_SAMPLES
-                            && big_change
-                            && bps > burst_rate
+                            && self.burst_hot_run >= BURST_PERSIST_SAMPLES
                         {
                             tracing::info!(
                                 target: "ladder",
                                 bps = bps as u64,
                                 burst_rate = burst_rate as u64,
+                                hot_run = self.burst_hot_run,
                                 dirty_frac = format_args!(
                                     "{:.2}",
                                     dirty_area_px(&dirty) as f64 / screen_px as f64
@@ -692,10 +781,10 @@ mod tests {
         // vp9_kbps = 1 -> burst rate = 1000 * 2.0 * 1.5 = 3000 bps; any
         // non-trivial packet at ~2 ms intervals is hundreds of kbps.
         // Full-screen change every frame (100 % dirty passes the area
-        // gate); the warm-up needs 3 rate samples, so frame 4 fires.
+        // gate); the guard needs 8 consecutive hot samples.
         let a = solid(w, h, [10, 20, 30, 255]);
         enc.encode(&vf(w, h, &a)).unwrap();
-        for i in 0..5 {
+        for i in 0..12 {
             std::thread::sleep(Duration::from_millis(2));
             let b = solid(w, h, [200, 100 + i, 50, 255]);
             enc.encode(&vf(w, h, &b)).unwrap();
