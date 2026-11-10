@@ -31,9 +31,9 @@ use windows::Win32::Graphics::Direct3D11::{
 use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
 use windows::core::Interface;
 
+use crate::Result;
 use crate::error::CodecError;
 use crate::video::{EncodedPacket, VideoCodecType, VideoEncoder, VideoFrame};
-use crate::Result;
 
 type Ptr = *mut c_void;
 
@@ -398,7 +398,9 @@ fn create_device() -> Result<ID3D11Device> {
         .map_err(|e| CodecError::Backend(format!("CreateDXGIFactory1: {e}")))?;
     let mut adapters = Vec::new();
     for i in 0.. {
-        let Ok(adapter) = (unsafe { factory.EnumAdapters1(i) }) else { break };
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(i) }) else {
+            break;
+        };
         let desc = unsafe { adapter.GetDesc1() }
             .map_err(|e| CodecError::Backend(format!("adapter desc: {e}")))?;
         let end = desc
@@ -409,12 +411,15 @@ fn create_device() -> Result<ID3D11Device> {
         let name = String::from_utf16_lossy(&desc.Description[..end]);
         adapters.push((name, adapter));
     }
-    let pick: usize = std::env::var("NVENC_ADAPTER").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| {
-        adapters
-            .iter()
-            .position(|(name, _)| name.to_lowercase().contains("nvidia"))
-            .unwrap_or_else(|| adapters.len().saturating_sub(1))
-    });
+    let pick: usize = std::env::var("NVENC_ADAPTER")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| {
+            adapters
+                .iter()
+                .position(|(name, _)| name.to_lowercase().contains("nvidia"))
+                .unwrap_or_else(|| adapters.len().saturating_sub(1))
+        });
     let (name, adapter) = adapters
         .into_iter()
         .nth(pick)
@@ -699,7 +704,11 @@ impl VideoEncoder for NvencEncoder {
         let size = bs.bitstream_size_in_bytes as usize;
         let mut data = vec![0u8; size];
         unsafe {
-            ptr::copy_nonoverlapping(bs.bitstream_buffer_ptr.cast::<u8>(), data.as_mut_ptr(), size);
+            ptr::copy_nonoverlapping(
+                bs.bitstream_buffer_ptr.cast::<u8>(),
+                data.as_mut_ptr(),
+                size,
+            );
             let unlock_bitstream: BufferFn = api.fptr(FN_UNLOCK_BITSTREAM);
             unlock_bitstream(self.encoder, self.output);
         }

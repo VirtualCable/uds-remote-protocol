@@ -66,11 +66,10 @@ use server::audio::AudioSource;
 use server::pacer::{Pacer, PacerRate};
 use server::synthetic::SyntheticSource;
 use tokio::sync::{Mutex, mpsc};
-use transport::{
-    DirectListener, EncryptedDatagram, EncryptedStream, ReliableTransport, UdpTransport,
-    udp_offer,
-};
 use tracing::{debug, error, info, warn};
+use transport::{
+    DirectListener, EncryptedDatagram, EncryptedStream, ReliableTransport, UdpTransport, udp_offer,
+};
 
 #[allow(clippy::struct_excessive_bools)] // a CLI switch bag
 struct Args {
@@ -210,9 +209,8 @@ fn parse_args() -> Result<Args> {
             args.wallpaper_off = config.wallpaper_off;
             args.handoff = config.handoff;
             if !config.quality.is_empty() {
-                args.quality =
-                    server::config::QualityConfig::from_wire(&config.quality)
-                        .context("bad quality policy in the agent config frame")?;
+                args.quality = server::config::QualityConfig::from_wire(&config.quality)
+                    .context("bad quality policy in the agent config frame")?;
             }
             args.source = "dxgi".to_string();
             key_seen = true;
@@ -686,7 +684,9 @@ fn spawn_capture(
                     // properly); otherwise the failure is real — die.
                     #[cfg(all(windows, feature = "windows-capture"))]
                     if secure_grace_wait(&stop_thread) {
-                        info!("capture lost to a secure desktop; waiting out the transition ({e:#})");
+                        info!(
+                            "capture lost to a secure desktop; waiting out the transition ({e:#})"
+                        );
                         // The secure window can be SHORTER than the watcher
                         // poll (the auto-unlock chain raises and drops the
                         // credential UI in ~250 ms, §18.52), so the session
@@ -766,8 +766,7 @@ fn secure_grace_wait(stop: &Arc<AtomicBool>) -> bool {
         if stop.load(Ordering::Relaxed) {
             return false;
         }
-        if server::secure_helper::secure_desktop_active()
-            || server::secure_helper::console_locked()
+        if server::secure_helper::secure_desktop_active() || server::secure_helper::console_locked()
         {
             return true;
         }
@@ -845,10 +844,7 @@ async fn recv_secure(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<bool>>
 /// `CreateNamedPipeW` fails with `ERROR_ACCESS_DENIED` while the name is
 /// still open — and permanently killed the secure pipes after the first
 /// ~250 ms lock/unlock cycle).
-#[cfg_attr(
-    not(all(windows, feature = "windows-capture")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(all(windows, feature = "windows-capture")), allow(dead_code))]
 struct SecurePipes {
     /// Helper-frames receiver, parked here while the console capture owns
     /// `frame_rx`; taken on the secure-ON transition, parked back on OFF.
@@ -937,26 +933,22 @@ fn spawn_secure_pipes(session_id: u32, clock_start: Instant) -> Option<SecurePip
     #[cfg(all(windows, feature = "windows-capture"))]
     {
         use server::secure_pipe::win::PipeServer;
-        let frames = match PipeServer::create(
-            &server::secure_pipe::frames_pipe_name(session_id),
-            true,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("secure frames pipe: {e:#}");
-                return None;
-            }
-        };
-        let input_pipe = match PipeServer::create(
-            &server::secure_pipe::input_pipe_name(session_id),
-            false,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!("secure input pipe: {e:#}");
-                return None;
-            }
-        };
+        let frames =
+            match PipeServer::create(&server::secure_pipe::frames_pipe_name(session_id), true) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("secure frames pipe: {e:#}");
+                    return None;
+                }
+            };
+        let input_pipe =
+            match PipeServer::create(&server::secure_pipe::input_pipe_name(session_id), false) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("secure input pipe: {e:#}");
+                    return None;
+                }
+            };
         let (tx, rx) = mpsc::channel(2);
         std::thread::Builder::new()
             .name("secure-frames".into())
@@ -970,7 +962,10 @@ fn spawn_secure_pipes(session_id: u32, clock_start: Instant) -> Option<SecurePip
             .spawn(move || outbound_pipe_loop(input_pipe, slot, "secure input"))
             .map_err(|e| warn!("secure input thread: {e}"))
             .ok()?;
-        Some(SecurePipes { rx: Some(rx), input })
+        Some(SecurePipes {
+            rx: Some(rx),
+            input,
+        })
     }
     #[cfg(not(all(windows, feature = "windows-capture")))]
     {
@@ -1019,7 +1014,10 @@ fn secure_frames_main(
                     };
                     if !ready_sent {
                         if tx
-                            .blocking_send(CaptureMsg::Ready(Ok(ReadyInfo { width: w, height: h })))
+                            .blocking_send(CaptureMsg::Ready(Ok(ReadyInfo {
+                                width: w,
+                                height: h,
+                            })))
                             .is_err()
                         {
                             return;
@@ -1171,7 +1169,8 @@ fn spawn_audio(
                         let send_wait = send_start.elapsed();
                         if send_wait > Duration::from_millis(500) {
                             warn!(
-                                waited_ms = u64::try_from(send_wait.as_millis()).unwrap_or(u64::MAX),
+                                waited_ms =
+                                    u64::try_from(send_wait.as_millis()).unwrap_or(u64::MAX),
                                 "audio→session queue congested (session loop wedged?)"
                             );
                         }
@@ -1207,39 +1206,35 @@ fn create_audio_source(kind: &str, preset: &AudioPreset) -> Option<Box<dyn Audio
         )) as Box<dyn AudioSource>
     };
     #[cfg(all(windows, feature = "windows-capture"))]
-    let wasapi = |explicit: bool| {
-        match server::audio_wasapi::WasapiLoopbackSource::new(
-            preset.sample_rate,
-            preset.channels,
-            preset.frame_samples(),
-        ) {
-            Ok(s) => Some(Box::new(s) as Box<dyn AudioSource>),
-            Err(e) => {
-                if explicit {
-                    error!("WASAPI loopback init failed; audio disabled: {e:#}");
-                } else {
-                    warn!("WASAPI loopback unavailable ({e:#}); falling back to synthetic audio");
-                }
-                None
+    let wasapi = |explicit: bool| match server::audio_wasapi::WasapiLoopbackSource::new(
+        preset.sample_rate,
+        preset.channels,
+        preset.frame_samples(),
+    ) {
+        Ok(s) => Some(Box::new(s) as Box<dyn AudioSource>),
+        Err(e) => {
+            if explicit {
+                error!("WASAPI loopback init failed; audio disabled: {e:#}");
+            } else {
+                warn!("WASAPI loopback unavailable ({e:#}); falling back to synthetic audio");
             }
+            None
         }
     };
     #[cfg(all(windows, feature = "windows-capture"))]
-    let uds_loopback = |explicit: bool| {
-        match server::audio_uds::UdsLoopbackSource::new(
-            preset.sample_rate,
-            preset.channels,
-            preset.frame_samples(),
-        ) {
-            Ok(s) => Some(Box::new(s) as Box<dyn AudioSource>),
-            Err(e) => {
-                if explicit {
-                    error!("UDS driver loopback init failed; audio disabled: {e:#}");
-                } else {
-                    info!("UDS driver loopback unavailable ({e:#}); trying WASAPI");
-                }
-                None
+    let uds_loopback = |explicit: bool| match server::audio_uds::UdsLoopbackSource::new(
+        preset.sample_rate,
+        preset.channels,
+        preset.frame_samples(),
+    ) {
+        Ok(s) => Some(Box::new(s) as Box<dyn AudioSource>),
+        Err(e) => {
+            if explicit {
+                error!("UDS driver loopback init failed; audio disabled: {e:#}");
+            } else {
+                info!("UDS driver loopback unavailable ({e:#}); trying WASAPI");
             }
+            None
         }
     };
     match kind {
@@ -1250,7 +1245,9 @@ fn create_audio_source(kind: &str, preset: &AudioPreset) -> Option<Box<dyn Audio
         "wasapi" => wasapi(true),
         #[cfg(not(all(windows, feature = "windows-capture")))]
         "wasapi" => {
-            error!("--audio-source wasapi needs Windows with the windows-capture feature; audio disabled");
+            error!(
+                "--audio-source wasapi needs Windows with the windows-capture feature; audio disabled"
+            );
             None
         }
         "auto" => {
@@ -1336,9 +1333,10 @@ fn handle_metrics(
         // Economy mode (§18.70): utilization against the budget (the EMA is
         // tracked against the ceiling; rescale). Over budget reads as
         // congestion evidence even on a perfect network.
-        let budget_util = controller.policy().budget_kbps.map(|budget| {
-            ctl.util_ema * f64::from(ctl.video_ceiling_kbps) / f64::from(budget)
-        });
+        let budget_util = controller
+            .policy()
+            .budget_kbps
+            .map(|budget| ctl.util_ema * f64::from(ctl.video_ceiling_kbps) / f64::from(budget));
         let net_event = controller.update(
             now,
             protocol::Sample {
@@ -1408,8 +1406,13 @@ fn handle_metrics(
 /// bitrate/audio targets only on network-axis changes (`network` flag);
 /// fps ceiling and content knobs always.
 fn apply_targets(ctl: &mut ControlState, enc: &EncoderHandle, network: bool) {
-    let Some(controller) = &ctl.quality else { return };
-    let content_level = ctl.pressure.as_ref().map_or(0, protocol::PressureController::level);
+    let Some(controller) = &ctl.quality else {
+        return;
+    };
+    let content_level = ctl
+        .pressure
+        .as_ref()
+        .map_or(0, protocol::PressureController::level);
     let t = protocol::resolve_targets(
         controller.level(),
         content_level,
@@ -1478,11 +1481,8 @@ async fn answer_probes(
         let dgram_bytes = match pending.take() {
             Some(d) => d,
             None => {
-                match tokio::time::timeout(
-                    Duration::from_millis(100),
-                    dgram.recv_into(&mut buf),
-                )
-                .await
+                match tokio::time::timeout(Duration::from_millis(100), dgram.recv_into(&mut buf))
+                    .await
                 {
                     Ok(Ok((channel::CONTROL, n))) => buf[..n].to_vec(),
                     // No more probes (or display traffic already flowing).
@@ -1573,8 +1573,7 @@ fn process_cpu_ms() -> Option<f64> {
     let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
     let after_paren = stat.rsplit(')').next()?;
     let fields: Vec<&str> = after_paren.split_whitespace().collect();
-    let ticks = fields.get(11)?.parse::<f64>().ok()?
-        + fields.get(12)?.parse::<f64>().ok()?;
+    let ticks = fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;
     Some(ticks * 10.0) // USER_HZ=100 → 10 ms per tick
 }
 
@@ -1583,7 +1582,6 @@ fn process_cpu_ms() -> Option<f64> {
 fn process_cpu_ms() -> Option<f64> {
     None
 }
-
 
 impl FrameStats {
     fn new(queue_free: usize, csv_path: Option<&std::path::Path>) -> Self {
@@ -1660,7 +1658,10 @@ impl FrameStats {
         let (net_level, content_level, vkbps, akbps) = ctl.quality.as_ref().map_or_else(
             || (String::new(), String::new(), String::new(), String::new()),
             |controller| {
-                let clevel = ctl.pressure.as_ref().map_or(0, protocol::PressureController::level);
+                let clevel = ctl
+                    .pressure
+                    .as_ref()
+                    .map_or(0, protocol::PressureController::level);
                 let t = protocol::resolve_targets(
                     controller.level(),
                     clevel,
@@ -1888,7 +1889,10 @@ async fn handle_encoded<T: ReliableTransport>(
         // over a busy link): skip it whole and force a keyframe on the next
         // one (the client's loss recovery would ask for it anyway).
         stats.dropped_whole += 1;
-        warn!(frame_id, "paced queue congested; whole frame dropped, keyframe forced");
+        warn!(
+            frame_id,
+            "paced queue congested; whole frame dropped, keyframe forced"
+        );
         enc.send(EncoderCmd::RequestKeyframe);
         return Ok(frame_id);
     }
@@ -2125,7 +2129,10 @@ async fn start_webcam<T: ReliableTransport>(
 ) {
     let (max_width, max_height, max_fps, codecs) = caps;
     let Some(_) = cam else {
-        info!(max_width, max_height, max_fps, "webcam caps ignored: no cam sink configured");
+        info!(
+            max_width,
+            max_height, max_fps, "webcam caps ignored: no cam sink configured"
+        );
         return;
     };
     let vp9 = codec::VideoCodecType::Vp9.wire_id();
@@ -2215,9 +2222,9 @@ async fn serve_stream<T: ReliableTransport>(
     // final geometry; the guard restores the original mode on session end.
     let mut display_mode = server::display_mode::DisplayModeGuard::new();
     {
-        let preferred = stream
-            .peer_hello()
-            .map_or((0, 0), |h| (u32::from(h.pref_width), u32::from(h.pref_height)));
+        let preferred = stream.peer_hello().map_or((0, 0), |h| {
+            (u32::from(h.pref_width), u32::from(h.pref_height))
+        });
         let policy = server::display_mode::ResolutionPolicy {
             fixed: args.fixed_resolution,
             preferred,
@@ -2263,12 +2270,20 @@ async fn serve_stream<T: ReliableTransport>(
             let (sink, src) = dgram.into_split();
             let sink = Arc::new(Mutex::new(sink));
             let (tx, rx) = mpsc::channel::<Vec<u8>>(DISPLAY_QUEUE_DGRAMS);
-            tokio::spawn(display_sender(rx, Arc::clone(&sink), Pacer::new(pacer_rate.clone())));
+            tokio::spawn(display_sender(
+                rx,
+                Arc::clone(&sink),
+                Pacer::new(pacer_rate.clone()),
+            ));
             (Some(sink), Some(src), Some(tx))
         }
         None => (None, None, None),
     };
-    let mut legs = Legs { udp: udp_sink, stream: Box::new(stream), frag_tx };
+    let mut legs = Legs {
+        udp: udp_sink,
+        stream: Box::new(stream),
+        frag_tx,
+    };
 
     let fps_shared = Arc::new(AtomicU32::new(args.fps.max(1)));
     let mut frame_rx: Option<mpsc::Receiver<CaptureMsg>> = None;
@@ -2493,7 +2508,9 @@ async fn serve_stream<T: ReliableTransport>(
         last_metrics: None,
         resize_request: None,
         secure_input: if starts_secure {
-            secure_pipes.as_ref().map(|p| std::sync::Arc::clone(&p.input))
+            secure_pipes
+                .as_ref()
+                .map(|p| std::sync::Arc::clone(&p.input))
         } else {
             None
         },
@@ -2522,7 +2539,9 @@ async fn serve_stream<T: ReliableTransport>(
     let mut bad_modes: Vec<(u32, u32)> = Vec::new();
     // Seeded in the past so the very first frame goes out as a keyframe even
     // if the encoder's first frame was not one for some reason.
-    let mut last_keyframe = Instant::now().checked_sub(KEYFRAME_SAFETY_INTERVAL).unwrap_or_else(Instant::now);
+    let mut last_keyframe = Instant::now()
+        .checked_sub(KEYFRAME_SAFETY_INTERVAL)
+        .unwrap_or_else(Instant::now);
     // Liveness (§18.39): the handshake itself was client traffic.
     let mut last_recv = Instant::now();
     let mut liveness_tick = tokio::time::interval(Duration::from_secs(1));
@@ -3058,6 +3077,7 @@ async fn send_cursor_update<T: ReliableTransport>(
             hot_x: shape.hot_x,
             hot_y: shape.hot_y,
             pixels: shape.rgba.clone(),
+            xor_mask: shape.xor_mask.clone(),
         }
         .encode();
         // A giant cursor must not kill the session: stream records cap at
@@ -3155,13 +3175,17 @@ impl ControlState {
     /// target, lowered by the adaptive-fps controller when the encoder
     /// itself is the bottleneck (§12.7).
     fn effective_fps(&self) -> u32 {
-        let adaptive = self.fps_adapter.as_ref().map_or(u32::MAX, server::fps::FpsAdapter::fps);
+        let adaptive = self
+            .fps_adapter
+            .as_ref()
+            .map_or(u32::MAX, server::fps::FpsAdapter::fps);
         self.quality_fps.min(adaptive).max(1)
     }
 
     /// Pushes the effective fps to the capture thread.
     fn apply_fps(&self) {
-        self.fps_shared.store(self.effective_fps(), Ordering::Relaxed);
+        self.fps_shared
+            .store(self.effective_fps(), Ordering::Relaxed);
     }
 
     /// Feeds one frame's encode time into the adaptive-fps controller;
@@ -3185,19 +3209,15 @@ impl ControlState {
 
 /// Handles one packet from the reliable stream: input events (§10) and
 /// control messages (§12).
-fn handle_stream_packet(
-    ctl: &mut ControlState,
-    enc: &EncoderHandle,
-    ch: u16,
-    buf: &[u8],
-) {
+fn handle_stream_packet(ctl: &mut ControlState, enc: &EncoderHandle, ch: u16, buf: &[u8]) {
     if ch == channel::INPUT {
         // Secure mode (§18.41): forward the raw wire message to the helper
         // on the Winlogon desktop; it sanitizes and injects there.
         if let Some(pipe) = &ctl.secure_input {
             let mut slot = pipe.lock().expect("secure input pipe");
             if let Some(f) = slot.as_mut()
-                && let Err(e) = server::secure_pipe::write_msg(f, server::secure_pipe::TAG_INPUT, buf)
+                && let Err(e) =
+                    server::secure_pipe::write_msg(f, server::secure_pipe::TAG_INPUT, buf)
             {
                 warn!("secure input pipe write failed; dropping helper input: {e}");
                 *slot = None;
@@ -3210,7 +3230,10 @@ fn handle_stream_packet(
             // Diagnose Win+L delivery: the injector process keeps no log, so
             // the agent logs LWin on its behalf (§18.50).
             if buf.len() == 4 && buf[0] == 1 && buf[1] & 2 != 0 && buf[2..4] == [0, 0x5B] {
-                info!(down = buf[1] & 1 != 0, "LWin forwarded to the SYSTEM injector");
+                info!(
+                    down = buf[1] & 1 != 0,
+                    "LWin forwarded to the SYSTEM injector"
+                );
             }
             let mut slot = pipe.lock().expect("injector input pipe");
             if slot.is_some() {
@@ -3236,11 +3259,18 @@ fn handle_stream_packet(
         return;
     }
     match ControlMessage::decode(buf) {
-        Ok(ControlMessage::MetricsReport { rtt_micros, jitter_micros, loss_permille }) => {
+        Ok(ControlMessage::MetricsReport {
+            rtt_micros,
+            jitter_micros,
+            loss_permille,
+        }) => {
             handle_metrics(ctl, enc, rtt_micros, jitter_micros, loss_permille);
         }
         Ok(ControlMessage::RequestKeyframe { display_id }) => {
-            if ctl.last_keyframe_req.is_none_or(|t| t.elapsed() >= Duration::from_millis(500)) {
+            if ctl
+                .last_keyframe_req
+                .is_none_or(|t| t.elapsed() >= Duration::from_millis(500))
+            {
                 info!(display_id, "keyframe requested by client (frame loss)");
                 enc.send(EncoderCmd::RequestKeyframe);
                 ctl.last_keyframe_req = Some(Instant::now());
@@ -3255,7 +3285,10 @@ fn handle_stream_packet(
                 // Server-side policy is mandatory: the client cannot enable
                 // locking on its own.
                 info!("lock request rejected by server policy (allow_lock off)");
-            } else if ctl.last_lock_req.is_none_or(|t| t.elapsed() >= Duration::from_secs(3)) {
+            } else if ctl
+                .last_lock_req
+                .is_none_or(|t| t.elapsed() >= Duration::from_secs(3))
+            {
                 // Rate-limit (§18.52.4): each lock triggers a full
                 // lock → SAS → credential-provider → unlock cycle plus a DXGI
                 // rebuild; a burst of them kills the session.
@@ -3266,8 +3299,19 @@ fn handle_stream_packet(
                 debug!("lock request throttled (cycle still settling)");
             }
         }
-        Ok(ControlMessage::WebcamCaps { max_width, max_height, max_fps, codecs }) => {
-            info!(max_width, max_height, max_fps, ?codecs, "client webcam capabilities");
+        Ok(ControlMessage::WebcamCaps {
+            max_width,
+            max_height,
+            max_fps,
+            codecs,
+        }) => {
+            info!(
+                max_width,
+                max_height,
+                max_fps,
+                ?codecs,
+                "client webcam capabilities"
+            );
             ctl.cam_caps = Some((max_width, max_height, max_fps, codecs));
         }
         Ok(_) => {} // other control messages: not handled here yet
@@ -3371,9 +3415,7 @@ impl ServerEncoder {
     /// No-op for plain encoders.
     fn force_video_regime(&mut self, on: bool) {
         #[cfg(feature = "ladder")]
-        if on
-            && let Self::Ladder(e) = self
-        {
+        if on && let Self::Ladder(e) = self {
             e.force_level(codec::Level::High);
         }
         #[cfg(not(feature = "ladder"))]
@@ -3542,7 +3584,10 @@ fn spawn_encoder_thread(
                         let encode_micros =
                             u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
                         if encode_micros > 500_000 {
-                            warn!(encode_ms = encode_micros / 1000, "encode slow (encoder wedged?)");
+                            warn!(
+                                encode_ms = encode_micros / 1000,
+                                "encode slow (encoder wedged?)"
+                            );
                         }
                         let out = EncoderOutput {
                             packet,
@@ -3563,7 +3608,10 @@ fn spawn_encoder_thread(
                             warn!("set_bitrate failed: {e}");
                         }
                     }
-                    EncoderCmd::SetContentKnobs { jpeg_quality, vp9_speed } => {
+                    EncoderCmd::SetContentKnobs {
+                        jpeg_quality,
+                        vp9_speed,
+                    } => {
                         encoder.set_content_knobs(jpeg_quality, vp9_speed);
                     }
                     EncoderCmd::ForceVideoRegime(on) => encoder.force_video_regime(on),
@@ -3654,7 +3702,9 @@ fn video_ceiling_kbps(args: &Args, width: u32, height: u32) -> u32 {
     let px = f64::from(width) * f64::from(height);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // clamped below
     {
-        (2000.0 * (px / BASE_PX).sqrt()).round().clamp(1000.0, 16_000.0) as u32
+        (2000.0 * (px / BASE_PX).sqrt())
+            .round()
+            .clamp(1000.0, 16_000.0) as u32
     }
 }
 
@@ -3669,7 +3719,10 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
         let kbps = video_ceiling_kbps(args, width, height);
         let knobs = ladder_knobs(&args.ladder)?;
         anyhow::ensure!(
-            matches!(args.encoder.as_str(), "" | "auto" | "mf" | "software" | "nvenc"),
+            matches!(
+                args.encoder.as_str(),
+                "" | "auto" | "mf" | "software" | "nvenc"
+            ),
             "bad encoder backend {:?} (auto|mf|software|nvenc)",
             args.encoder
         );
@@ -3690,7 +3743,10 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
         if matches!(args.encoder.as_str(), "" | "auto" | "nvenc") && client_h264 {
             match codec::NvencEncoder::new(width, height, 30, kbps) {
                 Ok(encoder) => {
-                    info!(width, height, kbps, "h264 via NVENC ready (no ladder: hardware leg)");
+                    info!(
+                        width,
+                        height, kbps, "h264 via NVENC ready (no ladder: hardware leg)"
+                    );
                     return Ok(ServerEncoder::Simple(Box::new(encoder)));
                 }
                 Err(err) => {
@@ -3706,10 +3762,21 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
         // warning.
         #[cfg(all(windows, feature = "codec-mf"))]
         if matches!(args.encoder.as_str(), "" | "auto" | "mf") {
-            match codec::LadderEncoder::with_mf_vp9(width, height, knobs.policy.clone(), kbps, 80, true)
-            {
+            match codec::LadderEncoder::with_mf_vp9(
+                width,
+                height,
+                knobs.policy.clone(),
+                kbps,
+                80,
+                true,
+            ) {
                 Ok(encoder) => {
-                    info!(width, height, kbps, "codec ladder ready (rects-jpeg <-> vp9 via Media Foundation)");
+                    info!(
+                        width,
+                        height,
+                        kbps,
+                        "codec ladder ready (rects-jpeg <-> vp9 via Media Foundation)"
+                    );
                     return Ok(ServerEncoder::Ladder(Box::new(encoder)));
                 }
                 Err(err) => {

@@ -44,8 +44,11 @@ pub trait ConnectionProvider: Send + Sync {
     /// auditing/routing decisions.
     ///
     /// Any error rejects the connection before the handshake keys exist.
-    async fn start(&self, ticket: &[u8; protocol::TICKET_LENGTH], client_ip: &str)
-    -> Result<SessionGrant>;
+    async fn start(
+        &self,
+        ticket: &[u8; protocol::TICKET_LENGTH],
+        client_ip: &str,
+    ) -> Result<SessionGrant>;
 
     /// Notifies that the session ended (duration + traffic counters).
     /// Best-effort by default: standalone has nothing to notify.

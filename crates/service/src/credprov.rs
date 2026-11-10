@@ -62,7 +62,10 @@ const POLL: Duration = Duration::from_millis(500);
 /// active auto-logon credentials: pre-filled in standalone mode (taking
 /// precedence over the lab credentials file), filled per session by the
 /// listener in broker (pq) mode, and cleared when that session ends.
-pub fn spawn(stop: &'static AtomicBool, creds_slot: std::sync::Arc<std::sync::Mutex<Option<Credentials>>>) {
+pub fn spawn(
+    stop: &'static AtomicBool,
+    creds_slot: std::sync::Arc<std::sync::Mutex<Option<Credentials>>>,
+) {
     std::thread::Builder::new()
         .name("credprov-pipe".into())
         .spawn(move || pipe_loop(stop, creds_slot))
@@ -180,8 +183,7 @@ fn load_credentials() -> Result<Option<Credentials>> {
         Err(err) => return Err(err).context("read failed"),
     };
     let mut lines = text.lines();
-    let (Some(user), Some(domain), Some(password)) =
-        (lines.next(), lines.next(), lines.next())
+    let (Some(user), Some(domain), Some(password)) = (lines.next(), lines.next(), lines.next())
     else {
         bail!("expected 3 lines (username, domain, password)");
     };
@@ -240,9 +242,13 @@ fn pipe_security() -> Result<PipeSecurity> {
         )
         .ok()
         .context("InitializeSecurityDescriptor failed")?;
-        InitializeAcl(acl.as_mut_ptr().cast::<ACL>(), acl.len() as u32, ACL_REVISION)
-            .ok()
-            .context("InitializeAcl failed")?;
+        InitializeAcl(
+            acl.as_mut_ptr().cast::<ACL>(),
+            acl.len() as u32,
+            ACL_REVISION,
+        )
+        .ok()
+        .context("InitializeAcl failed")?;
         AddAccessAllowedAce(
             acl.as_mut_ptr().cast::<ACL>(),
             ACL_REVISION,
@@ -352,7 +358,11 @@ impl Pipe {
 
     /// Waits for the pending overlapped operation up to `timeout`.
     /// `Ok(None)` means the timeout expired (the operation stays pending).
-    fn wait_overlapped(&self, overlapped: &mut OVERLAPPED, timeout: Duration) -> Result<Option<u32>> {
+    fn wait_overlapped(
+        &self,
+        overlapped: &mut OVERLAPPED,
+        timeout: Duration,
+    ) -> Result<Option<u32>> {
         let millis = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
         let wait = unsafe { WaitForSingleObject(self.event, millis) };
         if wait == WAIT_TIMEOUT {
@@ -406,7 +416,8 @@ impl Pipe {
                 return Ok(None);
             }
             let mut overlapped = self.overlapped();
-            let result = unsafe { ReadFile(self.handle, Some(&mut buf), None, Some(&mut overlapped)) };
+            let result =
+                unsafe { ReadFile(self.handle, Some(&mut buf), None, Some(&mut overlapped)) };
             let read = match result {
                 Ok(()) => {
                     let mut transferred = 0u32;

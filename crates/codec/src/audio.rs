@@ -270,9 +270,15 @@ mod tests {
     #[test]
     fn named_presets_match_their_documented_shape() {
         let voice = AudioPreset::by_name("opus-voice").unwrap();
-        assert_eq!((voice.channels, voice.bitrate_kbps, voice.fec), (1, 32, true));
+        assert_eq!(
+            (voice.channels, voice.bitrate_kbps, voice.fec),
+            (1, 32, true)
+        );
         let lowbw = AudioPreset::by_name("opus-lowbw").unwrap();
-        assert_eq!((lowbw.channels, lowbw.bitrate_kbps, lowbw.fec), (2, 24, true));
+        assert_eq!(
+            (lowbw.channels, lowbw.bitrate_kbps, lowbw.fec),
+            (2, 24, true)
+        );
     }
 
     #[test]

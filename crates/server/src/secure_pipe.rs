@@ -88,8 +88,7 @@ pub fn read_msg(r: &mut impl Read) -> std::io::Result<Option<(u8, Vec<u8>)>> {
     match r.read_exact(&mut len_buf) {
         Ok(()) => {}
         Err(e)
-            if e.kind() == std::io::ErrorKind::UnexpectedEof
-                || e.raw_os_error() == Some(109) =>
+            if e.kind() == std::io::ErrorKind::UnexpectedEof || e.raw_os_error() == Some(109) =>
         {
             // 109 = ERROR_BROKEN_PIPE: the peer closed between messages.
             return Ok(None);
@@ -98,7 +97,9 @@ pub fn read_msg(r: &mut impl Read) -> std::io::Result<Option<(u8, Vec<u8>)>> {
     }
     let len = u32::from_le_bytes(len_buf) as usize;
     if len == 0 || len > 32 * 1024 * 1024 {
-        return Err(std::io::Error::other(format!("bad pipe message length {len}")));
+        return Err(std::io::Error::other(format!(
+            "bad pipe message length {len}"
+        )));
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
@@ -124,7 +125,10 @@ pub fn decode_frame(payload: &[u8]) -> Result<(u32, u32, &[u8])> {
     let height = u32::from_le_bytes(payload[4..8].try_into().expect("4 bytes"));
     let pixels = &payload[8..];
     let expected = width as usize * height as usize * 4;
-    anyhow::ensure!(pixels.len() == expected, "frame size mismatch: {expected} expected");
+    anyhow::ensure!(
+        pixels.len() == expected,
+        "frame size mismatch: {expected} expected"
+    );
     Ok((width, height, pixels))
 }
 
@@ -199,7 +203,11 @@ pub mod win {
         pub fn create(name: &str, inbound: bool) -> Result<Self> {
             let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
             let security = pipe_security()?;
-            let access = if inbound { PIPE_ACCESS_INBOUND } else { PIPE_ACCESS_OUTBOUND };
+            let access = if inbound {
+                PIPE_ACCESS_INBOUND
+            } else {
+                PIPE_ACCESS_OUTBOUND
+            };
             // SAFETY: `wide` is NUL-terminated; `security` points to a valid
             // descriptor that outlives the pipe (leaked on purpose).
             let handle = unsafe {
@@ -215,7 +223,10 @@ pub mod win {
                 )
             };
             if handle.is_invalid() {
-                bail!("CreateNamedPipeW({name}): {:?}", windows::core::Error::from_thread());
+                bail!(
+                    "CreateNamedPipeW({name}): {:?}",
+                    windows::core::Error::from_thread()
+                );
             }
             Ok(Self { handle })
         }
@@ -296,7 +307,11 @@ pub mod win {
     /// server end is not up yet.
     pub fn connect_pipe(name: &str, timeout: Duration, write: bool) -> Result<std::fs::File> {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        let access = if write { FILE_GENERIC_WRITE } else { FILE_GENERIC_READ };
+        let access = if write {
+            FILE_GENERIC_WRITE
+        } else {
+            FILE_GENERIC_READ
+        };
         let deadline = Instant::now() + timeout;
         loop {
             // SAFETY: `wide` is NUL-terminated; no template handle.

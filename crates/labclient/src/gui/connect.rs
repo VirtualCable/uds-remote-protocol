@@ -213,8 +213,7 @@ mod tests {
             dialog.handle_named(&Key::Named(NamedKey::Tab)),
             DialogAction::Nothing
         );
-        let DialogAction::Connect(done) = dialog.handle_named(&Key::Named(NamedKey::Enter))
-        else {
+        let DialogAction::Connect(done) = dialog.handle_named(&Key::Named(NamedKey::Enter)) else {
             panic!("expected a completed form");
         };
         assert_eq!(done.addr, "host:1");

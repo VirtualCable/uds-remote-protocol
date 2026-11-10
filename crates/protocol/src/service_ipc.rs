@@ -295,8 +295,18 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         }
         _ => return Err(DecodeError::BadLength),
     };
-    let [bind, output_name, preset, ladder, fps_adapt, stats_csv, cam_sink, mic_sink, quality, encoder] =
-        strings;
+    let [
+        bind,
+        output_name,
+        preset,
+        ladder,
+        fps_adapt,
+        stats_csv,
+        cam_sink,
+        mic_sink,
+        quality,
+        encoder,
+    ] = strings;
     Ok(AgentConfig {
         key,
         ticket,
@@ -399,14 +409,20 @@ mod tests {
     fn rejects_truncation() {
         let frame = encode_agent_config(&sample());
         assert_eq!(decode_agent_config(&[]), Err(DecodeError::Truncated));
-        assert_eq!(decode_agent_config(&frame[..HEADER_LEN - 1]), Err(DecodeError::Truncated));
+        assert_eq!(
+            decode_agent_config(&frame[..HEADER_LEN - 1]),
+            Err(DecodeError::Truncated)
+        );
     }
 
     #[test]
     fn rejects_version_mismatch() {
         let mut frame = encode_agent_config(&sample());
         frame[0] = AGENT_CONFIG_VERSION + 1;
-        assert_eq!(decode_agent_config(&frame), Err(DecodeError::VersionMismatch));
+        assert_eq!(
+            decode_agent_config(&frame),
+            Err(DecodeError::VersionMismatch)
+        );
     }
 
     #[test]

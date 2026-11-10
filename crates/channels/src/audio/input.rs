@@ -29,7 +29,9 @@ pub use client::integrations::mic::{MicFactory, MicSource};
 /// Without the `audio` feature there is no capture device (always `None`).
 #[cfg(feature = "audio")]
 pub fn default_mic_factory() -> MicFactory {
-    Box::new(|frame_samples| CpalMicSource::new(frame_samples).map(|s| Box::new(s) as Box<dyn MicSource>))
+    Box::new(|frame_samples| {
+        CpalMicSource::new(frame_samples).map(|s| Box::new(s) as Box<dyn MicSource>)
+    })
 }
 
 /// cpal input-device source: the default input device through the DSP
@@ -124,7 +126,10 @@ impl MicSource for CpalMicSource {
         let missing = {
             // A poisoned ring degrades to silence, never a panic on the
             // audio path.
-            let mut ring = self.ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ring = self
+                .ring
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             ring.fill(out)
         };
         if missing > 0 {
@@ -170,7 +175,9 @@ where
                 bytes.extend_from_slice(&s.to_sample::<f32>().to_le_bytes());
             }
             let frames = data.len() / channels.max(1);
-            let mut ring = ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ring = ring
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pipeline.push_packet(&bytes, frames, false, &mut ring);
         },
         // Device errors can fire once per period on a misbehaving driver;

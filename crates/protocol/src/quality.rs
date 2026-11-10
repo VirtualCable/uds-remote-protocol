@@ -200,14 +200,16 @@ pub fn default_levels() -> Vec<LevelSpec> {
         .iter()
         .zip([80, 75, 70, 65, 60, 55, 50])
         .zip([30, 30, 20, 12, 8, 5, 4])
-        .map(|((&(vfactor, fps, afactor), jpeg_quality), kf_secs)| LevelSpec {
-            video_factor: vfactor,
-            fps,
-            audio_factor: afactor,
-            jpeg_quality,
-            vp9_speed: 8,
-            kf_secs,
-        })
+        .map(
+            |((&(vfactor, fps, afactor), jpeg_quality), kf_secs)| LevelSpec {
+                video_factor: vfactor,
+                fps,
+                audio_factor: afactor,
+                jpeg_quality,
+                vp9_speed: 8,
+                kf_secs,
+            },
+        )
         .collect()
 }
 
@@ -226,13 +228,13 @@ pub struct QualityEvent {
 /// The level ladder: `(video_bitrate_factor, fps, audio_bitrate_factor)`.
 /// Factors apply to the negotiated ceilings, clamped to the policy floors.
 const LADDER: [(f64, u32, f64); 7] = [
-    (1.00, 30, 1.0),     // N0 full
-    (0.50, 30, 0.75),    // N1 video 50 %, audio 75 %
-    (0.25, 30, 0.625),   // N2 video 25 % (+ force VP9), audio 62.5 %
-    (0.25, 20, 0.5),     // N3 20 fps, audio 50 %
-    (0.25, 15, 0.375),   // N4 15 fps, audio 37.5 %
-    (0.10, 15, 0.25),    // N5 near the floors
-    (0.10, 10, 0.1875),  // N6 degraded (reduced resolution, §12.3 last resort)
+    (1.00, 30, 1.0),    // N0 full
+    (0.50, 30, 0.75),   // N1 video 50 %, audio 75 %
+    (0.25, 30, 0.625),  // N2 video 25 % (+ force VP9), audio 62.5 %
+    (0.25, 20, 0.5),    // N3 20 fps, audio 50 %
+    (0.25, 15, 0.375),  // N4 15 fps, audio 37.5 %
+    (0.10, 15, 0.25),   // N5 near the floors
+    (0.10, 10, 0.1875), // N6 degraded (reduced resolution, §12.3 last resort)
 ];
 
 /// Loss rate above which in-band FEC is switched on (§12.5).
@@ -317,8 +319,18 @@ pub fn resolve_targets(
     audio_ceiling_kbps: u32,
     policy: &QualityPolicy,
 ) -> QualityTargets {
-    let net = targets(network_level, video_ceiling_kbps, audio_ceiling_kbps, policy);
-    let content = targets(content_level, video_ceiling_kbps, audio_ceiling_kbps, policy);
+    let net = targets(
+        network_level,
+        video_ceiling_kbps,
+        audio_ceiling_kbps,
+        policy,
+    );
+    let content = targets(
+        content_level,
+        video_ceiling_kbps,
+        audio_ceiling_kbps,
+        policy,
+    );
     QualityTargets {
         fps: net.fps.min(content.fps).max(policy.min_fps_guaranteed),
         jpeg_quality: content.jpeg_quality,
@@ -397,7 +409,11 @@ impl PressurePolicy {
         // loaded encoder on a healthy network could never read as pressure.
         let wsum = self.weight_change
             + self.weight_cpu
-            + if s.congested { self.weight_bandwidth } else { 0.0 };
+            + if s.congested {
+                self.weight_bandwidth
+            } else {
+                0.0
+            };
         if wsum <= f64::EPSILON {
             return 0.0;
         }
@@ -529,7 +545,11 @@ impl SampleVerdict {
         if self.budget_bad {
             out.push("budget");
         }
-        if out.is_empty() { "-".to_string() } else { out.join(",") }
+        if out.is_empty() {
+            "-".to_string()
+        } else {
+            out.join(",")
+        }
     }
 }
 
@@ -629,11 +649,7 @@ impl QualityController {
         self.rtt_max_observed = self.rtt_max_observed.max(rtt_micros);
         self.rtt_window.push_back((now, rtt_micros));
         let cutoff = now.checked_sub(self.policy.baseline_window).unwrap_or(now);
-        while self
-            .rtt_window
-            .front()
-            .is_some_and(|(t, _)| *t < cutoff)
-        {
+        while self.rtt_window.front().is_some_and(|(t, _)| *t < cutoff) {
             self.rtt_window.pop_front();
         }
         let window_min = self
@@ -745,11 +761,21 @@ mod tests {
     }
 
     fn good() -> Sample {
-        Sample { rtt_micros: 10_000, jitter_micros: 1_000, loss: 0.0, budget_util: None }
+        Sample {
+            rtt_micros: 10_000,
+            jitter_micros: 1_000,
+            loss: 0.0,
+            budget_util: None,
+        }
     }
 
     fn bad_rtt() -> Sample {
-        Sample { rtt_micros: 20_000, jitter_micros: 1_000, loss: 0.0, budget_util: None }
+        Sample {
+            rtt_micros: 20_000,
+            jitter_micros: 1_000,
+            loss: 0.0,
+            budget_util: None,
+        }
     }
 
     fn t0() -> Instant {
@@ -773,7 +799,11 @@ mod tests {
         let ev = c.update(t0() + Duration::from_secs(2), bad_rtt());
         assert_eq!(
             ev,
-            Some(QualityEvent { level: 1, degraded: true, force_video_codec: false })
+            Some(QualityEvent {
+                level: 1,
+                degraded: true,
+                force_video_codec: false
+            })
         );
     }
 
@@ -789,7 +819,10 @@ mod tests {
     #[test]
     fn loss_alone_is_a_bad_signal() {
         let mut c = QualityController::new(policy());
-        let lossy = Sample { loss: 0.05, ..good() };
+        let lossy = Sample {
+            loss: 0.05,
+            ..good()
+        };
         c.update(t0(), lossy);
         let ev = c.update(t0() + Duration::from_secs(1), lossy);
         assert!(ev.is_some_and(|e| e.degraded));
@@ -798,7 +831,10 @@ mod tests {
     #[test]
     fn jitter_alone_is_a_bad_signal() {
         let mut c = QualityController::new(policy());
-        let jumpy = Sample { jitter_micros: 40_000, ..good() };
+        let jumpy = Sample {
+            jitter_micros: 40_000,
+            ..good()
+        };
         c.update(t0(), jumpy);
         assert!(c.update(t0() + Duration::from_secs(1), jumpy).is_some());
     }
@@ -820,7 +856,14 @@ mod tests {
             raised = c.update(now, good());
             now += Duration::from_secs(1);
         }
-        assert_eq!(raised, Some(QualityEvent { level: 1, degraded: false, force_video_codec: false }));
+        assert_eq!(
+            raised,
+            Some(QualityEvent {
+                level: 1,
+                degraded: false,
+                force_video_codec: false
+            })
+        );
 
         // Cooldown: 3 more good samples right away must NOT raise again.
         for _ in 0..3 {
@@ -881,19 +924,37 @@ mod tests {
     fn baseline_is_window_min_and_relaxes_when_the_link_breathes() {
         let mut c = QualityController::new(policy());
         // Session starts on an already congested link: RTT 100 ms.
-        let congested = Sample { rtt_micros: 100_000, jitter_micros: 1_000, loss: 0.0, budget_util: None };
+        let congested = Sample {
+            rtt_micros: 100_000,
+            jitter_micros: 1_000,
+            loss: 0.0,
+            budget_util: None,
+        };
         for i in 0..10 {
             c.update(t0() + Duration::from_secs(i), congested);
         }
-        assert_eq!(c.baseline_rtt_micros(), 100_000, "baseline learned congested");
+        assert_eq!(
+            c.baseline_rtt_micros(),
+            100_000,
+            "baseline learned congested"
+        );
         // The link breathes once (one probe slips through at 20 ms): the
         // window min becomes the real distance and later samples at 100 ms
         // correctly read as congestion again.
-        c.update(t0() + Duration::from_secs(10), Sample { rtt_micros: 20_000, ..congested });
+        c.update(
+            t0() + Duration::from_secs(10),
+            Sample {
+                rtt_micros: 20_000,
+                ..congested
+            },
+        );
         assert_eq!(c.baseline_rtt_micros(), 20_000);
         let ev = c.update(t0() + Duration::from_secs(11), congested);
         let ev = ev.or_else(|| c.update(t0() + Duration::from_secs(12), congested));
-        assert!(ev.is_some_and(|e| e.degraded), "100 ms vs 20 ms baseline is bad");
+        assert!(
+            ev.is_some_and(|e| e.degraded),
+            "100 ms vs 20 ms baseline is bad"
+        );
     }
 
     #[test]
@@ -906,7 +967,12 @@ mod tests {
         assert_eq!(c.baseline_rtt_micros(), 10_000);
         // The link permanently worsens to 100 ms (new route): while the good
         // samples stay in the window it counts as congestion...
-        let worse = Sample { rtt_micros: 100_000, jitter_micros: 1_000, loss: 0.0, budget_util: None };
+        let worse = Sample {
+            rtt_micros: 100_000,
+            jitter_micros: 1_000,
+            loss: 0.0,
+            budget_util: None,
+        };
         c.update(t0() + Duration::from_secs(10), worse);
         assert_eq!(c.baseline_rtt_micros(), 10_000);
         // ...but once the window slides past them, the baseline re-learns.
@@ -919,21 +985,35 @@ mod tests {
         // §18.71 BUG-C2: a LAN session measured a 400 µs baseline and the
         // 2,6 ms threshold flagged decode noise as congestion forever.
         let mut c = QualityController::new(policy());
-        let lan = Sample { rtt_micros: 400, jitter_micros: 100, loss: 0.0, budget_util: None };
+        let lan = Sample {
+            rtt_micros: 400,
+            jitter_micros: 100,
+            loss: 0.0,
+            budget_util: None,
+        };
         for i in 0..10 {
             c.update(t0() + Duration::from_secs(i), lan);
         }
         assert_eq!(c.baseline_rtt_micros(), 3_000, "floor clamps the collapse");
         // Threshold = 3000*1.5 + 2000 = 6500 µs: a 3 ms scheduling spike on
         // the same LAN must NOT count as congestion anymore.
-        let spike = Sample { rtt_micros: 3_000, ..lan };
-        assert!(!c.verdict(&spike).any_bad(), "spike inside the floored threshold is good");
+        let spike = Sample {
+            rtt_micros: 3_000,
+            ..lan
+        };
+        assert!(
+            !c.verdict(&spike).any_bad(),
+            "spike inside the floored threshold is good"
+        );
         let v = c.verdict(&spike);
         assert_eq!(v.rtt_threshold_micros, 6_500);
         assert!(!v.any_bad());
         assert_eq!(v.bad_signals(), "-");
         // But a real queueing delay still reads as bad, named in the verdict.
-        let queued = Sample { rtt_micros: 20_000, ..lan };
+        let queued = Sample {
+            rtt_micros: 20_000,
+            ..lan
+        };
         let v = c.verdict(&queued);
         assert!(v.rtt_bad && v.any_bad());
         assert_eq!(v.bad_signals(), "rtt");
@@ -941,8 +1021,17 @@ mod tests {
 
     #[test]
     fn verdict_names_every_bad_signal() {
-        let mut c = QualityController::new(QualityPolicy { budget_kbps: Some(800), ..policy() });
-        c.update(t0(), Sample { budget_util: Some(1.5), ..good() });
+        let mut c = QualityController::new(QualityPolicy {
+            budget_kbps: Some(800),
+            ..policy()
+        });
+        c.update(
+            t0(),
+            Sample {
+                budget_util: Some(1.5),
+                ..good()
+            },
+        );
         let v = c.verdict(&Sample {
             rtt_micros: 50_000,
             jitter_micros: 50_000,
@@ -955,9 +1044,27 @@ mod tests {
     #[test]
     fn observed_min_max_are_tracked() {
         let mut c = QualityController::new(policy());
-        c.update(t0(), Sample { rtt_micros: 40_000, ..good() });
-        c.update(t0() + Duration::from_secs(1), Sample { rtt_micros: 5_000, ..good() });
-        c.update(t0() + Duration::from_secs(2), Sample { rtt_micros: 90_000, ..good() });
+        c.update(
+            t0(),
+            Sample {
+                rtt_micros: 40_000,
+                ..good()
+            },
+        );
+        c.update(
+            t0() + Duration::from_secs(1),
+            Sample {
+                rtt_micros: 5_000,
+                ..good()
+            },
+        );
+        c.update(
+            t0() + Duration::from_secs(2),
+            Sample {
+                rtt_micros: 90_000,
+                ..good()
+            },
+        );
         assert_eq!(c.rtt_observed(), (5_000, 90_000));
     }
 
@@ -965,7 +1072,10 @@ mod tests {
     fn targets_respect_floors_and_ceiling() {
         let p = policy();
         let full = targets(LEVEL_FULL, 4_000, 64, &p);
-        assert_eq!((full.video_kbps, full.fps, full.audio_kbps), (4_000, 30, 64));
+        assert_eq!(
+            (full.video_kbps, full.fps, full.audio_kbps),
+            (4_000, 30, 64)
+        );
         assert!(!full.degraded_resolution);
 
         let n5 = targets(5, 4_000, 64, &p);
@@ -987,13 +1097,22 @@ mod tests {
         // §12.5: opus-music (64k stereo ceiling) steps 64→48→40→32→24→16→12,
         // opus-voice (32k ceiling) 32→24→20→16→12→8→6 — one factor ladder
         // serves both presets; the floor (6 kbps here) is the last clamp.
-        let p = QualityPolicy { audio_floor_kbps: 6, ..policy() };
-        let music: Vec<u32> = (0..=6).map(|l| targets(l, 4_000, 64, &p).audio_kbps).collect();
+        let p = QualityPolicy {
+            audio_floor_kbps: 6,
+            ..policy()
+        };
+        let music: Vec<u32> = (0..=6)
+            .map(|l| targets(l, 4_000, 64, &p).audio_kbps)
+            .collect();
         assert_eq!(music, [64, 48, 40, 32, 24, 16, 12]);
-        let voice: Vec<u32> = (0..=6).map(|l| targets(l, 4_000, 32, &p).audio_kbps).collect();
+        let voice: Vec<u32> = (0..=6)
+            .map(|l| targets(l, 4_000, 32, &p).audio_kbps)
+            .collect();
         assert_eq!(voice, [32, 24, 20, 16, 12, 8, 6]);
         // Never above the ceiling, never below the floor.
-        let tiny: Vec<u32> = (0..=6).map(|l| targets(l, 4_000, 7, &p).audio_kbps).collect();
+        let tiny: Vec<u32> = (0..=6)
+            .map(|l| targets(l, 4_000, 7, &p).audio_kbps)
+            .collect();
         assert!(tiny.iter().all(|&k| (6..=7).contains(&k)), "{tiny:?}");
     }
 
@@ -1002,20 +1121,43 @@ mod tests {
         // A custom 2-level table ("cheap jpegrects" policy, §18.69).
         let p = QualityPolicy {
             levels: vec![
-                LevelSpec { video_factor: 1.0, fps: 30, audio_factor: 1.0, jpeg_quality: 70, vp9_speed: 8, kf_secs: 30 },
-                LevelSpec { video_factor: 0.2, fps: 12, audio_factor: 0.5, jpeg_quality: 55, vp9_speed: 8, kf_secs: 4 },
+                LevelSpec {
+                    video_factor: 1.0,
+                    fps: 30,
+                    audio_factor: 1.0,
+                    jpeg_quality: 70,
+                    vp9_speed: 8,
+                    kf_secs: 30,
+                },
+                LevelSpec {
+                    video_factor: 0.2,
+                    fps: 12,
+                    audio_factor: 0.5,
+                    jpeg_quality: 55,
+                    vp9_speed: 8,
+                    kf_secs: 4,
+                },
             ],
             ..policy()
         };
         let n0 = targets(0, 4_000, 64, &p);
-        assert_eq!((n0.video_kbps, n0.fps, n0.jpeg_quality, n0.vp9_speed), (4_000, 30, 70, 8));
+        assert_eq!(
+            (n0.video_kbps, n0.fps, n0.jpeg_quality, n0.vp9_speed),
+            (4_000, 30, 70, 8)
+        );
         assert_eq!(n0.kf_secs, 30);
         assert!(!n0.degraded_resolution);
         let n1 = targets(1, 4_000, 64, &p);
         assert_eq!((n1.video_kbps, n1.fps, n1.audio_kbps), (800, 12, 32));
         assert_eq!((n1.jpeg_quality, n1.vp9_speed), (55, 8));
-        assert_eq!(n1.kf_secs, 4, "degraded level refreshes keyframes sooner (§18.74)");
-        assert!(n1.degraded_resolution, "last row of the table is the degraded one");
+        assert_eq!(
+            n1.kf_secs, 4,
+            "degraded level refreshes keyframes sooner (§18.74)"
+        );
+        assert!(
+            n1.degraded_resolution,
+            "last row of the table is the degraded one"
+        );
         // The network controller never steps past the last configured row.
         let mut c = QualityController::new(p);
         c.update(t0(), good());
@@ -1046,31 +1188,67 @@ mod tests {
     #[test]
     fn pressure_weights_normalize_and_gate_utilization() {
         let pol = PressurePolicy::default();
-        let s = PressureSample { change: 1.0, cpu: 1.0, util: 1.0, congested: true };
-        assert!((pol.pressure(&s) - 1.0).abs() < 1e-9, "all max is pressure 1");
+        let s = PressureSample {
+            change: 1.0,
+            cpu: 1.0,
+            util: 1.0,
+            congested: true,
+        };
+        assert!(
+            (pol.pressure(&s) - 1.0).abs() < 1e-9,
+            "all max is pressure 1"
+        );
         // Utilization is gated by measured congestion: a fat pipe on a
         // healthy network does not press.
-        let not_congested = PressureSample { congested: false, ..s };
+        let not_congested = PressureSample {
+            congested: false,
+            ..s
+        };
         let p = pol.pressure(&not_congested);
         assert!(
             (p - 1.0).abs() < 1e-9,
             "util term gated out AND out of the normalizer: {p}"
         );
         // Zero-sum weights mean "no pressure signal at all": never bad.
-        let zero = PressurePolicy { weight_change: 0.0, weight_cpu: 0.0, weight_bandwidth: 0.0, ..pol };
+        let zero = PressurePolicy {
+            weight_change: 0.0,
+            weight_cpu: 0.0,
+            weight_bandwidth: 0.0,
+            ..pol
+        };
         assert_eq!(zero.pressure(&s), 0.0);
     }
 
     #[test]
     fn pressure_controller_steps_down_fast_and_up_slow() {
-        let pol = PressurePolicy { bad_to_down: 2, good_to_up: 3, raise_cooldown: Duration::from_secs(10), ..Default::default() };
+        let pol = PressurePolicy {
+            bad_to_down: 2,
+            good_to_up: 3,
+            raise_cooldown: Duration::from_secs(10),
+            ..Default::default()
+        };
         let mut c = PressureController::new(pol, 3);
-        let hot = PressureSample { change: 1.0, cpu: 1.0, util: 1.0, congested: true };
-        let cold = PressureSample { change: 0.0, cpu: 0.0, util: 0.0, congested: false };
+        let hot = PressureSample {
+            change: 1.0,
+            cpu: 1.0,
+            util: 1.0,
+            congested: true,
+        };
+        let cold = PressureSample {
+            change: 0.0,
+            cpu: 0.0,
+            util: 0.0,
+            congested: false,
+        };
         assert_eq!(c.update(t0(), hot), None, "first bad sample only arms");
         assert_eq!(c.update(t0() + Duration::from_secs(1), hot), Some(1));
         // Neutral band: no streak movement.
-        let mid = PressureSample { change: 0.7, cpu: 0.7, util: 0.0, congested: false };
+        let mid = PressureSample {
+            change: 0.7,
+            cpu: 0.7,
+            util: 0.0,
+            congested: false,
+        };
         assert_eq!(c.update(t0() + Duration::from_secs(2), mid), None);
         assert_eq!(c.level(), 1);
         // Sustained cold raises one level (good_to_up=3).
@@ -1108,33 +1286,64 @@ mod tests {
     fn budget_overrun_degrades_on_a_perfect_network() {
         // §18.70: with a budget set, over-utilization alone (RTT/jitter/loss
         // all healthy) steps the ladder down with hysteresis.
-        let p = QualityPolicy { budget_kbps: Some(800), ..policy() };
+        let p = QualityPolicy {
+            budget_kbps: Some(800),
+            ..policy()
+        };
         let mut c = QualityController::new(p);
         c.update(t0(), good());
-        let over = Sample { budget_util: Some(1.2), ..good() };
-        assert_eq!(c.update(t0() + Duration::from_secs(1), over), None, "first bad arms");
+        let over = Sample {
+            budget_util: Some(1.2),
+            ..good()
+        };
+        assert_eq!(
+            c.update(t0() + Duration::from_secs(1), over),
+            None,
+            "first bad arms"
+        );
         let ev = c.update(t0() + Duration::from_secs(2), over);
-        assert!(ev.is_some_and(|e| e.degraded && e.level == 1), "over budget steps down");
+        assert!(
+            ev.is_some_and(|e| e.degraded && e.level == 1),
+            "over budget steps down"
+        );
         // Inside the hysteresis band the state sticks (still bad), but the
         // streak restarted at the step: two more bad samples are needed.
-        let mid = Sample { budget_util: Some(0.8), ..good() };
-        assert!(c.verdict(&mid).any_bad(), "0.8 is inside the sticky band while bad");
+        let mid = Sample {
+            budget_util: Some(0.8),
+            ..good()
+        };
+        assert!(
+            c.verdict(&mid).any_bad(),
+            "0.8 is inside the sticky band while bad"
+        );
         assert_eq!(c.update(t0() + Duration::from_secs(3), mid), None);
         let ev = c.update(t0() + Duration::from_secs(4), mid);
-        assert!(ev.is_some_and(|e| e.level == 2), "still bad: keeps stepping");
+        assert!(
+            ev.is_some_and(|e| e.level == 2),
+            "still bad: keeps stepping"
+        );
         // Below the low mark the budget signal clears and good streaks start.
-        let under = Sample { budget_util: Some(0.5), ..good() };
-        assert!({
-            c.update(t0() + Duration::from_secs(5), under);
-            !c.verdict(&under).any_bad()
-        }, "under budget clears the bad state");
+        let under = Sample {
+            budget_util: Some(0.5),
+            ..good()
+        };
+        assert!(
+            {
+                c.update(t0() + Duration::from_secs(5), under);
+                !c.verdict(&under).any_bad()
+            },
+            "under budget clears the bad state"
+        );
     }
 
     #[test]
     fn no_budget_ignores_the_utilization_field() {
         let mut c = QualityController::new(policy()); // budget_kbps: None
         c.update(t0(), good());
-        let crazy = Sample { budget_util: Some(99.0), ..good() };
+        let crazy = Sample {
+            budget_util: Some(99.0),
+            ..good()
+        };
         assert_eq!(c.update(t0() + Duration::from_secs(1), crazy), None);
         assert_eq!(c.level(), LEVEL_FULL);
     }
@@ -1143,8 +1352,14 @@ mod tests {
     fn fec_hysteresis_never_flaps() {
         // Off below the band, on above it, sticky inside it (§12.5).
         assert!(!fec_update(false, 0.0));
-        assert!(!fec_update(false, 0.01), "1 % loss is below the on threshold");
-        assert!(!fec_update(false, FEC_ON_LOSS), "exactly at the threshold stays off");
+        assert!(
+            !fec_update(false, 0.01),
+            "1 % loss is below the on threshold"
+        );
+        assert!(
+            !fec_update(false, FEC_ON_LOSS),
+            "exactly at the threshold stays off"
+        );
         assert!(fec_update(false, 0.03));
         assert!(fec_update(true, 0.01), "inside the band FEC stays on");
         assert!(!fec_update(false, 0.01), "inside the band FEC stays off");

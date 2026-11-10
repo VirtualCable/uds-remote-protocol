@@ -15,9 +15,9 @@
 //! the device default rate and let the caller resample (see
 //! [`PlaybackStream::sample_rate`]).
 
+pub use codec::audio_dsp::{PlaybackBuffer, SharedBuffer};
 #[cfg(feature = "audio")]
 use std::sync::{Arc, Mutex};
-pub use codec::audio_dsp::{PlaybackBuffer, SharedBuffer};
 
 #[cfg(feature = "audio")]
 use tracing::{info, warn};
@@ -29,7 +29,6 @@ type DeviceStream = cpal::Stream;
 /// Live device stream handle (no `audio` feature).
 #[cfg(not(feature = "audio"))]
 type DeviceStream = ();
-
 
 /// One open playback stream: the shared buffer (push decoded PCM here),
 /// the live device stream, and the rate the device actually runs at.
@@ -76,7 +75,10 @@ pub fn start_playback(sample_rate: u32, channels: u8) -> Option<PlaybackStream> 
         sample_rate,
         channels,
     ) else {
-        warn!(sample_rate, channels, "no compatible output config; using null sink");
+        warn!(
+            sample_rate,
+            channels, "no compatible output config; using null sink"
+        );
         return None;
     };
     if device_rate != sample_rate {
@@ -133,7 +135,8 @@ impl client::integrations::audio_out::AudioOutput for PlaybackStream {
 #[cfg(feature = "audio")]
 pub fn default_output_factory() -> client::integrations::audio_out::AudioOutputFactory {
     Box::new(|rate, ch| {
-        start_playback(rate, ch).map(|s| Box::new(s) as Box<dyn client::integrations::audio_out::AudioOutput>)
+        start_playback(rate, ch)
+            .map(|s| Box::new(s) as Box<dyn client::integrations::audio_out::AudioOutput>)
     })
 }
 
@@ -205,7 +208,9 @@ pub fn set_output_dump(path: &std::path::Path) {
     match std::fs::File::create(path) {
         Ok(file) => {
             info!(path = %path.display(), "dumping device-pulled audio as raw s16le PCM");
-            *OUTPUT_DUMP.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            *OUTPUT_DUMP
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(BufWriter::with_capacity(1 << 20, file));
         }
         Err(e) => warn!(path = %path.display(), "cannot open the output dump file: {e}"),
@@ -237,7 +242,9 @@ where
         config,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             use std::io::Write as _;
-            let mut dump = OUTPUT_DUMP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut dump = OUTPUT_DUMP
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Ok(mut buf) = buffer.lock() {
                 for sample in data.iter_mut() {
                     let s = buf.pop_or_silence();
@@ -302,7 +309,9 @@ mod tests {
         }
 
         fn config(channels: u16, rate: u32) -> SupportedStreamConfig {
-            range(channels, rate, rate).try_with_sample_rate(rate).unwrap()
+            range(channels, rate, rate)
+                .try_with_sample_rate(rate)
+                .unwrap()
         }
 
         #[test]

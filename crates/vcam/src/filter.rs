@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 
 use windows::Win32::Foundation::{E_POINTER, S_FALSE, S_OK};
 use windows::Win32::Media::DirectShow::{
-    AM_FILTER_MISC_FLAGS_IS_SOURCE, FILTER_INFO, FILTER_STATE, IBaseFilter, IBaseFilter_Impl,
-    IEnumPins, IEnumPins_Impl, IFilterGraph, IMediaFilter_Impl, IPin,
-    IAMFilterMiscFlags, IAMFilterMiscFlags_Impl, State_Paused, State_Running, State_Stopped,
+    AM_FILTER_MISC_FLAGS_IS_SOURCE, FILTER_INFO, FILTER_STATE, IAMFilterMiscFlags,
+    IAMFilterMiscFlags_Impl, IBaseFilter, IBaseFilter_Impl, IEnumPins, IEnumPins_Impl,
+    IFilterGraph, IMediaFilter_Impl, IPin, State_Paused, State_Running, State_Stopped,
 };
 use windows::Win32::Media::IReferenceClock;
 use windows::Win32::System::Com::{CoTaskMemAlloc, IPersist_Impl};
@@ -118,7 +118,11 @@ impl IMediaFilter_Impl for UdsCamFilter_Impl {
 impl IBaseFilter_Impl for UdsCamFilter_Impl {
     fn EnumPins(&self) -> Result<IEnumPins> {
         let pin = self.shared.pin.lock().unwrap().this_pin.clone();
-        Ok(UdsEnumPins { pin, index: Mutex::new(0) }.into())
+        Ok(UdsEnumPins {
+            pin,
+            index: Mutex::new(0),
+        }
+        .into())
     }
 
     fn FindPin(&self, id: &PCWSTR) -> Result<IPin> {
@@ -232,6 +236,10 @@ impl IEnumPins_Impl for UdsEnumPins_Impl {
     }
 
     fn Clone(&self) -> Result<IEnumPins> {
-        Ok(UdsEnumPins { pin: self.pin.clone(), index: Mutex::new(*self.index.lock().unwrap()) }.into())
+        Ok(UdsEnumPins {
+            pin: self.pin.clone(),
+            index: Mutex::new(*self.index.lock().unwrap()),
+        }
+        .into())
     }
 }

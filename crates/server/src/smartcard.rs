@@ -111,7 +111,10 @@ impl SmartcardRouter {
     fn register(&self) -> (u32, oneshot::Receiver<SmartcardMessage>) {
         let (tx, rx) = oneshot::channel();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.pending.lock().expect("pending poisoned").insert(id, tx);
+        self.pending
+            .lock()
+            .expect("pending poisoned")
+            .insert(id, tx);
         (id, rx)
     }
 
@@ -143,7 +146,10 @@ impl SmartcardRouter {
     /// protocol violation — logged and dropped, never fatal.
     pub fn route(&self, msg: SmartcardMessage) {
         if msg.is_request() {
-            warn!(?msg, "unexpected smartcard request from the client; dropped");
+            warn!(
+                ?msg,
+                "unexpected smartcard request from the client; dropped"
+            );
             return;
         }
         let id = msg.request_id();
@@ -151,7 +157,10 @@ impl SmartcardRouter {
         if let Some(tx) = waiter {
             let _ = tx.send(msg);
         } else {
-            warn!(request_id = id, "smartcard reply with unknown request id; dropped");
+            warn!(
+                request_id = id,
+                "smartcard reply with unknown request id; dropped"
+            );
         }
     }
 }

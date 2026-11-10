@@ -24,12 +24,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail};
 use crate::broker::ConnectionProvider as _;
+use anyhow::{Context as _, Result, bail};
 use tracing::{error, info, warn};
 use transport::{EncryptedStream, TcpTransport};
 use udscredprov::logic::Credentials;
-use windows::Win32::Networking::WinSock::{WSAPROTOCOL_INFOW, WSADuplicateSocketW};
+use windows::Win32::Networking::WinSock::{WSADuplicateSocketW, WSAPROTOCOL_INFOW};
 
 use crate::agent::Agent;
 
@@ -55,7 +55,10 @@ impl AgentSlot {
     /// Kills and clears the current agent, if any (service shutdown).
     pub fn kill(&self) {
         if let Some((agent, _)) = self.take() {
-            info!(pid = agent.pid, "service stopping: terminating the session agent");
+            info!(
+                pid = agent.pid,
+                "service stopping: terminating the session agent"
+            );
             agent.kill();
         }
     }
@@ -87,7 +90,10 @@ impl AgentSlot {
         };
         if unhealthy {
             if let Some((agent, _)) = self.take() {
-                error!(pid = agent.pid, "session agent lost its mutex (wedged); killing it");
+                error!(
+                    pid = agent.pid,
+                    "session agent lost its mutex (wedged); killing it"
+                );
                 agent.kill();
             }
         }
@@ -156,7 +162,9 @@ async fn accept_loop(
             }
         };
         info!(%peer, "connection accepted by the service");
-        if let Err(err) = handle_connection(socket, peer, &runtime, &slot, &creds_slot, &events).await {
+        if let Err(err) =
+            handle_connection(socket, peer, &runtime, &slot, &creds_slot, &events).await
+        {
             warn!(%peer, error = %format!("{err:#}"), "connection rejected before handoff");
         }
     }
@@ -189,32 +197,36 @@ async fn handle_connection(
     let grant_slot: Arc<Mutex<Option<crate::broker::SessionGrant>>> = Arc::new(Mutex::new(None));
     let peer_ip = peer.ip().to_string();
     let stream = match &**runtime {
-        crate::standalone::Runtime::Standalone(standalone) => {
-            tokio::time::timeout(
-                HANDSHAKE_TIMEOUT,
-                EncryptedStream::server_handshake(TcpTransport::new(socket), &standalone.key, None),
-            )
-            .await
-            .context("handshake timed out")??
-        }
+        crate::standalone::Runtime::Standalone(standalone) => tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            EncryptedStream::server_handshake(TcpTransport::new(socket), &standalone.key, None),
+        )
+        .await
+        .context("handshake timed out")??,
         crate::standalone::Runtime::Pq(pq) => {
             let provider = Arc::clone(&pq.provider);
             let grants = Arc::clone(&grant_slot);
             tokio::time::timeout(
                 HANDSHAKE_TIMEOUT,
-                EncryptedStream::server_handshake_with(TcpTransport::new(socket), None, move |ticket| {
-                    let provider = Arc::clone(&provider);
-                    let grants = Arc::clone(&grants);
-                    let ip = peer_ip.clone();
-                    async move {
-                        let grant = provider.start(&ticket, &ip).await.map_err(|err| {
-                            transport::TransportError::UnexpectedMessage(format!("broker: {err:#}"))
-                        })?;
-                        let key = grant.key;
-                        *grants.lock().expect("grant slot poisoned") = Some(grant);
-                        Ok(key)
-                    }
-                }),
+                EncryptedStream::server_handshake_with(
+                    TcpTransport::new(socket),
+                    None,
+                    move |ticket| {
+                        let provider = Arc::clone(&provider);
+                        let grants = Arc::clone(&grants);
+                        let ip = peer_ip.clone();
+                        async move {
+                            let grant = provider.start(&ticket, &ip).await.map_err(|err| {
+                                transport::TransportError::UnexpectedMessage(format!(
+                                    "broker: {err:#}"
+                                ))
+                            })?;
+                            let key = grant.key;
+                            *grants.lock().expect("grant slot poisoned") = Some(grant);
+                            Ok(key)
+                        }
+                    },
+                ),
             )
             .await
             .context("handshake timed out")??
@@ -270,10 +282,15 @@ pub(crate) async fn complete_session(
     creds_slot: &Arc<Mutex<Option<Credentials>>>,
 ) -> Result<()> {
     let ready = protocol::ControlMessage::SessionReady;
-    stream.send(protocol::channel::CONTROL, &ready.encode()?).await?;
+    stream
+        .send(protocol::channel::CONTROL, &ready.encode()?)
+        .await?;
 
     let (inner, hello, seqs) = stream.into_handoff();
-    let socket = inner.into_stream().into_std().context("tokio -> std socket")?;
+    let socket = inner
+        .into_stream()
+        .into_std()
+        .context("tokio -> std socket")?;
 
     let Some((agent, pipe)) = Agent::spawn_process_in_console()? else {
         bail!("no console session after the logon wait");
@@ -352,7 +369,10 @@ pub(crate) async fn complete_session(
         }
     };
     Agent::write_config(pipe, &config)?;
-    info!(pid = agent.pid, "connection handed off to the session agent");
+    info!(
+        pid = agent.pid,
+        "connection handed off to the session agent"
+    );
     slot.set(agent, socket);
 
     // Broker mode: notify the broker when the session ends (best effort;
@@ -441,4 +461,3 @@ fn duplicate_socket_into(socket: &std::net::TcpStream, pid: u32) -> Result<Vec<u
     };
     Ok(bytes.to_vec())
 }
-

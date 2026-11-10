@@ -8,7 +8,7 @@
 
 use windows::{
     Win32::System::WindowsProgramming::GetComputerNameW,
-    core::{PWSTR, PCWSTR},
+    core::{PCWSTR, PWSTR},
 };
 
 /// Builds a resource ID pointer (`MAKEINTRESOURCEW`).

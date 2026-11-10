@@ -61,7 +61,8 @@ impl UdsRpCredentialsFilter {
                 // Auto-logon in flight: only our provider is allowed
                 let clsids =
                     unsafe { std::slice::from_raw_parts(rgclsidproviders, cproviders as usize) };
-                let allows = unsafe { std::slice::from_raw_parts_mut(rgballow, cproviders as usize) };
+                let allows =
+                    unsafe { std::slice::from_raw_parts_mut(rgballow, cproviders as usize) };
                 for (clsid, allow) in clsids.iter().zip(allows.iter_mut()) {
                     *allow = (*clsid == globals::CLSID_UDS_RP_CREDENTIAL_PROVIDER).into();
                     debug_dev!("Filter: provider: {clsid:?}, allow: {}", allow.as_bool());

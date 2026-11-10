@@ -41,7 +41,9 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows::Win32::Storage::FileSystem::{FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile};
+use windows::Win32::Storage::FileSystem::{
+    FILE_FLAG_OVERLAPPED, PIPE_ACCESS_DUPLEX, ReadFile, WriteFile,
+};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -165,7 +167,10 @@ impl Pipe {
             )
         };
         if handle.is_invalid() {
-            bail!("CreateNamedPipeW({name}) failed: {:?}", windows::core::Error::from_thread());
+            bail!(
+                "CreateNamedPipeW({name}) failed: {:?}",
+                windows::core::Error::from_thread()
+            );
         }
         // SAFETY: default event attributes; the handle is checked.
         let event = unsafe { CreateEventW(None, true, false, PCWSTR::null())? };
@@ -247,8 +252,13 @@ impl Pipe {
                 // SAFETY: the operation completed synchronously;
                 // `transferred` is a valid out pointer.
                 unsafe {
-                    GetOverlappedResult(self.handle, &raw const overlapped, &raw mut transferred, false)
-                        .context("GetOverlappedResult failed")?;
+                    GetOverlappedResult(
+                        self.handle,
+                        &raw const overlapped,
+                        &raw mut transferred,
+                        false,
+                    )
+                    .context("GetOverlappedResult failed")?;
                 }
                 if transferred == 0 {
                     return Ok(None); // peer closed
@@ -279,7 +289,8 @@ impl Pipe {
             let mut overlapped = self.overlapped();
             // SAFETY: `handle` is live; `data` outlives the operation (we
             // wait for completion or bail after cancelling).
-            let result = unsafe { WriteFile(self.handle, Some(data), None, Some(&raw mut overlapped)) };
+            let result =
+                unsafe { WriteFile(self.handle, Some(data), None, Some(&raw mut overlapped)) };
             let written = match result {
                 Ok(()) => data.len(),
                 Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_IO_PENDING.0) => {

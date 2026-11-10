@@ -9,8 +9,8 @@
 
 use anyhow::{Result, bail};
 
-use super::{ConnectionProvider, SessionGrant};
 use super::payload::{ChannelPolicy, DisplayPolicy, SessionCredentials, VideoPolicy};
+use super::{ConnectionProvider, SessionGrant};
 
 /// Standalone (broker-less) provider: one fixed ticket, fixed key.
 pub struct StandaloneProvider {
@@ -22,10 +22,9 @@ impl StandaloneProvider {
     /// Builds the provider from the server config (requires the
     /// `[standalone]` section; the caller checked `connection_method`).
     pub fn new(config: &server_config::ServerConfig) -> Result<Self> {
-        let standalone = config
-            .standalone
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("connection_method = \"pq\" unset but [standalone] missing"))?;
+        let standalone = config.standalone.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("connection_method = \"pq\" unset but [standalone] missing")
+        })?;
         anyhow::ensure!(
             !standalone.ticket.is_empty(),
             "standalone.ticket must not be empty"

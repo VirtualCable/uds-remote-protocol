@@ -46,7 +46,10 @@ fn main() {
     // 3. Unix: pkg-config.
     #[cfg(not(target_os = "windows"))]
     {
-        match pkg_config::Config::new().atleast_version("1.10").probe("vpx") {
+        match pkg_config::Config::new()
+            .atleast_version("1.10")
+            .probe("vpx")
+        {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("pkg-config could not find libvpx >= 1.10: {e}");

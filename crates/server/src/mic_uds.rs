@@ -183,8 +183,7 @@ impl MicSink for UdsMicSink {
             )
         };
         if ok.is_ok() {
-            self.ring_level =
-                (self.ring_level + f64::from(accepted)).min(RING_CAPACITY_BYTES);
+            self.ring_level = (self.ring_level + f64::from(accepted)).min(RING_CAPACITY_BYTES);
             if (accepted as usize) < bytes.len() {
                 // A short write means the ring filled up (nobody draining):
                 // snap the estimate to full so we stop pushing for a while.

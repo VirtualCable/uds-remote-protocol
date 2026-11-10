@@ -52,7 +52,10 @@ impl Drop for SessionMutex {
 /// Acquires ownership of the session mutex. Fails if another live agent
 /// already owns it.
 pub fn acquire() -> Result<SessionMutex> {
-    let name: Vec<u16> = SESSION_MUTEX.encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = SESSION_MUTEX
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // Preferred path: open the service-created global mutex (the service has
     // the privilege to create Global\ objects; a standard session user does
     // not) and take ownership of it. Only the rights we use are requested
@@ -90,8 +93,13 @@ pub fn acquire() -> Result<SessionMutex> {
     }
     // Fallback: no service-created mutex (dev run without the service). A
     // Local mutex still gives the single-instance guard inside this session.
-    warn!("no service-created session mutex; falling back to a session-local one (degraded watchdog)");
-    let mut local: Vec<u16> = SESSION_MUTEX.encode_utf16().chain(std::iter::once(0)).collect();
+    warn!(
+        "no service-created session mutex; falling back to a session-local one (degraded watchdog)"
+    );
+    let mut local: Vec<u16> = SESSION_MUTEX
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // SAFETY: `local` is null-terminated and outlives the call; a standard
     // user can always create session-local objects. Note: `Global\` from a
     // user without SeCreateGlobalPrivilege is silently redirected to Local\,

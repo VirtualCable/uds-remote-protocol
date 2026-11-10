@@ -87,7 +87,11 @@ mod imp {
     /// Called by COM; no pointers involved.
     #[unsafe(no_mangle)]
     pub extern "system" fn DllCanUnloadNow() -> HRESULT {
-        if globals::DLL_REF_COUNT.load(Ordering::SeqCst) == 0 { S_OK } else { S_FALSE }
+        if globals::DLL_REF_COUNT.load(Ordering::SeqCst) == 0 {
+            S_OK
+        } else {
+            S_FALSE
+        }
     }
 
     /// Standard COM class-object entry point.

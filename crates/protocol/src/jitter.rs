@@ -162,7 +162,12 @@ impl JitterBuffer {
             }
             self.started = true;
             self.consecutive_plc = 0;
-            self.next_play = self.pending.keys().next().copied().expect("non-empty pending");
+            self.next_play = self
+                .pending
+                .keys()
+                .next()
+                .copied()
+                .expect("non-empty pending");
         }
 
         if let Some(frame) = self.pending.remove(&self.next_play) {
@@ -284,7 +289,11 @@ mod tests {
         }
         jb.push(1, frame(1)); // already played
         assert_eq!(jb.stats().late_dropped, 1);
-        assert_eq!(jb.stats().received, 3, "late packet not counted as received");
+        assert_eq!(
+            jb.stats().received,
+            3,
+            "late packet not counted as received"
+        );
     }
 
     #[test]

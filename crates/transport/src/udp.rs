@@ -24,9 +24,16 @@ const SOCKET_BUFFER_SIZE: usize = 4 << 20;
 /// Binds a non-blocking UDP socket with enlarged kernel buffers.
 fn bind_udp(bind: &str) -> Result<UdpSocket> {
     let addr: SocketAddr = bind.parse().map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("bad bind addr {bind}: {e}"))
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("bad bind addr {bind}: {e}"),
+        )
     })?;
-    let socket = socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::DGRAM, None)?;
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::DGRAM,
+        None,
+    )?;
     socket.set_nonblocking(true)?;
     socket.set_send_buffer_size(SOCKET_BUFFER_SIZE)?;
     socket.set_recv_buffer_size(SOCKET_BUFFER_SIZE)?;
@@ -111,6 +118,11 @@ impl PendingUdpTransport {
         self.socket.connect(peer).await?;
         debug!(%peer, "UDP peer learned from first datagram");
         buf.truncate(n);
-        Ok((UdpTransport { socket: self.socket }, buf))
+        Ok((
+            UdpTransport {
+                socket: self.socket,
+            },
+            buf,
+        ))
     }
 }

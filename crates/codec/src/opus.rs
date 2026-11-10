@@ -76,7 +76,9 @@ impl OpusEncoder {
     /// says so (§9: the congestion controller decides).
     pub fn new(preset: &AudioPreset) -> Result<Self> {
         if preset.codec != AudioCodecType::Opus {
-            return Err(CodecError::InvalidConfig("OpusEncoder needs an Opus preset"));
+            return Err(CodecError::InvalidConfig(
+                "OpusEncoder needs an Opus preset",
+            ));
         }
         check_sample_rate(preset.sample_rate)?;
         check_frame_ms(preset.frame_ms)?;
@@ -120,7 +122,10 @@ impl AudioEncoder for OpusEncoder {
         // Encode into a stack scratch buffer, then append: `out` is the
         // caller's reusable buffer and the hot path stays allocation-free.
         let mut scratch = [0u8; MAX_OPUS_PACKET_BYTES];
-        let n = self.inner.encode(pcm, &mut scratch).map_err(|e| map_err(&e))?;
+        let n = self
+            .inner
+            .encode(pcm, &mut scratch)
+            .map_err(|e| map_err(&e))?;
         out.extend_from_slice(&scratch[..n]);
         Ok(n)
     }
@@ -132,7 +137,9 @@ impl AudioEncoder for OpusEncoder {
     }
 
     fn set_fec(&mut self, enabled: bool) -> Result<()> {
-        self.inner.set_inband_fec(enabled).map_err(|e| map_err(&e))?;
+        self.inner
+            .set_inband_fec(enabled)
+            .map_err(|e| map_err(&e))?;
         if enabled {
             // Tell the encoder how much loss to expect so it sizes the
             // redundant copy (same hint as the preset-time setup).
@@ -203,7 +210,9 @@ impl AudioDecoder for OpusDecoder {
         // (it passes a null pointer to opus_decode).
         let frame_out = &mut out[..needed];
         let input = packet.unwrap_or(&[]);
-        self.inner.decode(input, frame_out, false).map_err(|e| map_err(&e))
+        self.inner
+            .decode(input, frame_out, false)
+            .map_err(|e| map_err(&e))
     }
 
     fn codec_type(&self) -> AudioCodecType {

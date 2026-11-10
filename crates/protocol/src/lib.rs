@@ -11,40 +11,39 @@
 //! `wasm32-unknown-unknown`); the crypto is pure Rust (aes-gcm, hkdf, sha2).
 
 pub mod audio;
-pub mod crypt;
-pub mod service_ipc;
 pub mod channel;
-pub mod fragment;
-pub mod hex;
-pub mod jitter;
-pub mod webcam;
 mod clipboard;
 mod control;
+pub mod crypt;
 mod cursor;
 mod error;
+pub mod fragment;
 mod hello;
+pub mod hex;
 mod input;
+pub mod jitter;
 mod printer;
 mod probe;
 mod quality;
+pub mod service_ipc;
 mod smartcard;
 mod storage;
+pub mod webcam;
 
 pub use channel::ChannelId;
 pub use clipboard::{
     ClipboardError, ClipboardMessage, ClipboardSession, FORMAT_TEXT, MAX_CLIPBOARD_PAYLOAD,
 };
 pub use control::{
-    Capability, ControlMessage, CONSOLE_STATE_ACTIVE, CONSOLE_STATE_DISCONNECTED,
-    CONSOLE_STATE_LOCKED, SESSION_END_CONSOLE_BUSY, SESSION_END_DENIED_BY_USER,
-    SESSION_STAGE_AUTOLOGON, SESSION_STAGE_EVICTING,
+    CONSOLE_STATE_ACTIVE, CONSOLE_STATE_DISCONNECTED, CONSOLE_STATE_LOCKED, Capability,
+    ControlMessage, SESSION_END_CONSOLE_BUSY, SESSION_END_DENIED_BY_USER, SESSION_STAGE_AUTOLOGON,
+    SESSION_STAGE_EVICTING,
 };
 pub use cursor::{CursorError, CursorMessage, MAX_CURSOR_DIM};
 pub use error::ProtocolError;
 pub use hello::{
     Command, FLAG_H264_DECODE, FLAG_PRINTER, FLAG_PRIVACY_SCREEN, FLAG_SMARTCARD, FLAG_WEBCAM,
-    HANDSHAKE_SIGNATURE,
-    Hello, PROTOCOL_VERSION, TICKET_LENGTH,
+    HANDSHAKE_SIGNATURE, Hello, PROTOCOL_VERSION, TICKET_LENGTH,
 };
 pub use input::{InputError, InputMessage, PointerButton};
 pub use printer::{

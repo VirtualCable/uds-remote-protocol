@@ -21,13 +21,15 @@ use std::time::Duration;
 
 use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, E_UNEXPECTED, S_FALSE, S_OK};
 use windows::Win32::Media::DirectShow::{
-    ALLOCATOR_PROPERTIES, IEnumMediaTypes, IEnumMediaTypes_Impl, IMemAllocator, IMemInputPin,
-    IMediaSample, IPin, IPin_Impl, PIN_DIRECTION, PIN_INFO, PINDIR_OUTPUT, VFW_E_ALREADY_CONNECTED,
+    ALLOCATOR_PROPERTIES, IEnumMediaTypes, IEnumMediaTypes_Impl, IMediaSample, IMemAllocator,
+    IMemInputPin, IPin, IPin_Impl, PIN_DIRECTION, PIN_INFO, PINDIR_OUTPUT, VFW_E_ALREADY_CONNECTED,
     VFW_E_NOT_CONNECTED,
 };
 use windows::Win32::Media::DirectShow::{IAMStreamConfig, IAMStreamConfig_Impl};
 use windows::Win32::Media::KernelStreaming::{IKsPropertySet, IKsPropertySet_Impl};
-use windows::Win32::Media::MediaFoundation::{AM_MEDIA_TYPE, AMPROPSETID_Pin, CLSID_MemoryAllocator};
+use windows::Win32::Media::MediaFoundation::{
+    AM_MEDIA_TYPE, AMPROPSETID_Pin, CLSID_MemoryAllocator,
+};
 use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemAlloc};
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::core::*;
@@ -121,7 +123,8 @@ impl UdsCamPin {
         if pin.connected.is_none() || pin.stream.is_some() {
             return;
         }
-        let (Some(mem_input), Some(allocator)) = (pin.mem_input.clone(), pin.allocator.clone()) else {
+        let (Some(mem_input), Some(allocator)) = (pin.mem_input.clone(), pin.allocator.clone())
+        else {
             return;
         };
         let (format, width, height, fps) = (pin.format, pin.width, pin.height, pin.fps);
@@ -190,12 +193,16 @@ fn stream_loop(
     // Borrowed interface views: ManuallyDrop, the owners live in PinState.
     let mem_input = unsafe {
         std::mem::ManuallyDrop::new(IMemInputPin::from_raw(
-            std::ptr::NonNull::new(mem_input_raw as *mut core::ffi::c_void).unwrap().as_ptr(),
+            std::ptr::NonNull::new(mem_input_raw as *mut core::ffi::c_void)
+                .unwrap()
+                .as_ptr(),
         ))
     };
     let allocator = unsafe {
         std::mem::ManuallyDrop::new(IMemAllocator::from_raw(
-            std::ptr::NonNull::new(allocator_raw as *mut core::ffi::c_void).unwrap().as_ptr(),
+            std::ptr::NonNull::new(allocator_raw as *mut core::ffi::c_void)
+                .unwrap()
+                .as_ptr(),
         ))
     };
     let frame_ms = (1000 / fps.max(1)).max(1);
@@ -219,15 +226,14 @@ fn stream_loop(
             }
 
             let mut sample: Option<IMediaSample> = None;
-            if allocator
-                .GetBuffer(&mut sample, None, None, 0)
-                .is_err()
-            {
+            if allocator.GetBuffer(&mut sample, None, None, 0).is_err() {
                 // Decommitted (Stop) or torn down.
                 break;
             }
             let Some(sample) = sample else { continue };
-            let Ok(buf) = sample.GetPointer() else { continue };
+            let Ok(buf) = sample.GetPointer() else {
+                continue;
+            };
             if index == 0 {
                 crate::vlog!("stream: first sample");
             }
@@ -243,7 +249,9 @@ fn stream_loop(
                     }
                     match format {
                         CamFormat::Nv12 => pixel::bgra_to_nv12(&bgra, width, height, out),
-                        CamFormat::Rgb24 => pixel::bgra_to_rgb24_bottom_up(&bgra, width, height, out),
+                        CamFormat::Rgb24 => {
+                            pixel::bgra_to_rgb24_bottom_up(&bgra, width, height, out)
+                        }
                     }
                 }
                 None => match format {
@@ -351,11 +359,20 @@ impl IPin_Impl for UdsCamPin_Impl {
     }
 
     fn ConnectedTo(&self) -> Result<IPin> {
-        self.shared.pin.lock().unwrap().connected.clone().ok_or_else(|| VFW_E_NOT_CONNECTED.into())
+        self.shared
+            .pin
+            .lock()
+            .unwrap()
+            .connected
+            .clone()
+            .ok_or_else(|| VFW_E_NOT_CONNECTED.into())
     }
 
     fn ConnectionMediaType(&self, pmt: *mut AM_MEDIA_TYPE) -> Result<()> {
-        crate::vlog!("pin ConnectionMediaType connected={}", self.shared.pin.lock().unwrap().connected.is_some());
+        crate::vlog!(
+            "pin ConnectionMediaType connected={}",
+            self.shared.pin.lock().unwrap().connected.is_some()
+        );
         let pin = self.shared.pin.lock().unwrap();
         if pin.connected.is_none() {
             return Err(VFW_E_NOT_CONNECTED.into());
@@ -374,7 +391,11 @@ impl IPin_Impl for UdsCamPin_Impl {
                 media::free_media_type(pmt);
                 return Err(E_UNEXPECTED.into());
             }
-            std::ptr::copy_nonoverlapping(src_ref.pbFormat, vih.cast::<u8>(), src_ref.cbFormat as usize);
+            std::ptr::copy_nonoverlapping(
+                src_ref.pbFormat,
+                vih.cast::<u8>(),
+                src_ref.cbFormat as usize,
+            );
             (*pmt).pbFormat = vih.cast();
             media::free_media_type(src);
         }
@@ -391,7 +412,8 @@ impl IPin_Impl for UdsCamPin_Impl {
             info.dir = PINDIR_OUTPUT;
             let name: Vec<u16> = "Output\0".encode_utf16().collect();
             info.achName[..name.len()].copy_from_slice(&name);
-            info.pFilter = std::mem::ManuallyDrop::new(self.shared.filter_this.lock().unwrap().clone());
+            info.pFilter =
+                std::mem::ManuallyDrop::new(self.shared.filter_this.lock().unwrap().clone());
         }
         Ok(())
     }
@@ -454,7 +476,9 @@ impl IPin_Impl for UdsCamPin_Impl {
 #[allow(non_snake_case)]
 impl IAMStreamConfig_Impl for UdsCamPin_Impl {
     fn SetFormat(&self, pmt: *const AM_MEDIA_TYPE) -> Result<()> {
-        crate::vlog!("pin SetFormat: {:?}", unsafe { crate::media::parse_media_type(pmt) });
+        crate::vlog!("pin SetFormat: {:?}", unsafe {
+            crate::media::parse_media_type(pmt)
+        });
         let mut pin = self.shared.pin.lock().unwrap();
         if pin.connected.is_some() {
             return Err(VFW_E_ALREADY_CONNECTED.into());
@@ -478,17 +502,24 @@ impl IAMStreamConfig_Impl for UdsCamPin_Impl {
         }
         unsafe {
             *picount = media::offer_count() as i32;
-            *pisize = size_of::<windows::Win32::Media::DirectShow::VIDEO_STREAM_CONFIG_CAPS>() as i32;
+            *pisize =
+                size_of::<windows::Win32::Media::DirectShow::VIDEO_STREAM_CONFIG_CAPS>() as i32;
         }
         Ok(())
     }
 
-    fn GetStreamCaps(&self, iindex: i32, ppmt: *mut *mut AM_MEDIA_TYPE, pscc: *mut u8) -> Result<()> {
+    fn GetStreamCaps(
+        &self,
+        iindex: i32,
+        ppmt: *mut *mut AM_MEDIA_TYPE,
+        pscc: *mut u8,
+    ) -> Result<()> {
         if ppmt.is_null() || pscc.is_null() {
             return Err(E_POINTER.into());
         }
         let pin = self.shared.pin.lock().unwrap();
-        let Some((format, w, h)) = media::offer(usize::try_from(iindex).unwrap_or(usize::MAX)) else {
+        let Some((format, w, h)) = media::offer(usize::try_from(iindex).unwrap_or(usize::MAX))
+        else {
             return Err(S_FALSE.into());
         };
         unsafe {
@@ -525,7 +556,9 @@ impl IKsPropertySet_Impl for UdsCamPin_Impl {
         cbpropdata: u32,
         pcbreturned: *mut u32,
     ) -> Result<()> {
-        crate::vlog!("pin KsPropertySet::Get set={:?} id={dwpropid}", unsafe { guidpropset.as_ref() });
+        crate::vlog!("pin KsPropertySet::Get set={:?} id={dwpropid}", unsafe {
+            guidpropset.as_ref()
+        });
         if guidpropset.is_null()
             || unsafe { *guidpropset } != AMPROPSETID_Pin
             || dwpropid != 0
@@ -535,7 +568,8 @@ impl IKsPropertySet_Impl for UdsCamPin_Impl {
             return Err(E_INVALIDARG.into());
         }
         unsafe {
-            *(ppropdata.cast::<GUID>()) = windows::Win32::Media::MediaFoundation::PIN_CATEGORY_CAPTURE;
+            *(ppropdata.cast::<GUID>()) =
+                windows::Win32::Media::MediaFoundation::PIN_CATEGORY_CAPTURE;
             if !pcbreturned.is_null() {
                 *pcbreturned = size_of::<GUID>() as u32;
             }
@@ -545,10 +579,7 @@ impl IKsPropertySet_Impl for UdsCamPin_Impl {
 
     fn QuerySupported(&self, guidpropset: *const GUID, dwpropid: u32) -> Result<u32> {
         crate::vlog!("pin KsPropertySet::QuerySupported id={dwpropid}");
-        if !guidpropset.is_null()
-            && unsafe { *guidpropset } == AMPROPSETID_Pin
-            && dwpropid == 0
-        {
+        if !guidpropset.is_null() && unsafe { *guidpropset } == AMPROPSETID_Pin && dwpropid == 0 {
             // KSPROPERTY_SUPPORT_GET
             return Ok(1);
         }
@@ -565,7 +596,10 @@ struct UdsEnumMediaTypes {
 
 impl UdsEnumMediaTypes {
     fn new(fps: u32) -> Self {
-        Self { fps, index: Mutex::new(0) }
+        Self {
+            fps,
+            index: Mutex::new(0),
+        }
     }
 }
 
@@ -584,7 +618,9 @@ impl IEnumMediaTypes_Impl for UdsEnumMediaTypes_Impl {
         {
             let mut index = self.index.lock().unwrap();
             while fetched < cmediatypes {
-                let Some((format, w, h)) = media::offer(*index) else { break };
+                let Some((format, w, h)) = media::offer(*index) else {
+                    break;
+                };
                 let mt = unsafe { media::make_media_type(format, w, h, self.fps) };
                 match mt {
                     Some(mt) => {
@@ -599,7 +635,11 @@ impl IEnumMediaTypes_Impl for UdsEnumMediaTypes_Impl {
         if !pcfetched.is_null() {
             unsafe { *pcfetched = fetched };
         }
-        if fetched == cmediatypes { S_OK } else { S_FALSE }
+        if fetched == cmediatypes {
+            S_OK
+        } else {
+            S_FALSE
+        }
     }
 
     fn Skip(&self, cmediatypes: u32) -> Result<()> {
@@ -622,4 +662,3 @@ impl IEnumMediaTypes_Impl for UdsEnumMediaTypes_Impl {
         Ok(cloned.into())
     }
 }
-

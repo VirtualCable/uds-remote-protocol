@@ -92,7 +92,10 @@ struct SelfTest {
 
 impl SelfTest {
     fn new() -> Self {
-        Self { start: Instant::now(), sent: 0 }
+        Self {
+            start: Instant::now(),
+            sent: 0,
+        }
     }
 
     /// Fixed schedule: `(delay from start, message)`.
@@ -102,21 +105,92 @@ impl SelfTest {
         // are normalized 0..=65535 (§18.37); the values below target roughly
         // the same spots as the old pixel schedule on a ~1680x1050 desktop.
         let mut v: Vec<(Duration, InputMessage)> = vec![
-            (Duration::from_millis(2000), I::PointerMove { display_id: 0, x: 27306, y: 24965 }),
-            (Duration::from_millis(2500), I::PointerButton { button: PointerButton::Left, down: true }),
-            (Duration::from_millis(2600), I::PointerButton { button: PointerButton::Left, down: false }),
-            (Duration::from_millis(4000), I::PointerMove { display_id: 0, x: 1755, y: 2871 }),
-            (Duration::from_millis(4500), I::PointerButton { button: PointerButton::Left, down: true }),
-            (Duration::from_millis(4600), I::PointerButton { button: PointerButton::Left, down: false }),
-            (Duration::from_millis(8000), I::PointerMove { display_id: 0, x: 27306, y: 24965 }),
-            (Duration::from_millis(8500), I::PointerButton { button: PointerButton::Right, down: true }),
-            (Duration::from_millis(8600), I::PointerButton { button: PointerButton::Right, down: false }),
+            (
+                Duration::from_millis(2000),
+                I::PointerMove {
+                    display_id: 0,
+                    x: 27306,
+                    y: 24965,
+                },
+            ),
+            (
+                Duration::from_millis(2500),
+                I::PointerButton {
+                    button: PointerButton::Left,
+                    down: true,
+                },
+            ),
+            (
+                Duration::from_millis(2600),
+                I::PointerButton {
+                    button: PointerButton::Left,
+                    down: false,
+                },
+            ),
+            (
+                Duration::from_millis(4000),
+                I::PointerMove {
+                    display_id: 0,
+                    x: 1755,
+                    y: 2871,
+                },
+            ),
+            (
+                Duration::from_millis(4500),
+                I::PointerButton {
+                    button: PointerButton::Left,
+                    down: true,
+                },
+            ),
+            (
+                Duration::from_millis(4600),
+                I::PointerButton {
+                    button: PointerButton::Left,
+                    down: false,
+                },
+            ),
+            (
+                Duration::from_millis(8000),
+                I::PointerMove {
+                    display_id: 0,
+                    x: 27306,
+                    y: 24965,
+                },
+            ),
+            (
+                Duration::from_millis(8500),
+                I::PointerButton {
+                    button: PointerButton::Right,
+                    down: true,
+                },
+            ),
+            (
+                Duration::from_millis(8600),
+                I::PointerButton {
+                    button: PointerButton::Right,
+                    down: false,
+                },
+            ),
         ];
         // "test" (Set 1: t=0x14, e=0x12, s=0x1F) typed at t=10s.
         for (i, sc) in [0x14u16, 0x12, 0x1F, 0x14].iter().enumerate() {
             let base = Duration::from_millis(10_000 + 200 * i as u64);
-            v.push((base, I::Key { down: true, scancode: *sc, extended: false }));
-            v.push((base + Duration::from_millis(100), I::Key { down: false, scancode: *sc, extended: false }));
+            v.push((
+                base,
+                I::Key {
+                    down: true,
+                    scancode: *sc,
+                    extended: false,
+                },
+            ));
+            v.push((
+                base + Duration::from_millis(100),
+                I::Key {
+                    down: false,
+                    scancode: *sc,
+                    extended: false,
+                },
+            ));
         }
         v
     }
@@ -205,7 +279,9 @@ fn parse_args() -> Result<Args> {
         match arg.as_str() {
             "--addr" => args.addr = value.parse().context("bad --addr")?,
             "--resolution" => {
-                let (w, h) = value.split_once(['x', 'X']).context("bad --resolution (WxH)")?;
+                let (w, h) = value
+                    .split_once(['x', 'X'])
+                    .context("bad --resolution (WxH)")?;
                 args.pref_resolution = (
                     w.trim().parse().context("bad --resolution width")?,
                     h.trim().parse().context("bad --resolution height")?,
@@ -227,7 +303,9 @@ fn parse_args() -> Result<Args> {
             }
             "--selftest-clipboard" => args.selftest_clipboard = Some(value),
             "--selftest-resize" => {
-                let (w, h) = value.split_once(['x', 'X']).context("bad --selftest-resize (WxH)")?;
+                let (w, h) = value
+                    .split_once(['x', 'X'])
+                    .context("bad --selftest-resize (WxH)")?;
                 args.selftest_resize = Some((
                     w.trim().parse().context("bad --selftest-resize width")?,
                     h.trim().parse().context("bad --selftest-resize height")?,
@@ -261,7 +339,9 @@ struct ClipboardAnnounce {
 impl channels::clipboard::ClipboardCallback for ClipboardAnnounce {
     fn text_available(&self, text: String) {
         info!(len = text.len(), "local clipboard changed");
-        let _ = self.commands.try_send(ClientCommand::ClipboardChanged(text));
+        let _ = self
+            .commands
+            .try_send(ClientCommand::ClipboardChanged(text));
     }
 }
 
@@ -279,11 +359,16 @@ struct CursorShape {
     hot_x: u16,
     hot_y: u16,
     rgba: Vec<u8>,
+    #[expect(dead_code, reason = "the terminal renderer only uses the RGBA")]
+    xor_mask: Vec<u8>,
 }
 
 impl ClientCursor {
     fn new() -> Self {
-        Self { visible: true, shape: None }
+        Self {
+            visible: true,
+            shape: None,
+        }
     }
 }
 
@@ -379,9 +464,13 @@ impl Gui {
     /// the window buffer and presents, with the cursor overlaid at the local
     /// pointer position (§10). No-op headless beyond bookkeeping.
     fn render(&mut self, displays: &Displays, rects: &[Rect], cursor: &ClientCursor) -> Result<()> {
-        let Some(display) = displays.get(0) else { return Ok(()) };
+        let Some(display) = displays.get(0) else {
+            return Ok(());
+        };
         let (w, h) = {
-            let guard = display.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = display
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             (guard.width(), guard.height())
         };
         if w == 0 || h == 0 {
@@ -393,18 +482,16 @@ impl Gui {
         }
         let (w, h) = (w as usize, h as usize);
         if self.window.is_none() {
-            let window = minifb::Window::new(
-                "uds-rp testclient",
-                w,
-                h,
-                minifb::WindowOptions::default(),
-            )
-            .context("window creation")?;
+            let window =
+                minifb::Window::new("uds-rp testclient", w, h, minifb::WindowOptions::default())
+                    .context("window creation")?;
             self.window = Some(window);
         }
         self.pixels.resize(w * h, 0);
         {
-            let guard = display.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let guard = display
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let fb = guard.pixels();
             for rect in rects {
                 blit_rect(fb, w, h, *rect, &mut self.pixels);
@@ -429,7 +516,9 @@ impl Gui {
                 overlay_cursor(&mut self.pixels, w, h, shape, fx, fy);
             }
         }
-        window.update_with_buffer(&self.pixels, w, h).context("render")?;
+        window
+            .update_with_buffer(&self.pixels, w, h)
+            .context("render")?;
         Ok(())
     }
 }
@@ -466,8 +555,12 @@ fn blit_rect(fb: &[u8], w: usize, h: usize, rect: Rect, pixels: &mut [u32]) {
 /// Writes the display-0 framebuffer (tight BGRA) as a binary PPM (P6).
 fn dump_frame_ppm(displays: &Displays, path: &std::path::Path) -> Result<()> {
     use std::io::Write as _;
-    let Some(display) = displays.get(0) else { bail!("no display 0") };
-    let guard = display.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(display) = displays.get(0) else {
+        bail!("no display 0")
+    };
+    let guard = display
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (w, h) = (guard.width() as usize, guard.height() as usize);
     let fb = guard.pixels();
     let mut out = Vec::with_capacity(w * h * 3);
@@ -491,13 +584,19 @@ struct InputPoll {
 
 impl InputPoll {
     fn new() -> Self {
-        Self { last_pos: None, buttons: [false; 3], keys: Vec::new() }
+        Self {
+            last_pos: None,
+            buttons: [false; 3],
+            keys: Vec::new(),
+        }
     }
 
     /// Collects the input events since the last poll.
     fn poll(&mut self, gui: &Gui) -> Vec<InputMessage> {
         let mut out = Vec::new();
-        let Some(window) = &gui.window else { return out };
+        let Some(window) = &gui.window else {
+            return out;
+        };
         let (fw, fh) = gui.frame_size;
         if fw == 0 || fh == 0 {
             return out;
@@ -516,7 +615,11 @@ impl InputPoll {
             );
             if self.last_pos != Some(pos) {
                 self.last_pos = Some(pos);
-                out.push(InputMessage::PointerMove { display_id: 0, x: pos.0, y: pos.1 });
+                out.push(InputMessage::PointerMove {
+                    display_id: 0,
+                    x: pos.0,
+                    y: pos.1,
+                });
             }
         }
         // Buttons (minifb exposes left/right/middle only).
@@ -546,14 +649,22 @@ impl InputPoll {
             if !self.keys.contains(key)
                 && let Some((scancode, extended)) = set1_scancode(*key)
             {
-                out.push(InputMessage::Key { down: true, scancode, extended });
+                out.push(InputMessage::Key {
+                    down: true,
+                    scancode,
+                    extended,
+                });
             }
         }
         for key in &self.keys {
             if !pressed.contains(key)
                 && let Some((scancode, extended)) = set1_scancode(*key)
             {
-                out.push(InputMessage::Key { down: false, scancode, extended });
+                out.push(InputMessage::Key {
+                    down: false,
+                    scancode,
+                    extended,
+                });
             }
         }
         self.keys = pressed;
@@ -745,10 +856,9 @@ async fn run() -> Result<()> {
     // Storage (M8): requested transfers fire once, ~2 s into the session;
     // the session is closed when all of them settled (E2E determinism).
     let storage_at = Instant::now() + Duration::from_secs(2);
-    let mut storage_pending_actions = (args.upload.is_some()
-        || args.download.is_some()
-        || args.storage_list)
-        .then_some(storage_at);
+    let mut storage_pending_actions =
+        (args.upload.is_some() || args.download.is_some() || args.storage_list)
+            .then_some(storage_at);
     let mut transfers_in_flight = 0u32;
     let transfers_requested = u32::from(args.upload.is_some()) + u32::from(args.download.is_some());
     // §18.53: fixed conflict answer from `--on-conflict` (default take-over).
@@ -797,9 +907,9 @@ async fn run() -> Result<()> {
                         info!(visible, "cursor visibility");
                         cursor.visible = visible;
                     }
-                    ClientEvent::CursorShape { width, height, hot_x, hot_y, rgba } => {
-                        info!(width, height, "cursor shape");
-                        cursor.shape = Some(CursorShape { width, height, hot_x, hot_y, rgba });
+                    ClientEvent::CursorShape { width, height, hot_x, hot_y, rgba, xor_mask } => {
+                        info!(width, height, xor = xor_mask.len(), "cursor shape");
+                        cursor.shape = Some(CursorShape { width, height, hot_x, hot_y, rgba, xor_mask });
                     }
                     ClientEvent::ClipboardData { text } => {
                         info!(len = text.len(), "remote clipboard data");
@@ -923,7 +1033,14 @@ mod tests {
     use super::*;
 
     fn shape_1px(r: u8, g: u8, b: u8, a: u8) -> CursorShape {
-        CursorShape { width: 1, height: 1, hot_x: 0, hot_y: 0, rgba: vec![r, g, b, a] }
+        CursorShape {
+            width: 1,
+            height: 1,
+            hot_x: 0,
+            hot_y: 0,
+            rgba: vec![r, g, b, a],
+            xor_mask: Vec::new(),
+        }
     }
 
     #[test]
@@ -960,11 +1077,33 @@ mod tests {
         // 2x1 BGRA framebuffer: pixel 0 = red, pixel 1 = green.
         let fb: [u8; 8] = [0, 0, 255, 0, 0, 255, 0, 0];
         let mut px = vec![0u32; 2];
-        blit_rect(&fb, 2, 1, Rect { x: 0, y: 0, w: 2, h: 1 }, &mut px);
+        blit_rect(
+            &fb,
+            2,
+            1,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 2,
+                h: 1,
+            },
+            &mut px,
+        );
         assert_eq!(px, vec![0x00FF_0000, 0x0000_FF00]);
         // A rect entirely outside leaves the buffer untouched.
         px.fill(7);
-        blit_rect(&fb, 2, 1, Rect { x: 5, y: 0, w: 2, h: 1 }, &mut px);
+        blit_rect(
+            &fb,
+            2,
+            1,
+            Rect {
+                x: 5,
+                y: 0,
+                w: 2,
+                h: 1,
+            },
+            &mut px,
+        );
         assert_eq!(px, vec![7, 7]);
     }
 }

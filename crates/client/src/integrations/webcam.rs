@@ -44,12 +44,8 @@ pub trait WebcamSource: Send + Sync + std::fmt::Debug {
     /// receiver ends when [`WebcamSource::stop`] is called or the source
     /// is dropped. Starting twice without an intermediate stop is an
     /// error.
-    fn start(
-        &self,
-        width: u32,
-        height: u32,
-        fps: u32,
-    ) -> anyhow::Result<flume::Receiver<RawFrame>>;
+    fn start(&self, width: u32, height: u32, fps: u32)
+    -> anyhow::Result<flume::Receiver<RawFrame>>;
     /// Stops the stream started by [`WebcamSource::start`]. Idempotent.
     fn stop(&self);
 }

@@ -51,7 +51,12 @@ impl Fragmenter {
     /// `display_id`/`frame_id`, all stamped with `capture_ts_ms` (ms on the
     /// server's session clock, §9.1). `frame_id` is truncated to 24 bits.
     #[must_use]
-    pub fn split(display_id: u8, frame_id: u32, capture_ts_ms: u32, element: &[u8]) -> Vec<Vec<u8>> {
+    pub fn split(
+        display_id: u8,
+        frame_id: u32,
+        capture_ts_ms: u32,
+        element: &[u8],
+    ) -> Vec<Vec<u8>> {
         let chunk = fragment_payload_max();
         let count = element.len().div_ceil(chunk).max(1);
         let frame_id = frame_id & 0x00FF_FFFF;
@@ -64,7 +69,9 @@ impl Fragmenter {
                 let mut frag = Vec::with_capacity(HEADER_SIZE + (end - start));
                 frag.push(display_id);
                 frag.extend_from_slice(&frame_id.to_be_bytes()[1..]);
-                frag.extend_from_slice(&u16::try_from(idx).expect("idx < count ≤ u16").to_be_bytes());
+                frag.extend_from_slice(
+                    &u16::try_from(idx).expect("idx < count ≤ u16").to_be_bytes(),
+                );
                 frag.extend_from_slice(&count16.to_be_bytes());
                 frag.extend_from_slice(&capture_ts_ms.to_be_bytes());
                 frag.extend_from_slice(&element[start..end]);
@@ -187,8 +194,7 @@ impl Reassembler {
         let frame_id = u32::from_be_bytes([0, frag[1], frag[2], frag[3]]);
         let idx = u16::from_be_bytes(frag[4..6].try_into().expect("2-byte slice"));
         let count = u16::from_be_bytes(frag[6..8].try_into().expect("2-byte slice"));
-        let capture_ts_ms =
-            u32::from_be_bytes(frag[8..12].try_into().expect("4-byte slice"));
+        let capture_ts_ms = u32::from_be_bytes(frag[8..12].try_into().expect("4-byte slice"));
         let chunk = &frag[HEADER_SIZE..];
         if count == 0
             || count > MAX_FRAME_FRAGMENTS

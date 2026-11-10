@@ -304,7 +304,9 @@ impl LadderEncoder {
             height,
             ladder: Ladder::new(policy, Instant::now()),
             jpeg: JpegRectsEncoder::new(width, height, jpeg_quality)?,
-            vp9: Vp9Backend::Mf(crate::mf::MfEncoder::new_vp9(width, height, 30, vp9_kbps, hw_only)?),
+            vp9: Vp9Backend::Mf(crate::mf::MfEncoder::new_vp9(
+                width, height, 30, vp9_kbps, hw_only,
+            )?),
             prev: None,
             pending_change: None,
             force_full: false,
@@ -472,7 +474,13 @@ impl VideoEncoder for LadderEncoder {
                 bottom: self.height as i32,
             }]
         } else {
-            rects::dirty_rects(self.prev.as_deref(), frame.data, self.width, self.height, frame.stride)
+            rects::dirty_rects(
+                self.prev.as_deref(),
+                frame.data,
+                self.width,
+                self.height,
+                frame.stride,
+            )
         };
         // Changed-area metric (§18.75.18): sampled and delta-thresholded,
         // NOT the exact encoding diff above — byte-exact diffing reports
@@ -482,8 +490,14 @@ impl VideoEncoder for LadderEncoder {
             0.0
         } else {
             100.0
-                * rects::changed_area_fraction(self.prev.as_deref(), frame.data, self.width, self.height, frame.stride)
-                    .unwrap_or(1.0)
+                * rects::changed_area_fraction(
+                    self.prev.as_deref(),
+                    frame.data,
+                    self.width,
+                    self.height,
+                    frame.stride,
+                )
+                .unwrap_or(1.0)
         };
 
         // Lab diagnostics: every 5 s, what the diff is actually seeing —
@@ -731,7 +745,12 @@ mod tests {
     }
 
     fn vf<'a>(w: u32, h: u32, data: &'a [u8]) -> VideoFrame<'a> {
-        VideoFrame { width: w, height: h, stride: w as usize * 4, data }
+        VideoFrame {
+            width: w,
+            height: h,
+            stride: w as usize * 4,
+            data,
+        }
     }
 
     /// Feeds frames until the codec becomes `want` or the tries run out.
@@ -762,7 +781,12 @@ mod tests {
         let mut enc = LadderEncoder::new(w, h, policy(), 1000, 80).unwrap();
         enc.jpeg_bpp_ema = Some(0.5);
         enc.vp9_bytes_ema = Some(1000.0);
-        let half = vec![rects::Rect { left: 0, top: 0, right: 128, bottom: 32 }];
+        let half = vec![rects::Rect {
+            left: 0,
+            top: 0,
+            right: 128,
+            bottom: 32,
+        }];
         assert!(enc.down_switch_vetoed(&half));
         // Cheap JPEG (0.1 bytes/px -> 409 estimated) passes the veto.
         enc.jpeg_bpp_ema = Some(0.1);
@@ -814,13 +838,21 @@ mod tests {
         for i in 0..6u8 {
             for row in 8..24usize {
                 for x in 8..40usize {
-                    patched[(row * wu + x) * 4..][..4]
-                        .copy_from_slice(&[200, 100 + i * 20, 50, 255]);
+                    patched[(row * wu + x) * 4..][..4].copy_from_slice(&[
+                        200,
+                        100 + i * 20,
+                        50,
+                        255,
+                    ]);
                 }
             }
             enc.encode(&vf(w, h, &patched)).unwrap();
         }
-        assert_eq!(enc.ladder.level(), Level::Low, "menu burst must not fire the guard");
+        assert_eq!(
+            enc.ladder.level(),
+            Level::Low,
+            "menu burst must not fire the guard"
+        );
     }
 
     #[test]
@@ -838,7 +870,11 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
             let b = solid(w, h, [200, 100 + i * 40, 50, 255]);
             enc.encode(&vf(w, h, &b)).unwrap();
-            assert_eq!(enc.ladder.level(), Level::Low, "warm-up frame {i} must not fire");
+            assert_eq!(
+                enc.ladder.level(),
+                Level::Low,
+                "warm-up frame {i} must not fire"
+            );
         }
     }
 
@@ -890,9 +926,18 @@ mod tests {
 
         let mut toggling = true;
         let mut vp9_keyframe_seen = false;
-        assert!(drive_until_state(&mut enc, w, h, &mut toggling, &mut vp9_keyframe_seen));
+        assert!(drive_until_state(
+            &mut enc,
+            w,
+            h,
+            &mut toggling,
+            &mut vp9_keyframe_seen
+        ));
         assert_eq!(enc.codec_type(), VideoCodecType::Vp9);
-        assert!(vp9_keyframe_seen, "first VP9 frame after the switch is a keyframe");
+        assert!(
+            vp9_keyframe_seen,
+            "first VP9 frame after the switch is a keyframe"
+        );
         // The change was reported exactly once.
         assert_eq!(enc.take_codec_change(), None);
     }
@@ -946,7 +991,14 @@ mod tests {
         assert!(vp9, "sustained 50 % change must reach VP9");
         while enc.take_codec_change().is_some() {}
 
-        assert!(drive_until(&mut enc, w, h, &quiet, VideoCodecType::JpegRects, 600));
+        assert!(drive_until(
+            &mut enc,
+            w,
+            h,
+            &quiet,
+            VideoCodecType::JpegRects,
+            600
+        ));
         // The back-switch announced JPEG and the frame is a full rect.
         assert_eq!(enc.take_codec_change(), Some(VideoCodecType::JpegRects));
     }
@@ -991,7 +1043,10 @@ mod tests {
         // A keyframe request in the video regime must reach the VP9 encoder.
         enc.request_keyframe();
         let p = enc.encode(&vf(w, h, &f)).unwrap();
-        assert!(p.keyframe, "keyframe request in VP9 regime must emit a keyframe");
+        assert!(
+            p.keyframe,
+            "keyframe request in VP9 regime must emit a keyframe"
+        );
 
         // Re-entering High later must also start with a keyframe: the peer
         // rebuilds its decoder on the codec switch and a delta would be
@@ -1002,7 +1057,8 @@ mod tests {
         let p = enc.encode(&vf(w, h, &f)).unwrap();
         assert!(p.keyframe, "re-entering VP9 must emit a keyframe");
         let mut dec = Vp9Decoder::new().unwrap();
-        dec.decode(&p).expect("a fresh decoder accepts the re-entry keyframe");
+        dec.decode(&p)
+            .expect("a fresh decoder accepts the re-entry keyframe");
     }
 
     #[test]

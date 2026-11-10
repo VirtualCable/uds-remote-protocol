@@ -70,7 +70,6 @@ impl PdfToDirSink {
             done: Vec::new(),
         })
     }
-
 }
 
 impl PrinterSink for PdfToDirSink {
@@ -117,7 +116,11 @@ impl PrinterSink for PdfToDirSink {
         };
         job.received += data.len() as u64;
         if job.received > self.max_job_bytes {
-            warn!(job_id, received = job.received, "print job exceeds the size cap");
+            warn!(
+                job_id,
+                received = job.received,
+                "print job exceeds the size cap"
+            );
             self.open.remove(&job_id);
             return Err(STATUS_FAILED);
         }

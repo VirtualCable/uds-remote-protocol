@@ -18,56 +18,55 @@
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
 
+use windows::Win32::Foundation::TRUE;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    ID3D11VideoContext, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
-    ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
+    D3D11_VPIV_DIMENSION_TEXTURE2D, D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device,
+    ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView,
+    ID3D11VideoProcessorOutputView,
 };
-use windows::Win32::Foundation::TRUE;
-use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
-};
-use windows::Win32::Graphics::Dxgi::IDXGISurface;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT,
     D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT,
 };
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_RATIONAL, DXGI_SAMPLE_DESC,
+};
+use windows::Win32::Graphics::Dxgi::IDXGISurface;
 use windows::Win32::Media::MediaFoundation::{
-    IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType, IMFSample,
-    IMFTransform, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFShutdown, MFStartup,
-    MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoFormat_VP90,
-    MFVideoInterlace_Progressive, MFSampleExtension_CleanPoint, MFSTARTUP_FULL, MF_VERSION,
-    MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_GEOMETRIC_APERTURE,
-    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE,
-    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_TRANSFORM_FLAGS_Attribute,
-    MFTEnumEx,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG,
-    MFT_ENUM_FLAG_ASYNCMFT, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT, MFT_ENUM_FLAG_SYNCMFT,
-    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO,
-    MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, METransformHaveOutput, METransformNeedInput,
-    MFT_CATEGORY_VIDEO_DECODER,
+    CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
+    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncVideoForceKeyFrame,
+    CODECAPI_AVLowLatencyMode, ICodecAPI, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High,
 };
 use windows::Win32::Media::MediaFoundation::{
-    eAVEncH264VProfile_High, CODECAPI_AVEncCommonMeanBitRate,
-    CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVDefaultBPictureCount,
-    CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI,
-    MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE,
-    MF_MT_MPEG2_PROFILE,
+    IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType,
+    IMFSample, IMFTransform, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS, METransformHaveOutput,
+    METransformNeedInput, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_GEOMETRIC_APERTURE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
+    MF_MT_SAMPLE_SIZE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC,
+    MF_TRANSFORM_ASYNC_UNLOCK, MF_TRANSFORM_FLAGS_Attribute, MF_VERSION, MFCreateDXGIDeviceManager,
+    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFMediaType_Video, MFSTARTUP_FULL, MFSampleExtension_CleanPoint, MFShutdown, MFStartup,
+    MFT_CATEGORY_VIDEO_DECODER, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_ASYNCMFT,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_LOCALMFT, MFT_ENUM_FLAG_SYNCMFT,
+    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_INFO, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx,
+    MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoFormat_VP90,
+    MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Variant::{VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_UI4};
 use windows::core::{GUID, Interface};
 
-use crate::video::{DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame};
+use crate::video::{
+    DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame,
+};
 use crate::{CodecError, Result};
 
 /// Packs a SIZE attribute (MF_MT_FRAME_SIZE) the way MFSetAttributeSize did.
@@ -105,10 +104,7 @@ pub struct MftInfo {
     pub async_mft: bool,
 }
 
-const SUBTYPES: [(&GUID, &str); 2] = [
-    (&MFVideoFormat_VP90, "VP9"),
-    (&MFVideoFormat_H264, "H264"),
-];
+const SUBTYPES: [(&GUID, &str); 2] = [(&MFVideoFormat_VP90, "VP9"), (&MFVideoFormat_H264, "H264")];
 
 /// Enumerates the registered VP9/H264 video-encoder MFTs (probe tool).
 pub fn enumerate_encoders() -> Result<Vec<MftInfo>> {
@@ -256,7 +252,9 @@ impl MfGuard {
 
 impl Drop for MfGuard {
     fn drop(&mut self) {
-        unsafe { let _ = MFShutdown(); }
+        unsafe {
+            let _ = MFShutdown();
+        }
     }
 }
 
@@ -347,7 +345,12 @@ pub struct MfEncoder {
 /// chain that converts the captured BGRA texture into the NV12 surface the
 /// hardware encoder consumes. Any failure here means "no GPU path" — the
 /// caller retries with CPU input or falls back to libvpx.
-fn init_gpu(transform: &IMFTransform, device: &ID3D11Device, width: u32, height: u32) -> Result<GpuPipeline> {
+fn init_gpu(
+    transform: &IMFTransform,
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+) -> Result<GpuPipeline> {
     unsafe {
         let mut token = 0u32;
         let mut manager: Option<IMFDXGIDeviceManager> = None;
@@ -359,10 +362,7 @@ fn init_gpu(transform: &IMFTransform, device: &ID3D11Device, width: u32, height:
             .ResetDevice(device, token)
             .map_err(|e| CodecError::Backend(format!("DXGI manager ResetDevice: {e}")))?;
         transform
-            .ProcessMessage(
-                MFT_MESSAGE_SET_D3D_MANAGER,
-                manager.as_raw() as usize,
-            )
+            .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)
             .map_err(|e| CodecError::Backend(format!("MFT rejected the D3D11 manager: {e}")))?;
 
         let video_device: ID3D11VideoDevice = device
@@ -377,12 +377,18 @@ fn init_gpu(transform: &IMFTransform, device: &ID3D11Device, width: u32, height:
 
         let vp_content = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-            InputFrameRate: DXGI_RATIONAL { Numerator: 30, Denominator: 1 },
+            InputFrameRate: DXGI_RATIONAL {
+                Numerator: 30,
+                Denominator: 1,
+            },
             InputWidth: width,
             InputHeight: height,
             OutputWidth: width,
             OutputHeight: height,
-            OutputFrameRate: DXGI_RATIONAL { Numerator: 30, Denominator: 1 },
+            OutputFrameRate: DXGI_RATIONAL {
+                Numerator: 30,
+                Denominator: 1,
+            },
             Usage: D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
         };
         let enumerator = video_device
@@ -411,7 +417,10 @@ fn init_gpu(transform: &IMFTransform, device: &ID3D11Device, width: u32, height:
             MipLevels: 1,
             ArraySize: 1,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
             CPUAccessFlags: 0,
@@ -528,7 +537,10 @@ impl MfEncoder {
                     .and_then(|a| a.GetUINT32(&MF_TRANSFORM_FLAGS_Attribute))
                     .unwrap_or(0)
             };
-            eprintln!("[mf] post-activate flags=0x{flags:x} events={}", events.is_some());
+            eprintln!(
+                "[mf] post-activate flags=0x{flags:x} events={}",
+                events.is_some()
+            );
         }
 
         // Zero-copy GPU input (H2): hand the DXGI device manager to the
@@ -553,7 +565,8 @@ impl MfEncoder {
         let out_type = unsafe { MFCreateMediaType() }
             .map_err(|e| CodecError::Backend(format!("MFCreateMediaType: {e}")))?;
         unsafe {
-            out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+            out_type
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .and_then(|()| out_type.SetGUID(&MF_MT_SUBTYPE, codec.subtype()))
                 .and_then(|()| {
                     // H264: the profile is a required part of the type for
@@ -569,15 +582,10 @@ impl MfEncoder {
                     }
                 })
                 .and_then(|()| out_type.SetUINT32(&MF_MT_AVG_BITRATE, kbps * 1000))
-                .and_then(|()| {
-                    out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
-                })
+                .and_then(|()| out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height)))
                 .and_then(|()| out_type.SetUINT64(&MF_MT_FRAME_RATE, pack_size(fps, 1)))
                 .and_then(|()| {
-                    out_type.SetUINT32(
-                        &MF_MT_INTERLACE_MODE,
-                        MFVideoInterlace_Progressive.0 as u32,
-                    )
+                    out_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                 })
                 .map_err(|e| CodecError::Backend(format!("output media type: {e}")))?;
             transform
@@ -591,22 +599,17 @@ impl MfEncoder {
             let in_type = unsafe { MFCreateMediaType() }
                 .map_err(|e| CodecError::Backend(format!("MFCreateMediaType: {e}")))?;
             unsafe {
-                in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                in_type
+                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                     .and_then(|()| in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12))
-                    .and_then(|()| {
-                        in_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
-                    })
+                    .and_then(|()| in_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height)))
                     .and_then(|()| in_type.SetUINT64(&MF_MT_FRAME_RATE, pack_size(fps, 1)))
                     .and_then(|()| {
-                        in_type.SetUINT32(
-                            &MF_MT_INTERLACE_MODE,
-                            MFVideoInterlace_Progressive.0 as u32,
-                        )
+                        in_type
+                            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                     })
                     .and_then(|()| in_type.SetUINT32(&MF_MT_DEFAULT_STRIDE, width))
-                    .and_then(|()| {
-                        in_type.SetUINT32(&MF_MT_SAMPLE_SIZE, width * height * 3 / 2)
-                    })
+                    .and_then(|()| in_type.SetUINT32(&MF_MT_SAMPLE_SIZE, width * height * 3 / 2))
                     .map_err(|e| CodecError::Backend(format!("input media type: {e}")))?;
                 transform
                     .SetInputType(in_stream, &in_type, 0)
@@ -619,17 +622,14 @@ impl MfEncoder {
             let in_type = unsafe { MFCreateMediaType() }
                 .map_err(|e| CodecError::Backend(format!("MFCreateMediaType: {e}")))?;
             unsafe {
-                in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                in_type
+                    .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                     .and_then(|()| in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_I420))
-                    .and_then(|()| {
-                        in_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height))
-                    })
+                    .and_then(|()| in_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_size(width, height)))
                     .and_then(|()| in_type.SetUINT64(&MF_MT_FRAME_RATE, pack_size(fps, 1)))
                     .and_then(|()| {
-                        in_type.SetUINT32(
-                            &MF_MT_INTERLACE_MODE,
-                            MFVideoInterlace_Progressive.0 as u32,
-                        )
+                        in_type
+                            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                     })
                     .map_err(|e| CodecError::Backend(format!("input media type: {e}")))?;
                 transform
@@ -656,8 +656,8 @@ impl MfEncoder {
                 if matches!(codec, MftCodec::H264) {
                     // No B-frames: interactive desktop needs decode order
                     // == presentation order.
-                    let _ = codec_api
-                        .SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0));
+                    let _ =
+                        codec_api.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0));
                 }
             }
             codec_api
@@ -694,8 +694,7 @@ impl MfEncoder {
             in_stream,
             out_stream,
             out_cb_size: out_info.cbSize.max(width * height),
-            out_provides_samples: out_info.dwFlags
-                & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
+            out_provides_samples: out_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
                 != 0,
             nv12,
             codec: codec.codec_type(),
@@ -757,13 +756,17 @@ impl MfEncoder {
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
             buffer
                 .Unlock()
-                .and_then(|()| buffer.SetCurrentLength(u32::try_from(data.len()).unwrap_or(u32::MAX)))
+                .and_then(|()| {
+                    buffer.SetCurrentLength(u32::try_from(data.len()).unwrap_or(u32::MAX))
+                })
                 .map_err(|e| CodecError::Backend(format!("buffer commit: {e}")))?;
             sample
                 .AddBuffer(&buffer)
                 .map_err(|e| CodecError::Backend(format!("AddBuffer: {e}")))?;
             let dur = 10_000_000i64 / i64::from(self.fps.max(1));
-            sample.SetSampleTime(self.frame_counter.cast_signed() * dur).ok();
+            sample
+                .SetSampleTime(self.frame_counter.cast_signed() * dur)
+                .ok();
             sample.SetSampleDuration(dur).ok();
         }
         Ok(sample)
@@ -793,10 +796,7 @@ impl MfEncoder {
                 pEvents: ManuallyDrop::new(None),
             }];
             let mut status = 0u32;
-            let result = unsafe {
-                self.transform
-                    .ProcessOutput(0, &mut bufs, &raw mut status)
-            };
+            let result = unsafe { self.transform.ProcessOutput(0, &mut bufs, &raw mut status) };
             match result {
                 Ok(()) => {
                     let sample = unsafe { ManuallyDrop::take(&mut bufs[0].pSample) }
@@ -809,8 +809,7 @@ impl MfEncoder {
                         contiguous
                             .Lock(&raw mut ptr, None, Some(&raw mut len))
                             .map_err(|e| CodecError::Backend(format!("out lock: {e}")))?;
-                        let data =
-                            std::slice::from_raw_parts(ptr, len as usize).to_vec();
+                        let data = std::slice::from_raw_parts(ptr, len as usize).to_vec();
                         let _ = contiguous.Unlock();
                         let keyframe =
                             sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
@@ -835,8 +834,8 @@ impl MfEncoder {
             .ok_or_else(|| CodecError::Backend("async MFT without event generator".into()))?;
         let ev = unsafe { events.GetEvent(MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS(0)) }
             .map_err(|e| CodecError::Backend(format!("GetEvent: {e}")))?;
-        let kind = unsafe { ev.GetType() }
-            .map_err(|e| CodecError::Backend(format!("event type: {e}")))?;
+        let kind =
+            unsafe { ev.GetType() }.map_err(|e| CodecError::Backend(format!("event type: {e}")))?;
         if std::env::var_os("MF_DEBUG").is_some() {
             let what = match kind.cast_signed() {
                 k if k == METransformNeedInput.0 => "NeedInput",
@@ -865,7 +864,9 @@ impl MfEncoder {
     fn submit_and_collect(&mut self, sample: &IMFSample) -> Result<EncodedPacket> {
         unsafe {
             let dur = 10_000_000i64 / i64::from(self.fps.max(1));
-            sample.SetSampleTime(self.frame_counter.cast_signed() * dur).ok();
+            sample
+                .SetSampleTime(self.frame_counter.cast_signed() * dur)
+                .ok();
             sample.SetSampleDuration(dur).ok();
         }
         self.frame_counter += 1;
@@ -931,8 +932,9 @@ impl MfEncoder {
             .nv12_feed
             .cast()
             .map_err(|e| CodecError::Backend(format!("NV12 texture is no DXGI surface: {e}")))?;
-        let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &surface, 0, false) }
-            .map_err(|e| CodecError::Backend(format!("MFCreateDXGISurfaceBuffer: {e}")))?;
+        let buffer =
+            unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &surface, 0, false) }
+                .map_err(|e| CodecError::Backend(format!("MFCreateDXGISurfaceBuffer: {e}")))?;
         unsafe {
             sample
                 .AddBuffer(&buffer)
@@ -971,7 +973,10 @@ impl MfEncoder {
                 FourCC: 0,
                 ViewDimension: D3D11_VPIV_DIMENSION_TEXTURE2D,
                 Anonymous: D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0 {
-                    Texture2D: D3D11_TEX2D_VPIV { MipSlice: 0, ArraySlice: 0 },
+                    Texture2D: D3D11_TEX2D_VPIV {
+                        MipSlice: 0,
+                        ArraySlice: 0,
+                    },
                 },
             };
             let mut in_view: Option<ID3D11VideoProcessorInputView> = None;
@@ -1007,9 +1012,12 @@ impl MfEncoder {
                 pInputSurface: ManuallyDrop::new(Some(in_view)),
                 ..Default::default()
             };
-            let blt = gpu
-                .video_context
-                .VideoProcessorBlt(&gpu.processor, &out_view, 0, std::slice::from_ref(&stream));
+            let blt = gpu.video_context.VideoProcessorBlt(
+                &gpu.processor,
+                &out_view,
+                0,
+                std::slice::from_ref(&stream),
+            );
             // Reclaim the input view wrapped in ManuallyDrop so its COM
             // reference is released with the frame, not leaked.
             drop(ManuallyDrop::take(&mut stream.pInputSurface));
@@ -1344,7 +1352,14 @@ impl MfDecoder {
             if data.len() < y_len {
                 return Err(CodecError::Malformed);
             }
-            crate::color::nv12_to_bgra(&data[..y_len], &data[y_len..], width, height, stride, stride)?
+            crate::color::nv12_to_bgra(
+                &data[..y_len],
+                &data[y_len..],
+                width,
+                height,
+                stride,
+                stride,
+            )?
         } else {
             let y_len = stride * ah;
             let uv_stride = stride.div_ceil(2);
@@ -1359,7 +1374,13 @@ impl MfDecoder {
                 uv_stride: w.div_ceil(2),
                 y: copy_rows(&data, 0, stride, w, h),
                 u: copy_rows(&data, y_len, uv_stride, w.div_ceil(2), h.div_ceil(2)),
-                v: copy_rows(&data, y_len + uv_len, uv_stride, w.div_ceil(2), h.div_ceil(2)),
+                v: copy_rows(
+                    &data,
+                    y_len + uv_len,
+                    uv_stride,
+                    w.div_ceil(2),
+                    h.div_ceil(2),
+                ),
             };
             crate::color::i420_to_bgra(&i420)?
         };
@@ -1393,8 +1414,10 @@ impl MfDecoder {
             let result = unsafe { self.transform.ProcessOutput(0, &mut bufs, &raw mut status) };
             match result {
                 Ok(()) => {
-                    let sample = unsafe { ManuallyDrop::take(&mut bufs[0].pSample) }
-                        .ok_or_else(|| CodecError::Backend("decoder output without sample".into()))?;
+                    let sample =
+                        unsafe { ManuallyDrop::take(&mut bufs[0].pSample) }.ok_or_else(|| {
+                            CodecError::Backend("decoder output without sample".into())
+                        })?;
                     self.collect_sample(&sample)?;
                 }
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(()),
@@ -1469,9 +1492,7 @@ impl VideoDecoder for MfDecoder {
             buffer
                 .Unlock()
                 .and_then(|()| {
-                    buffer.SetCurrentLength(
-                        u32::try_from(packet.data.len()).unwrap_or(u32::MAX),
-                    )
+                    buffer.SetCurrentLength(u32::try_from(packet.data.len()).unwrap_or(u32::MAX))
                 })
                 .map_err(|e| CodecError::Backend(format!("decoder buffer commit: {e}")))?;
             sample

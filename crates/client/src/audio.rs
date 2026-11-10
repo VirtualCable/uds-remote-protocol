@@ -23,9 +23,9 @@
 //! pipeline stays testable headless.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 use codec::audio_dsp::LinearResampler;
@@ -515,7 +515,10 @@ impl ActiveStream {
             },
             None => (0, 0, 0),
         };
-        #[expect(clippy::cast_possible_truncation, reason = "a frame buffer is far below u32::MAX samples")]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a frame buffer is far below u32::MAX samples"
+        )]
         self.stats.set_audio(
             self.decoded_frames,
             self.plc_frames,
@@ -559,14 +562,28 @@ fn run(
         let Some(st) = &mut stream else {
             // Nothing configured: block until the first job arrives.
             match rx.recv() {
-                Ok(job) => apply(&mut stream, job, now_ms, dump, stats, output_factory.as_ref()),
+                Ok(job) => apply(
+                    &mut stream,
+                    job,
+                    now_ms,
+                    dump,
+                    stats,
+                    output_factory.as_ref(),
+                ),
                 Err(_) => return, // client shutting down
             }
             continue;
         };
         let timeout = st.next_tick.saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout) {
-            Ok(job) => apply(&mut stream, job, now_ms, dump, stats, output_factory.as_ref()),
+            Ok(job) => apply(
+                &mut stream,
+                job,
+                now_ms,
+                dump,
+                stats,
+                output_factory.as_ref(),
+            ),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => return,
         }
@@ -590,7 +607,13 @@ fn apply(
 ) {
     match job {
         AudioJob::Config(spec) => {
-            *stream = ActiveStream::new(&spec, Arc::clone(now_ms), dump, Arc::clone(stats), output_factory);
+            *stream = ActiveStream::new(
+                &spec,
+                Arc::clone(now_ms),
+                dump,
+                Arc::clone(stats),
+                output_factory,
+            );
         }
         AudioJob::Packet(payload) => {
             if let Some(st) = stream {
@@ -611,12 +634,17 @@ mod tests {
     #[test]
     fn clock_staleness_tracks_decode_activity() {
         let now = Instant::now();
-        let ago = |d: Duration| now.checked_sub(d).expect("test instant is far from the epoch");
+        let ago = |d: Duration| {
+            now.checked_sub(d)
+                .expect("test instant is far from the epoch")
+        };
         assert!(clock_is_stale(None, now), "never primed is stale");
         assert!(!clock_is_stale(Some(now), now), "just decoded is live");
         assert!(
             !clock_is_stale(
-                Some(ago(CLOCK_STALE_AFTER.saturating_sub(Duration::from_millis(1)))),
+                Some(ago(
+                    CLOCK_STALE_AFTER.saturating_sub(Duration::from_millis(1))
+                )),
                 now
             ),
             "a decode inside the window keeps the clock live"
@@ -696,8 +724,7 @@ mod tests {
         .unwrap();
         // Headless CI has no output device; attach a buffer manually to
         // exercise the clock mapping (the pump logic is device-independent).
-        let buf: SharedBuffer =
-            Arc::new(std::sync::Mutex::new(PlaybackBuffer::new(48_000, 2)));
+        let buf: SharedBuffer = Arc::new(std::sync::Mutex::new(PlaybackBuffer::new(48_000, 2)));
         st.playback = Some(Arc::clone(&buf));
         st.clock_map = Some(AudioClockMap::new(48_000, 2));
 
@@ -738,7 +765,12 @@ mod tests {
     /// packets and configs without decoding — the headless fallback.
     #[test]
     fn disabled_client_swallows_everything() {
-        let mut client = AudioClient::new(false, None, Arc::new(crate::stats::SessionStats::default()), None);
+        let mut client = AudioClient::new(
+            false,
+            None,
+            Arc::new(crate::stats::SessionStats::default()),
+            None,
+        );
         client.configure(AudioSpec {
             codec: AudioCodecType::Opus.wire_id(),
             sample_rate: 48_000,

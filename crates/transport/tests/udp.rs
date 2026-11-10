@@ -5,8 +5,8 @@
 
 //! Encrypted datagram integration tests over real UDP loopback (§6.2).
 
-use protocol::crypt::consts;
 use protocol::channel;
+use protocol::crypt::consts;
 use transport::{EncryptedDatagram, TransportError, UdpTransport};
 
 const TOKEN: [u8; consts::TOKEN_LENGTH] = [0x5A; consts::TOKEN_LENGTH];
@@ -21,12 +21,11 @@ async fn connected_pair() -> (
     let server = UdpTransport::accept_first("127.0.0.1:0").unwrap();
     let server_addr = server.local_addr().unwrap();
 
-    let client_raw = UdpTransport::connect("127.0.0.1:0", server_addr).await.unwrap();
-    // Trigger the server's peer discovery with a first (probe) datagram.
-    client_raw
-        .send_raw(b"hello-server")
+    let client_raw = UdpTransport::connect("127.0.0.1:0", server_addr)
         .await
         .unwrap();
+    // Trigger the server's peer discovery with a first (probe) datagram.
+    client_raw.send_raw(b"hello-server").await.unwrap();
     let (server_raw, _first) = server.wait_first().await.unwrap();
 
     let client = EncryptedDatagram::new(client_raw, &KEY_C2S, &KEY_S2C, &TOKEN);
@@ -45,7 +44,10 @@ async fn datagram_echo_roundtrip() {
         server
     });
 
-    client.send(channel::AUDIO_OUT, b"opus-frame").await.unwrap();
+    client
+        .send(channel::AUDIO_OUT, b"opus-frame")
+        .await
+        .unwrap();
     let mut buf = [0u8; 2048];
     let (ch, n) = client.recv_into(&mut buf).await.unwrap();
     assert_eq!(ch, channel::AUDIO_OUT);
@@ -112,7 +114,10 @@ async fn foreign_traffic_is_dropped_not_delivered() {
     let raw_attacker = UdpTransport::connect("127.0.0.1:0", server.local_addr().unwrap())
         .await
         .unwrap();
-    raw_attacker.send_raw(b"garbage-not-our-protocol").await.unwrap();
+    raw_attacker
+        .send_raw(b"garbage-not-our-protocol")
+        .await
+        .unwrap();
     client.send(channel::CONTROL, b"valid").await.unwrap();
 
     let mut buf = [0u8; 256];

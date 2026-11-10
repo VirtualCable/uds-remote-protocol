@@ -20,10 +20,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crate::Result;
 use crate::color::{I420Frame, i420_to_bgra};
 use crate::error::CodecError;
 use crate::video::{DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder};
-use crate::Result;
 
 #[cfg(target_os = "windows")]
 const LIB_NAMES: &[&str] = &[
@@ -98,27 +98,12 @@ struct SDecodingParam {
 struct ISVCDecoderVtbl {
     Initialize: unsafe extern "C" fn(DecoderObj, *const SDecodingParam) -> c_long,
     Uninitialize: unsafe extern "C" fn(DecoderObj) -> c_long,
-    DecodeFrame: unsafe extern "C" fn(
-        DecoderObj,
-        *const u8,
-        c_int,
-        *mut *mut u8,
-        *mut SBufferInfo,
-    ) -> c_int,
-    DecodeFrameNoDelay: unsafe extern "C" fn(
-        DecoderObj,
-        *const u8,
-        c_int,
-        *mut *mut u8,
-        *mut SBufferInfo,
-    ) -> c_int,
-    DecodeFrame2: unsafe extern "C" fn(
-        DecoderObj,
-        *const u8,
-        c_int,
-        *mut *mut u8,
-        *mut SBufferInfo,
-    ) -> c_int,
+    DecodeFrame:
+        unsafe extern "C" fn(DecoderObj, *const u8, c_int, *mut *mut u8, *mut SBufferInfo) -> c_int,
+    DecodeFrameNoDelay:
+        unsafe extern "C" fn(DecoderObj, *const u8, c_int, *mut *mut u8, *mut SBufferInfo) -> c_int,
+    DecodeFrame2:
+        unsafe extern "C" fn(DecoderObj, *const u8, c_int, *mut *mut u8, *mut SBufferInfo) -> c_int,
     FlushFrame: unsafe extern "C" fn(DecoderObj, *mut *mut u8, *mut SBufferInfo) -> c_int,
     DecodeParser: unsafe extern "C" fn(DecoderObj, *const u8, c_int, *mut c_void) -> c_int,
     DecodeFrameEx: unsafe extern "C" fn(
@@ -332,10 +317,8 @@ impl VideoDecoder for OpenH264Decoder {
         }
         let w = usize::try_from(buf.iWidth).map_err(|_| CodecError::Malformed)?;
         let h = usize::try_from(buf.iHeight).map_err(|_| CodecError::Malformed)?;
-        let y_stride =
-            usize::try_from(buf.iStride[0]).map_err(|_| CodecError::Malformed)?;
-        let uv_stride =
-            usize::try_from(buf.iStride[1]).map_err(|_| CodecError::Malformed)?;
+        let y_stride = usize::try_from(buf.iStride[0]).map_err(|_| CodecError::Malformed)?;
+        let uv_stride = usize::try_from(buf.iStride[1]).map_err(|_| CodecError::Malformed)?;
         if y_stride < w || uv_stride < w.div_ceil(2) {
             return Err(CodecError::Malformed);
         }
@@ -414,7 +397,10 @@ mod tests {
         // Feed the stream NAL unit by NAL unit, like the wire does.
         let mut starts: Vec<usize> = Vec::new();
         let mut i = 0;
-        while let Some(pos) = data[i..].windows(4).position(|w| w == [0, 0, 0, 1]).map(|p| p + i)
+        while let Some(pos) = data[i..]
+            .windows(4)
+            .position(|w| w == [0, 0, 0, 1])
+            .map(|p| p + i)
         {
             starts.push(pos);
             i = pos + 1;

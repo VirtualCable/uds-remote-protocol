@@ -99,14 +99,14 @@ fn encode_test(frames: u32, gpu: bool, h264: bool) -> i32 {
     };
     // Lab probe: hardware only when GPU is requested; otherwise accept any
     // registered MFT (software included).
-    let mut enc = match codec::mf::MfEncoder::new_mft(codec_sel, w, h, fps, kbps, gpu, device.clone())
-    {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("MfEncoder init failed: {e}");
-            return 1;
-        }
-    };
+    let mut enc =
+        match codec::mf::MfEncoder::new_mft(codec_sel, w, h, fps, kbps, gpu, device.clone()) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("MfEncoder init failed: {e}");
+                return 1;
+            }
+        };
     println!("encoder ready: {} (gpu={})", enc.mft_name(), gpu);
     let mut staging = None;
     let mut target = None;
@@ -191,7 +191,8 @@ fn encode_test(frames: u32, gpu: bool, h264: bool) -> i32 {
 /// specific DXGI adapter (default: the LAST hardware adapter — on hybrid
 /// VMs adapter 0 is the virtual display driver, not the real GPU).
 #[cfg(all(windows, feature = "mf-probe"))]
-fn create_d3d11_device() -> windows::core::Result<windows::Win32::Graphics::Direct3D11::ID3D11Device> {
+fn create_d3d11_device() -> windows::core::Result<windows::Win32::Graphics::Direct3D11::ID3D11Device>
+{
     use windows::Win32::Graphics::Direct3D::{
         D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
     };
@@ -199,11 +200,12 @@ fn create_d3d11_device() -> windows::core::Result<windows::Win32::Graphics::Dire
         D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11CreateDevice,
     };
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter1};
-    let factory: windows::Win32::Graphics::Dxgi::IDXGIFactory1 =
-        unsafe { CreateDXGIFactory1() }?;
+    let factory: windows::Win32::Graphics::Dxgi::IDXGIFactory1 = unsafe { CreateDXGIFactory1() }?;
     let mut adapters: Vec<(String, IDXGIAdapter1)> = Vec::new();
     for i in 0.. {
-        let Ok(a) = (unsafe { factory.EnumAdapters1(i) }) else { break };
+        let Ok(a) = (unsafe { factory.EnumAdapters1(i) }) else {
+            break;
+        };
         let desc = unsafe { a.GetDesc1() }?;
         let name = {
             let end = desc
@@ -264,7 +266,10 @@ fn create_probe_textures(
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Usage: D3D11_USAGE_STAGING,
         BindFlags: 0,
         CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
@@ -295,7 +300,10 @@ fn upload_to_texture(
     use windows::Win32::Graphics::Direct3D11::D3D11_MAP_WRITE;
     unsafe {
         let mut mapped = std::mem::zeroed();
-        if ctx.Map(staging, 0, D3D11_MAP_WRITE, 0, Some(&raw mut mapped)).is_ok() {
+        if ctx
+            .Map(staging, 0, D3D11_MAP_WRITE, 0, Some(&raw mut mapped))
+            .is_ok()
+        {
             let row = (w * 4) as usize;
             for y in 0..h as usize {
                 let dst = std::slice::from_raw_parts_mut(

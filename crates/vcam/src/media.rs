@@ -22,9 +22,7 @@
 
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Gdi::BITMAPINFOHEADER;
-use windows::Win32::Media::DirectShow::{
-    VIDEO_STREAM_CONFIG_CAPS,
-};
+use windows::Win32::Media::DirectShow::VIDEO_STREAM_CONFIG_CAPS;
 use windows::Win32::Media::MediaFoundation::{
     AM_MEDIA_TYPE, FORMAT_VideoInfo, MEDIASUBTYPE_NV12, MEDIASUBTYPE_RGB24, MEDIATYPE_Video,
     VIDEOINFOHEADER,
@@ -36,8 +34,14 @@ use crate::pixel;
 
 /// Standard geometries the filter offers, in ascending order. Consumers
 /// (browsers) typically SetFormat one of these before connecting.
-pub const GEOMETRIES: [(u32, u32); 6] =
-    [(320, 240), (640, 480), (800, 600), (1280, 720), (1600, 900), (1920, 1080)];
+pub const GEOMETRIES: [(u32, u32); 6] = [
+    (320, 240),
+    (640, 480),
+    (800, 600),
+    (1280, 720),
+    (1600, 900),
+    (1920, 1080),
+];
 
 /// One enumerated offer: format + geometry.
 #[must_use]
@@ -119,7 +123,12 @@ pub unsafe fn make_media_type(
         std::ptr::write_bytes(mt, 0, 1);
         std::ptr::write_bytes(vih, 0, 1);
 
-        let rect = RECT { left: 0, top: 0, right: width as i32, bottom: height as i32 };
+        let rect = RECT {
+            left: 0,
+            top: 0,
+            right: width as i32,
+            bottom: height as i32,
+        };
         (*vih).rcSource = rect;
         (*vih).rcTarget = rect;
         (*vih).dwBitRate = (frame * fps as usize) as u32 * 8;
@@ -217,7 +226,10 @@ pub unsafe fn fill_stream_caps(caps: *mut u8, width: u32, height: u32, fps: u32)
         let c = caps.cast::<VIDEO_STREAM_CONFIG_CAPS>();
         std::ptr::write_bytes(c, 0, 1);
         let frame_dur = 10_000_000 / i64::from(fps.max(1));
-        let size = windows::Win32::Foundation::SIZE { cx: width as i32, cy: height as i32 };
+        let size = windows::Win32::Foundation::SIZE {
+            cx: width as i32,
+            cy: height as i32,
+        };
         (*c).guid = windows::Win32::Media::MediaFoundation::PIN_CATEGORY_CAPTURE;
         (*c).InputSize = size;
         (*c).MinFrameInterval = frame_dur;

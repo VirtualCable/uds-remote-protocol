@@ -58,17 +58,23 @@ fn create_key(key_path: &str) -> Result<HKEY> {
 /// Sets a REG_SZ value; `None` name = the default value.
 fn set_string(key: HKEY, name: Option<&str>, value: &str) -> Result<()> {
     let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-    let name_w: Option<Vec<u16>> = name.map(|n| n.encode_utf16().chain(std::iter::once(0)).collect());
+    let name_w: Option<Vec<u16>> =
+        name.map(|n| n.encode_utf16().chain(std::iter::once(0)).collect());
     let name_ptr = name_w
         .as_deref()
-        .map_or_else(windows::core::PCWSTR::null, |p| windows::core::PCWSTR(p.as_ptr()));
+        .map_or_else(windows::core::PCWSTR::null, |p| {
+            windows::core::PCWSTR(p.as_ptr())
+        });
     unsafe {
         RegSetValueExW(
             key,
             name_ptr,
             Some(0),
             REG_SZ,
-            Some(std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2)),
+            Some(std::slice::from_raw_parts(
+                wide.as_ptr().cast::<u8>(),
+                wide.len() * 2,
+            )),
         )
         .ok()
     }

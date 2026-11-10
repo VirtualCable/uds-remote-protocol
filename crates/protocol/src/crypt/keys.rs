@@ -29,7 +29,8 @@ pub struct SessionKeys {
 impl SessionKeys {
     fn expand(hk: &Hkdf<Sha256>, info: &[u8]) -> Result<Self, CryptError> {
         let mut okm = [0u8; 2 * KEY_LENGTH];
-        hk.expand(info, &mut okm).map_err(|_| CryptError::KeyDerivation)?;
+        hk.expand(info, &mut okm)
+            .map_err(|_| CryptError::KeyDerivation)?;
         let mut c2s = [0u8; KEY_LENGTH];
         let mut s2c = [0u8; KEY_LENGTH];
         c2s.copy_from_slice(&okm[..KEY_LENGTH]);

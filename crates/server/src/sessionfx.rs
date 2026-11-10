@@ -42,13 +42,13 @@ mod win {
 
     use tracing::{info, warn};
     use windows::Win32::UI::WindowsAndMessaging::{
-        ANIMATIONINFO, SPI_GETCOMBOBOXANIMATION, SPI_GETCURSORSHADOW, SPI_GETDESKWALLPAPER,
-        SPI_GETDRAGFULLWINDOWS, SPI_GETLISTBOXSMOOTHSCROLLING, SPI_GETMENUANIMATION, SPI_GETMENUFADE,
-        SPI_GETSELECTIONFADE, SPI_GETTOOLTIPANIMATION, SPI_GETTOOLTIPFADE, SPI_GETANIMATION,
-        SPI_SETANIMATION,
-        SPI_SETCOMBOBOXANIMATION, SPI_SETCURSORSHADOW, SPI_SETDESKWALLPAPER, SPI_SETDRAGFULLWINDOWS,
-        SPI_SETLISTBOXSMOOTHSCROLLING, SPI_SETMENUANIMATION, SPI_SETMENUFADE, SPI_SETSELECTIONFADE,
-        SPI_SETTOOLTIPANIMATION, SPI_SETTOOLTIPFADE, SPIF_SENDCHANGE, SystemParametersInfoW,
+        ANIMATIONINFO, SPI_GETANIMATION, SPI_GETCOMBOBOXANIMATION, SPI_GETCURSORSHADOW,
+        SPI_GETDESKWALLPAPER, SPI_GETDRAGFULLWINDOWS, SPI_GETLISTBOXSMOOTHSCROLLING,
+        SPI_GETMENUANIMATION, SPI_GETMENUFADE, SPI_GETSELECTIONFADE, SPI_GETTOOLTIPANIMATION,
+        SPI_GETTOOLTIPFADE, SPI_SETANIMATION, SPI_SETCOMBOBOXANIMATION, SPI_SETCURSORSHADOW,
+        SPI_SETDESKWALLPAPER, SPI_SETDRAGFULLWINDOWS, SPI_SETLISTBOXSMOOTHSCROLLING,
+        SPI_SETMENUANIMATION, SPI_SETMENUFADE, SPI_SETSELECTIONFADE, SPI_SETTOOLTIPANIMATION,
+        SPI_SETTOOLTIPFADE, SPIF_SENDCHANGE, SystemParametersInfoW,
     };
     use windows::core::BOOL;
 
@@ -62,26 +62,64 @@ mod win {
     /// The effects we reduce while a session runs. Font smoothing is NOT
     /// here on purpose.
     const BOOL_SETTINGS: &[BoolSetting] = &[
-        BoolSetting { get: SPI_GETMENUANIMATION, set: SPI_SETMENUANIMATION, name: "menu animation" },
-        BoolSetting { get: SPI_GETCOMBOBOXANIMATION, set: SPI_SETCOMBOBOXANIMATION, name: "combobox animation" },
+        BoolSetting {
+            get: SPI_GETMENUANIMATION,
+            set: SPI_SETMENUANIMATION,
+            name: "menu animation",
+        },
+        BoolSetting {
+            get: SPI_GETCOMBOBOXANIMATION,
+            set: SPI_SETCOMBOBOXANIMATION,
+            name: "combobox animation",
+        },
         BoolSetting {
             get: SPI_GETLISTBOXSMOOTHSCROLLING,
             set: SPI_SETLISTBOXSMOOTHSCROLLING,
             name: "listbox smooth scrolling",
         },
-        BoolSetting { get: SPI_GETMENUFADE, set: SPI_SETMENUFADE, name: "menu fade" },
-        BoolSetting { get: SPI_GETSELECTIONFADE, set: SPI_SETSELECTIONFADE, name: "selection fade" },
-        BoolSetting { get: SPI_GETTOOLTIPANIMATION, set: SPI_SETTOOLTIPANIMATION, name: "tooltip animation" },
-        BoolSetting { get: SPI_GETTOOLTIPFADE, set: SPI_SETTOOLTIPFADE, name: "tooltip fade" },
-        BoolSetting { get: SPI_GETCURSORSHADOW, set: SPI_SETCURSORSHADOW, name: "cursor shadow" },
-        BoolSetting { get: SPI_GETDRAGFULLWINDOWS, set: SPI_SETDRAGFULLWINDOWS, name: "drag full windows" },
+        BoolSetting {
+            get: SPI_GETMENUFADE,
+            set: SPI_SETMENUFADE,
+            name: "menu fade",
+        },
+        BoolSetting {
+            get: SPI_GETSELECTIONFADE,
+            set: SPI_SETSELECTIONFADE,
+            name: "selection fade",
+        },
+        BoolSetting {
+            get: SPI_GETTOOLTIPANIMATION,
+            set: SPI_SETTOOLTIPANIMATION,
+            name: "tooltip animation",
+        },
+        BoolSetting {
+            get: SPI_GETTOOLTIPFADE,
+            set: SPI_SETTOOLTIPFADE,
+            name: "tooltip fade",
+        },
+        BoolSetting {
+            get: SPI_GETCURSORSHADOW,
+            set: SPI_SETCURSORSHADOW,
+            name: "cursor shadow",
+        },
+        BoolSetting {
+            get: SPI_GETDRAGFULLWINDOWS,
+            set: SPI_SETDRAGFULLWINDOWS,
+            name: "drag full windows",
+        },
     ];
 
     fn get_bool(setting: &BoolSetting) -> Option<bool> {
         let mut value = BOOL(0);
         // SAFETY: `value` is a valid BOOL out-pointer for these GET actions.
         unsafe {
-            SystemParametersInfoW(setting.get, 0, Some(&raw mut value as *mut c_void), SPIF_SENDCHANGE).ok()?;
+            SystemParametersInfoW(
+                setting.get,
+                0,
+                Some(&raw mut value as *mut c_void),
+                SPIF_SENDCHANGE,
+            )
+            .ok()?;
         }
         Some(value.as_bool())
     }
@@ -96,7 +134,9 @@ mod win {
             (0, Some(usize::from(on) as *mut c_void))
         };
         // SAFETY: argument layout matches each action's documented contract.
-        if let Err(err) = unsafe { SystemParametersInfoW(setting.set, ui_param, pv_param, SPIF_SENDCHANGE) } {
+        if let Err(err) =
+            unsafe { SystemParametersInfoW(setting.set, ui_param, pv_param, SPIF_SENDCHANGE) }
+        {
             warn!(setting = setting.name, error = %format!("{err:#}"), "visual-effects setting failed");
         }
     }
@@ -108,8 +148,13 @@ mod win {
         };
         // SAFETY: `info` is a valid ANIMATIONINFO out-pointer.
         unsafe {
-            SystemParametersInfoW(SPI_GETANIMATION, info.cbSize, Some(&raw mut info as *mut c_void), SPIF_SENDCHANGE)
-                .ok()?;
+            SystemParametersInfoW(
+                SPI_GETANIMATION,
+                info.cbSize,
+                Some(&raw mut info as *mut c_void),
+                SPIF_SENDCHANGE,
+            )
+            .ok()?;
         }
         Some(info)
     }
@@ -165,7 +210,10 @@ mod win {
                 guard.saved.push(previous);
             }
             guard.saved_animation = get_animation();
-            if guard.saved_animation.is_some_and(|info| info.iMinAnimate != 0) {
+            if guard
+                .saved_animation
+                .is_some_and(|info| info.iMinAnimate != 0)
+            {
                 set_animation(false);
             }
             if wallpaper_off {
@@ -220,7 +268,12 @@ mod win {
                 let wide: Vec<u16> = wallpaper.encode_utf16().chain(std::iter::once(0)).collect();
                 // SAFETY: `wide` is a valid NUL-terminated string.
                 if let Err(err) = unsafe {
-                    SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, Some(wide.as_ptr() as *mut c_void), SPIF_SENDCHANGE)
+                    SystemParametersInfoW(
+                        SPI_SETDESKWALLPAPER,
+                        0,
+                        Some(wide.as_ptr() as *mut c_void),
+                        SPIF_SENDCHANGE,
+                    )
                 } {
                     warn!(error = %format!("{err:#}"), "wallpaper restore failed");
                 }

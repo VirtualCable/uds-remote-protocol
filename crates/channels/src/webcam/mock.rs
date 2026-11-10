@@ -63,8 +63,7 @@ impl MockSource {
             for x in 0..width {
                 let i = (y as usize * w + x as usize) * 3;
                 let r = (x * 255 / width.max(1)) as u8;
-                let in_square =
-                    x >= x0 && x < x0 + side && y >= y0 && y < y0 + side;
+                let in_square = x >= x0 && x < x0 + side && y >= y0 && y < y0 + side;
                 if in_square {
                     rgb[i] = 255;
                     rgb[i + 1] = 255;

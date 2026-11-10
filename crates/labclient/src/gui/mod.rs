@@ -33,8 +33,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
 pub use client::mic::MicMode;
-pub use connect::ConnectForm;
 use connect::ConnectDialog;
+pub use connect::ConnectForm;
 use gpu::Gpu;
 use session_view::SessionView;
 
@@ -81,14 +81,21 @@ pub fn run_gui(form: Option<ConnectForm>, flags: SessionFlags) -> Result<()> {
     let mut app = App {
         window: None,
         gpu: None,
-        mode: Mode::Dialog(form.as_ref().map_or_else(ConnectDialog::default, ConnectDialog::prefilled)),
+        mode: Mode::Dialog(
+            form.as_ref()
+                .map_or_else(ConnectDialog::default, ConnectDialog::prefilled),
+        ),
         flags,
         pending: form,
         pending_resize: None,
         resize_since: Instant::now(),
-        last_frame: Instant::now().checked_sub(FRAME_INTERVAL).unwrap_or_else(Instant::now),
+        last_frame: Instant::now()
+            .checked_sub(FRAME_INTERVAL)
+            .unwrap_or_else(Instant::now),
     };
-    event_loop.run_app(&mut app).context("running the event loop")
+    event_loop
+        .run_app(&mut app)
+        .context("running the event loop")
 }
 
 enum Mode {
@@ -142,11 +149,12 @@ impl App {
             return;
         };
         let width = gpu.config.width as f32;
-        let (texture, clear, sections, panels) = match &mut self.mode {
-            Mode::Dialog(dialog) => (None, BG, dialog.sections(width), Vec::new()),
+        let (texture, clear, sections, panels, cursor) = match &mut self.mode {
+            Mode::Dialog(dialog) => (None, BG, dialog.sections(width), Vec::new(), None),
             Mode::Session(view, _) => {
                 let mut sections = Vec::new();
-                if view.texture_view().is_none() || !view.status().is_empty() && view.is_disconnected()
+                if view.texture_view().is_none()
+                    || !view.status().is_empty() && view.is_disconnected()
                 {
                     sections.push(
                         OwnedSection::default()
@@ -165,7 +173,14 @@ impl App {
                     panels.push(banner);
                     sections.push(section);
                 }
-                (view.texture_view(), wgpu::Color::BLACK, sections, panels)
+                let cursor = view.cursor_draw(window);
+                (
+                    view.texture_view(),
+                    wgpu::Color::BLACK,
+                    sections,
+                    panels,
+                    cursor,
+                )
             }
             Mode::Farewell(message) => (
                 None,
@@ -195,9 +210,10 @@ impl App {
                         ),
                 ],
                 Vec::new(),
+                None,
             ),
         };
-        if let Err(e) = gpu.render(texture, clear, &sections, &panels) {
+        if let Err(e) = gpu.render(texture, clear, &sections, &panels, cursor.as_ref()) {
             warn!("render: {e:#}");
         }
         let _ = window;
@@ -280,8 +296,10 @@ impl ApplicationHandler for App {
                 // F3 toggles the stats overlay and F11 toggles fullscreen;
                 // both are handled locally and never sent to the remote
                 // (neither the press nor the release).
-                let is_f3 = session_view::physical_code(&event) == Some(winit::keyboard::KeyCode::F3);
-                let is_f11 = session_view::physical_code(&event) == Some(winit::keyboard::KeyCode::F11);
+                let is_f3 =
+                    session_view::physical_code(&event) == Some(winit::keyboard::KeyCode::F3);
+                let is_f11 =
+                    session_view::physical_code(&event) == Some(winit::keyboard::KeyCode::F11);
                 if is_f11 && event.state == ElementState::Pressed {
                     // Borderless fullscreen on the current monitor; the
                     // Resized events on enter/exit drive the remote resize
@@ -312,9 +330,7 @@ impl ApplicationHandler for App {
                     Mode::Session(view, _) => {
                         if is_f3 {
                             view.toggle_stats();
-                        } else if !is_f11
-                            && let Some(code) = session_view::physical_code(&event)
-                        {
+                        } else if !is_f11 && let Some(code) = session_view::physical_code(&event) {
                             view.handle_key(code, true);
                         }
                     }
@@ -361,7 +377,7 @@ impl ApplicationHandler for App {
             return;
         };
         if let Mode::Session(view, result) = &mut self.mode
-            && !view.poll_events(self.gpu.as_ref().expect("gpu after session"), &window, event_loop)
+            && !view.poll_events(self.gpu.as_ref().expect("gpu after session"), &window)
         {
             let message = result
                 .try_recv()

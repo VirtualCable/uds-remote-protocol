@@ -69,23 +69,39 @@ impl FpsPolicy {
             if pair == "on" {
                 continue;
             }
-            let (key, value) = pair
-                .split_once('=')
-                .ok_or_else(|| anyhow::anyhow!("bad adaptive-fps override (expected key=value): {pair}"))?;
+            let (key, value) = pair.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("bad adaptive-fps override (expected key=value): {pair}")
+            })?;
             match key.trim() {
-                "min_fps" => policy.min_fps = value.parse().map_err(|_| anyhow::anyhow!("bad min_fps"))?,
-                "high" => policy.high_load = value.parse().map_err(|_| anyhow::anyhow!("bad high_load"))?,
-                "low" => policy.low_load = value.parse().map_err(|_| anyhow::anyhow!("bad low_load"))?,
+                "min_fps" => {
+                    policy.min_fps = value.parse().map_err(|_| anyhow::anyhow!("bad min_fps"))?
+                }
+                "high" => {
+                    policy.high_load = value
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("bad high_load"))?
+                }
+                "low" => {
+                    policy.low_load = value.parse().map_err(|_| anyhow::anyhow!("bad low_load"))?
+                }
                 "hold_up_ms" => {
-                    policy.hold_up =
-                        Duration::from_millis(value.parse().map_err(|_| anyhow::anyhow!("bad hold_up_ms"))?);
+                    policy.hold_up = Duration::from_millis(
+                        value
+                            .parse()
+                            .map_err(|_| anyhow::anyhow!("bad hold_up_ms"))?,
+                    );
                 }
                 "hold_down_ms" => {
-                    policy.hold_down =
-                        Duration::from_millis(value.parse().map_err(|_| anyhow::anyhow!("bad hold_down_ms"))?);
+                    policy.hold_down = Duration::from_millis(
+                        value
+                            .parse()
+                            .map_err(|_| anyhow::anyhow!("bad hold_down_ms"))?,
+                    );
                 }
                 "ema_alpha" => {
-                    policy.ema_alpha = value.parse().map_err(|_| anyhow::anyhow!("bad ema_alpha"))?;
+                    policy.ema_alpha = value
+                        .parse()
+                        .map_err(|_| anyhow::anyhow!("bad ema_alpha"))?;
                 }
                 other => anyhow::bail!("unknown adaptive-fps override: {other}"),
             }

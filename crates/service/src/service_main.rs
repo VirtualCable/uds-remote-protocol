@@ -68,9 +68,10 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut PWSTR) {
 
 fn service_main_impl() -> Result<()> {
     let name = HSTRING::from(SERVICE_NAME);
-    let status_handle =
-        unsafe { RegisterServiceCtrlHandlerExW(PCWSTR(name.as_ptr()), Some(control_handler), None) }
-            .context("RegisterServiceCtrlHandlerEx")?;
+    let status_handle = unsafe {
+        RegisterServiceCtrlHandlerExW(PCWSTR(name.as_ptr()), Some(control_handler), None)
+    }
+    .context("RegisterServiceCtrlHandlerEx")?;
 
     report_status(status_handle, SERVICE_RUNNING)?;
     info!("service started");

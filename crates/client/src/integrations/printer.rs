@@ -19,8 +19,12 @@
 /// calls from the session (server-driven, ids server-assigned).
 pub trait PrinterSink: Send {
     /// Opens a job under the server-assigned id.
-    fn create_job(&mut self, job_id: u32, printer_name: &str, document_name: &str)
-    -> Result<(), u32>;
+    fn create_job(
+        &mut self,
+        job_id: u32,
+        printer_name: &str,
+        document_name: &str,
+    ) -> Result<(), u32>;
     /// Appends one chunk; returns the byte count accepted.
     fn write_data(&mut self, job_id: u32, data: &[u8]) -> Result<usize, u32>;
     /// Finalizes the job (commits it to the local output).

@@ -11,19 +11,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use client::smartcard::SmartcardService;
-use protocol::{ReaderState, SCOPE_USER, SmartcardMessage};
 use channels::smartcard::dummy::{DUMMY_ATR, DUMMY_READER};
 use channels::smartcard::{
     DummyBackend, SCARD_E_CANCELLED, SCARD_E_NO_SERVICE, SCARD_PROTOCOL_T1, SCARD_SHARE_SHARED,
     SCARD_STATE_PRESENT, SmartcardIntegration,
 };
+use client::smartcard::SmartcardService;
+use protocol::{ReaderState, SCOPE_USER, SmartcardMessage};
 
 /// Generous reply deadline: the dispatcher is idle in these tests, so any
 /// wait means something is broken (an unanswered request hangs forever).
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn start(backend: Option<Arc<DummyBackend>>) -> (SmartcardService, flume::Receiver<SmartcardMessage>) {
+fn start(
+    backend: Option<Arc<DummyBackend>>,
+) -> (SmartcardService, flume::Receiver<SmartcardMessage>) {
     let (sink, rx) = flume::unbounded();
     let backend: Option<Arc<dyn SmartcardIntegration>> =
         backend.map(|b| b as Arc<dyn SmartcardIntegration>);
@@ -33,7 +35,11 @@ fn start(backend: Option<Arc<DummyBackend>>) -> (SmartcardService, flume::Receiv
 
 /// Runs one request through encode → dispatch → decode and returns the
 /// reply.
-fn roundtrip(svc: &SmartcardService, rx: &flume::Receiver<SmartcardMessage>, req: &SmartcardMessage) -> SmartcardMessage {
+fn roundtrip(
+    svc: &SmartcardService,
+    rx: &flume::Receiver<SmartcardMessage>,
+    req: &SmartcardMessage,
+) -> SmartcardMessage {
     let decoded = SmartcardMessage::decode(&req.encode()).expect("request re-decodes");
     svc.enqueue(decoded);
     rx.recv_timeout(REPLY_TIMEOUT).expect("reply arrives")
@@ -55,7 +61,10 @@ fn establish_and_connect(
         },
     );
     let context = match reply {
-        SmartcardMessage::ContextEstablished { request_id, context } => {
+        SmartcardMessage::ContextEstablished {
+            request_id,
+            context,
+        } => {
             assert_eq!(request_id, *next_id);
             context
         }
@@ -135,7 +144,14 @@ fn full_operation_cycle_against_dummy_backend() {
 
     id += 1;
     assert_eq!(
-        roundtrip(&svc, &rx, &SmartcardMessage::BeginTransaction { request_id: id, card }),
+        roundtrip(
+            &svc,
+            &rx,
+            &SmartcardMessage::BeginTransaction {
+                request_id: id,
+                card
+            }
+        ),
         SmartcardMessage::TransactionBegun { request_id: id }
     );
     id += 1;

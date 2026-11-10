@@ -90,5 +90,8 @@ pub trait Connector: Send + Sync {
     async fn connect(
         &self,
         target: &Target,
-    ) -> Result<(Box<dyn ReliableTransport>, Option<Box<dyn DatagramTransport>>)>;
+    ) -> Result<(
+        Box<dyn ReliableTransport>,
+        Option<Box<dyn DatagramTransport>>,
+    )>;
 }

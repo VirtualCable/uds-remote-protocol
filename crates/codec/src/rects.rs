@@ -315,10 +315,7 @@ mod tests {
     #[test]
     fn first_frame_is_full_rect() {
         let a = vec![0u8; 64 * 64 * 4];
-        assert_eq!(
-            dirty_rects(None, &a, 64, 64, 64 * 4),
-            vec![r(0, 0, 64, 64)]
-        );
+        assert_eq!(dirty_rects(None, &a, 64, 64, 64 * 4), vec![r(0, 0, 64, 64)]);
     }
 
     #[test]

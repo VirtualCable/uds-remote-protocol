@@ -28,19 +28,16 @@ pub mod clipboard;
 pub mod display_mode;
 pub use server_config as config;
 #[cfg(all(windows, feature = "windows-capture"))]
-pub mod handoff;
-#[cfg(all(windows, feature = "windows-capture"))]
 pub mod dxgi;
 pub mod fps;
+#[cfg(all(windows, feature = "windows-capture"))]
+pub mod handoff;
 pub mod input;
 pub mod mic;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod mic_uds;
 pub mod pacer;
 pub mod printer;
-#[cfg(all(windows, feature = "windows-capture"))]
-pub mod session_mutex;
-pub mod sessionfx;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod secure_helper;
 pub mod secure_pipe;
@@ -49,6 +46,9 @@ pub mod secure_probe;
 pub(crate) mod secure_sanitize;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod secure_watch;
+#[cfg(all(windows, feature = "windows-capture"))]
+pub mod session_mutex;
+pub mod sessionfx;
 pub mod smartcard;
 #[cfg(all(windows, feature = "windows-capture"))]
 pub mod smartcard_pipe;

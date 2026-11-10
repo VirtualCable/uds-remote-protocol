@@ -240,11 +240,7 @@ impl PrinterSpool {
             PrinterMessage::JobCreated { job_id, error } => {
                 if *error != 0 {
                     warn!(job_id, error, "client refused the print job; aborting");
-                    if self
-                        .current
-                        .as_ref()
-                        .is_some_and(|j| j.id == *job_id)
-                    {
+                    if self.current.as_ref().is_some_and(|j| j.id == *job_id) {
                         self.current = None;
                     }
                 }
@@ -339,8 +335,14 @@ mod tests {
         assert!(!dir.join(PORT_FILE_NAME).exists());
 
         let msgs = spool.pump(8);
-        assert!(matches!(msgs.first(), Some(PrinterMessage::CreateJob { job_id: 1, .. })));
-        assert!(msgs.iter().any(|m| matches!(m, PrinterMessage::JobData { .. })));
+        assert!(matches!(
+            msgs.first(),
+            Some(PrinterMessage::CreateJob { job_id: 1, .. })
+        ));
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, PrinterMessage::JobData { .. }))
+        );
         assert!(matches!(msgs.last(), Some(PrinterMessage::CloseJob { .. })));
         assert!(!spool.has_pending());
         // The spooled file is cleaned up after streaming.
@@ -373,7 +375,11 @@ mod tests {
             error: 0xC000_0022,
         });
         let rest = spool.pump(8);
-        assert!(!rest.iter().any(|m| matches!(m, PrinterMessage::JobData { .. })));
+        assert!(
+            !rest
+                .iter()
+                .any(|m| matches!(m, PrinterMessage::JobData { .. }))
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }

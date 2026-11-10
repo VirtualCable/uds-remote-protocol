@@ -75,8 +75,13 @@ pub struct CapturedCursor {
     pub hot_x: u16,
     /// Hotspot Y offset inside the image.
     pub hot_y: u16,
-    /// RGBA pixels, `width * height * 4` bytes.
+    /// RGBA pixels, `width * height * 4` bytes. Pixels whose bit is set in
+    /// `xor_mask` carry their source RGB with alpha 255.
     pub rgba: Vec<u8>,
+    /// 1bpp mask (MSB first, row-major, `ceil(width*height/8)` bytes): a set
+    /// bit marks the pixel as XOR-with-background (DXGI masked-color /
+    /// monochrome invert semantics). Empty when no pixel XORs.
+    pub xor_mask: Vec<u8>,
 }
 
 /// Cursor state change observed while capturing (design doc §10): the client
@@ -96,20 +101,34 @@ pub enum MaskShapeKind {
     /// 1-bpp AND + XOR masks stacked vertically (buffer height is 2× the
     /// logical height).
     Monochrome,
-    /// BGRA color pixels + trailing 1-bpp AND mask.
+    /// BGRA color pixels with a real alpha channel.
     Color,
-    /// BGRA color pixels + trailing 1-bpp mask (1 = transparent).
+    /// BGRA color pixels where the ALPHA byte is the mask (MSDN): 0x00 = the
+    /// RGB replaces the screen pixel; 0xFF = the RGB is XORed with the
+    /// screen pixel.
     MaskedColor,
+}
+
+/// Sets bit `i` (MSB first) in a growable 1bpp mask.
+fn set_bit(mask: &mut Vec<u8>, i: usize) {
+    let byte = i / 8;
+    if mask.len() <= byte {
+        mask.resize(byte + 1, 0);
+    }
+    mask[byte] |= 0x80 >> (i % 8);
 }
 
 /// Converts a DXGI pointer-shape buffer to tightly packed RGBA8.
 ///
 /// For [`MaskShapeKind::Monochrome`], `height` is the **logical** cursor
 /// height: the buffer holds the AND mask in rows `0..height` and the XOR
-/// mask in rows `height..2*height` (DXGI stores both stacked).
-/// XOR-inverted pixels (`and=1, xor=1`) are approximated with a
-/// semi-transparent gray — a PoC simplification, real inversion needs the
-/// pixel under the cursor which the client may not have yet (§10).
+/// mask in rows `height..2*height` (DXGI stores both stacked). Invert
+/// pixels (`and=1, xor=1`) come out white with their XOR bit set.
+///
+/// For [`MaskShapeKind::MaskedColor`] the alpha byte is the mask (MSDN):
+/// 0x00 replaces the screen pixel (opaque), 0xFF XORs the RGB with the
+/// screen (opaque RGB + XOR bit set). The client composites XOR pixels by
+/// inverting the background under them (§10).
 ///
 /// Returns `None` for degenerate geometry (zero size or a buffer too small
 /// for the declared layout).
@@ -127,7 +146,7 @@ pub fn mask_shape_to_rgba(
     if w_px == 0 || height == 0 {
         return None;
     }
-    let (logical_h, rgba) = match kind {
+    let (logical_h, rgba, xor_mask) = match kind {
         MaskShapeKind::Monochrome => {
             let rows = usize::from(height);
             // Both masks stacked: the buffer must hold 2*height rows and one
@@ -137,6 +156,7 @@ pub fn mask_shape_to_rgba(
             }
             let bit = |row: &[u8], col: usize| (row[col / 8] >> (7 - (col % 8))) & 1 == 1;
             let mut rgba = Vec::with_capacity(w_px * rows * 4);
+            let mut xor_mask = Vec::new();
             for row_i in 0..rows {
                 let and_row = &buf[row_i * pitch..(row_i + 1) * pitch];
                 let xor_row = &buf[(row_i + rows) * pitch..(row_i + rows + 1) * pitch];
@@ -145,12 +165,16 @@ pub fn mask_shape_to_rgba(
                         (false, false) => [0, 0, 0, 255],
                         (false, true) => [255, 255, 255, 255],
                         (true, false) => [0, 0, 0, 0],
-                        (true, true) => [128, 128, 128, 128],
+                        (true, true) => {
+                            // Invert: white XOR pixel.
+                            set_bit(&mut xor_mask, row_i * w_px + col);
+                            [255, 255, 255, 255]
+                        }
                     };
                     rgba.extend_from_slice(&px);
                 }
             }
-            (rows, rgba)
+            (rows, rgba, xor_mask)
         }
         MaskShapeKind::Color | MaskShapeKind::MaskedColor => {
             let rows = usize::from(height);
@@ -158,30 +182,30 @@ pub fn mask_shape_to_rgba(
             if pitch < w_px * 4 || color_bytes > buf.len() {
                 return None;
             }
-            let mask_pitch = w_px.div_ceil(8);
-            let has_mask = buf.len() >= color_bytes + mask_pitch * rows;
-            let mask_bit = |col: usize, row_i: usize| -> bool {
-                has_mask
-                    && (buf[color_bytes + row_i * mask_pitch + col / 8] >> (7 - (col % 8))) & 1 == 1
-            };
             let mut rgba = Vec::with_capacity(w_px * rows * 4);
+            let mut xor_mask = Vec::new();
             for row_i in 0..rows {
                 for col in 0..w_px {
                     let pixel = &buf[row_i * pitch + col * 4..row_i * pitch + col * 4 + 4];
                     let (blue, green, red) = (pixel[0], pixel[1], pixel[2]);
                     let alpha = match kind {
-                        MaskShapeKind::MaskedColor if has_mask => {
-                            // Mask bit means transparent.
-                            if mask_bit(col, row_i) { 0 } else { 255 }
-                        }
-                        // Some drivers (NVIDIA) report MaskedColor but deliver
-                        // only the color plane (`PointerShapeBufferSize` ==
-                        // pitch × height, no trailing 1bpp mask). Fall back to
-                        // the classic convention: black pixels are
-                        // transparent, everything else opaque.
-                        MaskShapeKind::MaskedColor => {
-                            if red == 0 && green == 0 && blue == 0 { 0 } else { 255 }
-                        }
+                        MaskShapeKind::MaskedColor => match pixel[3] {
+                            // RGB replaces the screen pixel.
+                            0x00 => 255,
+                            // RGB XORs the screen pixel. A BLACK XOR is a
+                            // no-op (x ^ 0 == x): emit it as transparent, NOT
+                            // as an XOR pixel — the client approximates XOR
+                            // with a reverse-subtract blend, and 0 - dst
+                            // would clamp to black instead of keeping dst.
+                            // Any other XOR color ships opaque + XOR bit.
+                            0xFF if red == 0 && green == 0 && blue == 0 => 0,
+                            0xFF => {
+                                set_bit(&mut xor_mask, row_i * w_px + col);
+                                255
+                            }
+                            // Off-spec value: treat as replace (opaque).
+                            _ => 255,
+                        },
                         // Color: BGRA with a real alpha channel — honor it or
                         // the client paints an opaque black tile around the
                         // pointer.
@@ -192,7 +216,7 @@ pub fn mask_shape_to_rgba(
                     rgba.extend_from_slice(&[red, green, blue, alpha]);
                 }
             }
-            (rows, rgba)
+            (rows, rgba, xor_mask)
         }
     };
     Some(CapturedCursor {
@@ -201,6 +225,7 @@ pub fn mask_shape_to_rgba(
         hot_x,
         hot_y,
         rgba,
+        xor_mask,
     })
 }
 
@@ -242,9 +267,7 @@ pub struct OutputCandidate {
 #[must_use]
 pub fn select_output(candidates: &[OutputCandidate], selector: &OutputSelector) -> Option<usize> {
     match selector {
-        OutputSelector::Index(n) => candidates
-            .iter()
-            .position(|c| c.index_in_adapter == *n),
+        OutputSelector::Index(n) => candidates.iter().position(|c| c.index_in_adapter == *n),
         OutputSelector::NameContains(needle) => {
             let needle = needle.to_lowercase();
             candidates.iter().position(|c| {
@@ -329,25 +352,60 @@ mod tests {
     #[test]
     fn bounding_ignores_empty_rects() {
         let rects = [
-            Rect { left: 5, top: 5, right: 5, bottom: 9 }, // empty
-            Rect { left: 10, top: 20, right: 30, bottom: 40 },
+            Rect {
+                left: 5,
+                top: 5,
+                right: 5,
+                bottom: 9,
+            }, // empty
+            Rect {
+                left: 10,
+                top: 20,
+                right: 30,
+                bottom: 40,
+            },
         ];
         assert_eq!(
             Rect::bounding(&rects),
-            Some(Rect { left: 10, top: 20, right: 30, bottom: 40 })
+            Some(Rect {
+                left: 10,
+                top: 20,
+                right: 30,
+                bottom: 40
+            })
         );
     }
 
     #[test]
     fn bounding_unions_all_rects() {
         let rects = [
-            Rect { left: 10, top: 10, right: 20, bottom: 20 },
-            Rect { left: 0, top: 50, right: 5, bottom: 60 },
-            Rect { left: 15, top: 5, right: 100, bottom: 15 },
+            Rect {
+                left: 10,
+                top: 10,
+                right: 20,
+                bottom: 20,
+            },
+            Rect {
+                left: 0,
+                top: 50,
+                right: 5,
+                bottom: 60,
+            },
+            Rect {
+                left: 15,
+                top: 5,
+                right: 100,
+                bottom: 15,
+            },
         ];
         assert_eq!(
             Rect::bounding(&rects),
-            Some(Rect { left: 0, top: 5, right: 100, bottom: 60 })
+            Some(Rect {
+                left: 0,
+                top: 5,
+                right: 100,
+                bottom: 60
+            })
         );
     }
 
@@ -385,13 +443,12 @@ mod tests {
     fn monochrome_shape_converts() {
         // 4x1 logical cursor: AND mask in row 0, XOR mask in row 1.
         // Pixels: (and,xor) = (0,0) black, (0,1) white, (1,0) transparent,
-        // (1,1) inverted → semi-gray.
+        // (1,1) inverted → white XOR pixel (bit set in the xor mask).
         let buf = [
             0b0011_0000, // AND row (pitch 1)
             0b0101_0000, // XOR row
         ];
-        let cur =
-            mask_shape_to_rgba(MaskShapeKind::Monochrome, 4, 1, 1, 0, 0, &buf).unwrap();
+        let cur = mask_shape_to_rgba(MaskShapeKind::Monochrome, 4, 1, 1, 0, 0, &buf).unwrap();
         assert_eq!((cur.width, cur.height), (4, 1));
         assert_eq!(
             cur.rgba,
@@ -399,9 +456,10 @@ mod tests {
                 0, 0, 0, 255, // black
                 255, 255, 255, 255, // white
                 0, 0, 0, 0, // transparent
-                128, 128, 128, 128, // inverted
+                255, 255, 255, 255, // inverted (white XOR)
             ]
         );
+        assert_eq!(cur.xor_mask, vec![0b0001_0000]);
     }
 
     #[test]
@@ -411,8 +469,15 @@ mod tests {
         let buf = vec![0xFFu8; 2 * 3]; // pitch 1, 3 AND rows + 3 XOR rows
         let cur = mask_shape_to_rgba(MaskShapeKind::Monochrome, 8, 3, 1, 0, 0, &buf).unwrap();
         assert_eq!((cur.width, cur.height), (8, 3));
-        // and=1, xor=1 everywhere → all inverted-gray.
-        assert!(cur.rgba.as_chunks::<4>().0.iter().all(|&p| p == [128, 128, 128, 128]));
+        // and=1, xor=1 everywhere → all white XOR pixels; 24 px = 3 mask bytes.
+        assert!(
+            cur.rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|&p| p == [255, 255, 255, 255])
+        );
+        assert_eq!(cur.xor_mask, vec![0xFF; 3]);
     }
 
     #[test]
@@ -433,20 +498,37 @@ mod tests {
     }
 
     #[test]
-    fn masked_color_shape_mask_means_transparent() {
-        let mut buf = vec![0, 255, 0, 0]; // one green pixel (BGRA)
-        buf.push(0b1000_0000);
-        let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 1, 1, 4, 0, 0, &buf).unwrap();
-        assert_eq!(cur.rgba, vec![0, 255, 0, 0]);
+    fn masked_color_uses_alpha_byte_as_xor_mask() {
+        // MSDN: alpha 0x00 -> RGB replaces the screen (opaque); alpha 0xFF
+        // -> XOR with the screen. Black XOR is a no-op (transparent, NOT
+        // xor-marked); non-black XOR ships opaque with the bit set.
+        let buf = vec![255, 255, 255, 0xFF, 0, 0, 0, 0xFF]; // white-XOR, black-XOR
+        let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 2, 1, 8, 0, 0, &buf).unwrap();
+        assert_eq!(cur.rgba, vec![255, 255, 255, 255, 0, 0, 0, 0]);
+        assert_eq!(cur.xor_mask, vec![0b1000_0000]);
     }
 
     #[test]
-    fn masked_color_without_mask_treats_black_as_transparent() {
-        // Some drivers (NVIDIA) report MaskedColor but deliver only the color
-        // plane: two pixels, black and white, no trailing 1bpp mask.
-        let buf = vec![0, 0, 0, 0, 255, 255, 255, 0];
-        let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 2, 1, 8, 0, 0, &buf).unwrap();
-        assert_eq!(cur.rgba, vec![0, 0, 0, 0, 255, 255, 255, 255]);
+    fn masked_color_alpha_zero_replaces_screen() {
+        // Opaque pixel per the alpha byte, no XOR: green stays green and
+        // opaque.
+        let buf = vec![0, 255, 0, 0x00];
+        let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 1, 1, 4, 0, 0, &buf).unwrap();
+        assert_eq!(cur.rgba, vec![0, 255, 0, 255]);
+        assert!(cur.xor_mask.is_empty());
+    }
+
+    #[test]
+    fn masked_color_black_xor_pixels_are_all_transparent() {
+        // 3x1 row: white-XOR, black-XOR, black-XOR: both blacks are no-ops
+        // (x^0 == x) and become transparent; only the white carries the bit.
+        let mut buf = vec![];
+        buf.extend_from_slice(&[255, 255, 255, 0xFF]);
+        buf.extend_from_slice(&[0, 0, 0, 0xFF]);
+        buf.extend_from_slice(&[0, 0, 0, 0xFF]);
+        let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 3, 1, 12, 0, 0, &buf).unwrap();
+        assert_eq!(cur.rgba, vec![255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(cur.xor_mask, vec![0b1000_0000]);
     }
 
     #[test]

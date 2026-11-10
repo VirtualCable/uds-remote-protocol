@@ -150,7 +150,11 @@ impl InputMessage {
             return Err(InputError::Truncated);
         }
         match *self {
-            Self::Key { down, scancode, extended } => {
+            Self::Key {
+                down,
+                scancode,
+                extended,
+            } => {
                 out[0] = TAG_KEY;
                 out[1] = u8::from(down) | (u8::from(extended) << 1);
                 out[2..4].copy_from_slice(&scancode.to_be_bytes());
@@ -171,11 +175,14 @@ impl InputMessage {
                 out[1..3].copy_from_slice(&delta.to_be_bytes());
                 out[3..5].copy_from_slice(&hdelta.to_be_bytes());
             }
-            Self::SyncModifiers { caps_lock, num_lock, scroll_lock } => {
+            Self::SyncModifiers {
+                caps_lock,
+                num_lock,
+                scroll_lock,
+            } => {
                 out[0] = TAG_SYNC_MODIFIERS;
-                out[1] = u8::from(caps_lock)
-                    | (u8::from(num_lock) << 1)
-                    | (u8::from(scroll_lock) << 2);
+                out[1] =
+                    u8::from(caps_lock) | (u8::from(num_lock) << 1) | (u8::from(scroll_lock) << 2);
             }
         }
         Ok(needed)
@@ -219,9 +226,12 @@ impl InputMessage {
                 if rest.len() < 2 {
                     return Err(InputError::Truncated);
                 }
-                let button = PointerButton::from_wire(rest[0])
-                    .ok_or(InputError::UnknownTag(rest[0]))?;
-                Ok(Self::PointerButton { button, down: rest[1] != 0 })
+                let button =
+                    PointerButton::from_wire(rest[0]).ok_or(InputError::UnknownTag(rest[0]))?;
+                Ok(Self::PointerButton {
+                    button,
+                    down: rest[1] != 0,
+                })
             }
             TAG_POINTER_WHEEL => {
                 if rest.len() < 4 {
@@ -259,13 +269,38 @@ mod tests {
     #[test]
     fn all_variants_roundtrip() {
         for msg in [
-            InputMessage::Key { down: true, scancode: 0x1E, extended: false },
-            InputMessage::Key { down: false, scancode: 0x4D, extended: true },
-            InputMessage::PointerMove { display_id: 2, x: 500, y: 65535 },
-            InputMessage::PointerButton { button: PointerButton::X2, down: true },
-            InputMessage::PointerButton { button: PointerButton::Left, down: false },
-            InputMessage::PointerWheel { delta: -3, hdelta: 2 },
-            InputMessage::SyncModifiers { caps_lock: true, num_lock: false, scroll_lock: true },
+            InputMessage::Key {
+                down: true,
+                scancode: 0x1E,
+                extended: false,
+            },
+            InputMessage::Key {
+                down: false,
+                scancode: 0x4D,
+                extended: true,
+            },
+            InputMessage::PointerMove {
+                display_id: 2,
+                x: 500,
+                y: 65535,
+            },
+            InputMessage::PointerButton {
+                button: PointerButton::X2,
+                down: true,
+            },
+            InputMessage::PointerButton {
+                button: PointerButton::Left,
+                down: false,
+            },
+            InputMessage::PointerWheel {
+                delta: -3,
+                hdelta: 2,
+            },
+            InputMessage::SyncModifiers {
+                caps_lock: true,
+                num_lock: false,
+                scroll_lock: true,
+            },
         ] {
             roundtrip(msg);
         }
@@ -274,13 +309,24 @@ mod tests {
     #[test]
     fn truncated_is_rejected() {
         assert_eq!(InputMessage::decode(&[]), Err(InputError::Truncated));
-        let (buf, n) = InputMessage::PointerMove { display_id: 0, x: 1, y: 2 }.encode();
-        assert_eq!(InputMessage::decode(&buf[..n - 1]), Err(InputError::Truncated));
+        let (buf, n) = InputMessage::PointerMove {
+            display_id: 0,
+            x: 1,
+            y: 2,
+        }
+        .encode();
+        assert_eq!(
+            InputMessage::decode(&buf[..n - 1]),
+            Err(InputError::Truncated)
+        );
     }
 
     #[test]
     fn unknown_tag_is_rejected() {
-        assert_eq!(InputMessage::decode(&[0xEE]), Err(InputError::UnknownTag(0xEE)));
+        assert_eq!(
+            InputMessage::decode(&[0xEE]),
+            Err(InputError::UnknownTag(0xEE))
+        );
     }
 
     #[test]
@@ -293,7 +339,12 @@ mod tests {
 
     #[test]
     fn key_flags_pack_down_and_extended() {
-        let (buf, n) = InputMessage::Key { down: true, scancode: 0x38, extended: true }.encode();
+        let (buf, n) = InputMessage::Key {
+            down: true,
+            scancode: 0x38,
+            extended: true,
+        }
+        .encode();
         assert_eq!((&buf[..n], n), (&[TAG_KEY, 0b11, 0, 0x38][..], KEY_LEN));
     }
 }

@@ -36,8 +36,8 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use sha2::Digest as _;
 
-use protocol::crypt::consts;
 use protocol::TICKET_LENGTH;
+use protocol::crypt::consts;
 
 /// Default config file name.
 pub const CONFIG_FILE_NAME: &str = "uds-rp-server.toml";
@@ -246,9 +246,18 @@ impl QualityConfig {
                 );
             }
         }
-        anyhow::ensure!(self.video_floor_kbps > 0, "quality.video_floor_kbps must be > 0");
-        anyhow::ensure!(self.audio_floor_kbps > 0, "quality.audio_floor_kbps must be > 0");
-        anyhow::ensure!(self.min_fps_guaranteed >= 1, "quality.min_fps_guaranteed must be >= 1");
+        anyhow::ensure!(
+            self.video_floor_kbps > 0,
+            "quality.video_floor_kbps must be > 0"
+        );
+        anyhow::ensure!(
+            self.audio_floor_kbps > 0,
+            "quality.audio_floor_kbps must be > 0"
+        );
+        anyhow::ensure!(
+            self.min_fps_guaranteed >= 1,
+            "quality.min_fps_guaranteed must be >= 1"
+        );
         if let Some(budget) = self.budget_kbps {
             anyhow::ensure!(budget > 0, "quality.budget_kbps must be > 0 when set");
         }
@@ -262,7 +271,10 @@ impl QualityConfig {
                 && self.pressure_lo < self.pressure_hi,
             "quality.pressure_lo/pressure_hi must satisfy 0 < lo < hi <= 1"
         );
-        anyhow::ensure!(self.rtt_bad_factor >= 1.0, "quality.rtt_bad_factor must be >= 1");
+        anyhow::ensure!(
+            self.rtt_bad_factor >= 1.0,
+            "quality.rtt_bad_factor must be >= 1"
+        );
         anyhow::ensure!(
             (0.0..1.0).contains(&self.loss_bad),
             "quality.loss_bad must be in (0, 1)"
@@ -288,8 +300,12 @@ impl QualityConfig {
             })
             .collect::<Vec<_>>()
             .join(";");
-        let vkbps = self.video_kbps.map_or_else(|| "auto".to_string(), |v| v.to_string());
-        let budget = self.budget_kbps.map_or_else(|| "off".to_string(), |v| v.to_string());
+        let vkbps = self
+            .video_kbps
+            .map_or_else(|| "auto".to_string(), |v| v.to_string());
+        let budget = self
+            .budget_kbps
+            .map_or_else(|| "off".to_string(), |v| v.to_string());
         format!(
             "vkbps={vkbps},budget={budget},akbps={},vfloor={},afloor={},minfps={},wc={},wcpu={},wbw={},phi={},plo={},rttf={},rtts={},rttbf={},jit={},loss={},b2d={},g2u={},cd={},levels={levels}",
             self.audio_kbps,
@@ -406,14 +422,18 @@ impl QualityConfig {
             force_video_codec_at: 2,
             video_floor_kbps: self.video_floor_kbps,
             audio_floor_kbps: self.audio_floor_kbps,
-            levels: self.levels.iter().map(|l| protocol::LevelSpec {
-                video_factor: l.video_factor,
-                fps: l.fps,
-                audio_factor: l.audio_factor,
-                jpeg_quality: l.jpeg_quality,
-                vp9_speed: l.vp9_speed,
-                kf_secs: l.kf_secs,
-            }).collect(),
+            levels: self
+                .levels
+                .iter()
+                .map(|l| protocol::LevelSpec {
+                    video_factor: l.video_factor,
+                    fps: l.fps,
+                    audio_factor: l.audio_factor,
+                    jpeg_quality: l.jpeg_quality,
+                    vp9_speed: l.vp9_speed,
+                    kf_secs: l.kf_secs,
+                })
+                .collect(),
             min_fps_guaranteed: self.min_fps_guaranteed,
             budget_kbps: self.budget_kbps,
         }
@@ -716,8 +736,6 @@ pub struct ChannelSwitches {
     pub lock: bool,
 }
 
-
-
 impl Default for StandaloneConfig {
     fn default() -> Self {
         Self {
@@ -871,9 +889,9 @@ impl ServerConfig {
                 Box::new(OneshotValidator::new(ticket))
             }
             ConnectionMethod::Standalone => {
-                let standalone = self
-                    .standalone
-                    .context("connection_method = \"standalone\" requires a [standalone] section")?;
+                let standalone = self.standalone.context(
+                    "connection_method = \"standalone\" requires a [standalone] section",
+                )?;
                 anyhow::ensure!(
                     !standalone.ticket.is_empty(),
                     "standalone.ticket must not be empty"
@@ -958,8 +976,7 @@ pub fn find_config_file() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    const KEY_HEX: &str =
-        "733b5b19754ebb4af75efa1b885e078116b85abb8488c4381078bf5fcb90958c";
+    const KEY_HEX: &str = "733b5b19754ebb4af75efa1b885e078116b85abb8488c4381078bf5fcb90958c";
 
     #[test]
     fn human_ticket_maps_to_48_bytes() {
@@ -1104,7 +1121,10 @@ video_factor = 1.0
 "#
         );
         let config: ServerConfig = toml::from_str(&text).expect("parse");
-        let err = config.quality.validate().expect_err("non-monotonic must fail");
+        let err = config
+            .quality
+            .validate()
+            .expect_err("non-monotonic must fail");
         assert!(err.to_string().contains("monotonic"), "{err}");
     }
 
@@ -1114,8 +1134,22 @@ video_factor = 1.0
             video_kbps: Some(8_000),
             weight_change: 0.0,
             levels: vec![
-                QualityLevelConfig { video_factor: 1.0, fps: 30, audio_factor: 1.0, jpeg_quality: 70, vp9_speed: 8, kf_secs: 30 },
-                QualityLevelConfig { video_factor: 0.3, fps: 12, audio_factor: 0.5, jpeg_quality: 55, vp9_speed: 6, kf_secs: 4 },
+                QualityLevelConfig {
+                    video_factor: 1.0,
+                    fps: 30,
+                    audio_factor: 1.0,
+                    jpeg_quality: 70,
+                    vp9_speed: 8,
+                    kf_secs: 30,
+                },
+                QualityLevelConfig {
+                    video_factor: 0.3,
+                    fps: 12,
+                    audio_factor: 0.5,
+                    jpeg_quality: 55,
+                    vp9_speed: 6,
+                    kf_secs: 4,
+                },
             ],
             ..QualityConfig::default()
         };
@@ -1128,10 +1162,14 @@ video_factor = 1.0
         assert_eq!(back.levels[0].kf_secs, 30);
         assert_eq!(back.levels[1].kf_secs, 4);
         // Pre-§18.74 5-field rows stay parseable, with the old 30 s default.
-        let legacy = QualityConfig::from_wire("levels=1.0:30:1.0:70:8;0.3:12:0.5:55:6").expect("legacy");
+        let legacy =
+            QualityConfig::from_wire("levels=1.0:30:1.0:70:8;0.3:12:0.5:55:6").expect("legacy");
         assert!(legacy.levels.iter().all(|l| l.kf_secs == 30));
         // Empty wire = defaults; garbage is rejected.
-        assert_eq!(QualityConfig::from_wire("").expect("defaults").levels.len(), 7);
+        assert_eq!(
+            QualityConfig::from_wire("").expect("defaults").levels.len(),
+            7
+        );
         assert!(QualityConfig::from_wire("vkbps=abc").is_err());
         assert!(QualityConfig::from_wire("bogus=1").is_err());
         assert!(QualityConfig::from_wire("levels=1.0:30:1.0").is_err());
@@ -1148,7 +1186,10 @@ video_factor = 1.0
         let mut q = QualityConfig::default();
         q.levels[0].vp9_speed = 9;
         assert!(q.validate().is_err());
-        let q = QualityConfig { pressure_lo: 0.9, ..QualityConfig::default() };
+        let q = QualityConfig {
+            pressure_lo: 0.9,
+            ..QualityConfig::default()
+        };
         assert!(q.validate().is_err(), "lo >= hi must fail");
     }
 

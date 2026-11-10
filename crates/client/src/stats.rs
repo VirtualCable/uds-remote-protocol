@@ -93,7 +93,8 @@ impl SessionStats {
     pub fn set_net(&self, rtt_ms: f32, jitter_ms: f32, loss_permille: f32, recv: u64, lost: u64) {
         self.rtt_ms.store(rtt_ms.to_bits(), Ordering::Relaxed);
         self.jitter_ms.store(jitter_ms.to_bits(), Ordering::Relaxed);
-        self.loss_permille.store(loss_permille.to_bits(), Ordering::Relaxed);
+        self.loss_permille
+            .store(loss_permille.to_bits(), Ordering::Relaxed);
         self.dgrams_recv.store(recv, Ordering::Relaxed);
         self.dgrams_lost.store(lost, Ordering::Relaxed);
     }
@@ -124,20 +125,37 @@ impl SessionStats {
     }
 
     /// A/V presentation gauges, refreshed on every presentation tick.
-    pub fn set_avsync(&self, queue_len: u32, clock_live: bool, skew_avg_ms: i32, skew_max_abs_ms: i32) {
-        self.present_queue_len.store(u64::from(queue_len), Ordering::Relaxed);
+    pub fn set_avsync(
+        &self,
+        queue_len: u32,
+        clock_live: bool,
+        skew_avg_ms: i32,
+        skew_max_abs_ms: i32,
+    ) {
+        self.present_queue_len
+            .store(u64::from(queue_len), Ordering::Relaxed);
         self.audio_clock_live.store(clock_live, Ordering::Relaxed);
         self.skew_avg_ms.store(skew_avg_ms, Ordering::Relaxed);
-        self.skew_max_abs_ms.store(skew_max_abs_ms, Ordering::Relaxed);
+        self.skew_max_abs_ms
+            .store(skew_max_abs_ms, Ordering::Relaxed);
     }
 
     /// Audio pipeline counters (called once per audio frame tick).
-    pub fn set_audio(&self, decoded: u64, plc: u64, resyncs: u64, underrun_samples: u64, buffered: u32) {
+    pub fn set_audio(
+        &self,
+        decoded: u64,
+        plc: u64,
+        resyncs: u64,
+        underrun_samples: u64,
+        buffered: u32,
+    ) {
         self.audio_decoded.store(decoded, Ordering::Relaxed);
         self.audio_plc.store(plc, Ordering::Relaxed);
         self.audio_resyncs.store(resyncs, Ordering::Relaxed);
-        self.audio_underrun_samples.store(underrun_samples, Ordering::Relaxed);
-        self.audio_buffered_samples.store(u64::from(buffered), Ordering::Relaxed);
+        self.audio_underrun_samples
+            .store(underrun_samples, Ordering::Relaxed);
+        self.audio_buffered_samples
+            .store(u64::from(buffered), Ordering::Relaxed);
     }
 
     /// Copies every stat into a plain snapshot.
@@ -155,7 +173,8 @@ impl SessionStats {
             dropped_overflow: self.dropped_overflow.load(Ordering::Relaxed),
             dropped_stale: self.dropped_stale.load(Ordering::Relaxed),
             keyframe_requests: self.keyframe_requests.load(Ordering::Relaxed),
-            present_queue_len: u32::try_from(self.present_queue_len.load(Ordering::Relaxed)).unwrap_or(u32::MAX),
+            present_queue_len: u32::try_from(self.present_queue_len.load(Ordering::Relaxed))
+                .unwrap_or(u32::MAX),
             audio_clock_live: self.audio_clock_live.load(Ordering::Relaxed),
             skew_avg_ms: self.skew_avg_ms.load(Ordering::Relaxed),
             skew_max_abs_ms: self.skew_max_abs_ms.load(Ordering::Relaxed),
@@ -163,7 +182,10 @@ impl SessionStats {
             audio_plc: self.audio_plc.load(Ordering::Relaxed),
             audio_resyncs: self.audio_resyncs.load(Ordering::Relaxed),
             audio_underrun_samples: self.audio_underrun_samples.load(Ordering::Relaxed),
-            audio_buffered_samples: u32::try_from(self.audio_buffered_samples.load(Ordering::Relaxed)).unwrap_or(u32::MAX),
+            audio_buffered_samples: u32::try_from(
+                self.audio_buffered_samples.load(Ordering::Relaxed),
+            )
+            .unwrap_or(u32::MAX),
         }
     }
 }
@@ -186,7 +208,9 @@ pub fn set_stats_csv(path: &std::path::Path) {
                 return;
             }
             tracing::info!(path = %path.display(), "writing per-second stats CSV");
-            *STATS_CSV.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            *STATS_CSV
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
                 Some(std::io::BufWriter::with_capacity(1 << 16, file));
         }
         Err(e) => tracing::warn!(path = %path.display(), "cannot open the stats CSV: {e}"),
@@ -197,7 +221,9 @@ pub fn set_stats_csv(path: &std::path::Path) {
 /// column is unix seconds, matching the server's stats CSV.
 pub(crate) fn write_csv_row(snap: &StatsSnapshot) {
     use std::io::Write as _;
-    let mut guard = STATS_CSV.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = STATS_CSV
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(w) = guard.as_mut() else { return };
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

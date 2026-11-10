@@ -79,7 +79,9 @@ async fn echo_roundtrip_over_encrypted_tcp() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
+        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None)
+            .await
+            .unwrap();
         let mut buf = [0u8; 4096];
         let (ch, n) = stream.recv_into(&mut buf).await.unwrap();
         stream.send(ch, &buf[..n]).await.unwrap();
@@ -102,7 +104,9 @@ async fn multiple_frames_keep_order_and_channels() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
+        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None)
+            .await
+            .unwrap();
         let mut buf = [0u8; 4096];
         let mut received = Vec::new();
         for _ in 0..3 {
@@ -140,7 +144,9 @@ async fn large_payload_survives_tcp_fragmentation() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
+        let mut stream = EncryptedStream::server_handshake(raw, &test_key(), None)
+            .await
+            .unwrap();
         let mut buf = vec![0u8; 70_000];
         let (ch, n) = stream.recv_into(&mut buf).await.unwrap();
         assert_eq!(ch, channel::DISPLAY);
@@ -162,7 +168,9 @@ async fn payload_above_max_is_rejected() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let _stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
+        let _stream = EncryptedStream::server_handshake(raw, &test_key(), None)
+            .await
+            .unwrap();
         // Keeps listening; the client will fail before sending.
     });
 
@@ -205,7 +213,9 @@ async fn server_sees_client_ticket() {
 
     let server = tokio::spawn(async move {
         let (raw, _) = listener.accept().await.unwrap();
-        let stream = EncryptedStream::server_handshake(raw, &test_key(), None).await.unwrap();
+        let stream = EncryptedStream::server_handshake(raw, &test_key(), None)
+            .await
+            .unwrap();
         stream.peer_hello().unwrap().ticket
     });
 
@@ -265,7 +275,8 @@ async fn server_rejects_a_wrong_psk_at_the_possession_proof() {
         .connect(&Target::new(addr, test_ticket(), wrong_key))
         .await
         .unwrap();
-    let client = EncryptedStream::client_handshake(raw, &test_ticket(), &wrong_key, 0, (0, 0)).await;
+    let client =
+        EncryptedStream::client_handshake(raw, &test_ticket(), &wrong_key, 0, (0, 0)).await;
 
     let server_result = server.await.unwrap();
     assert!(server_result.is_err(), "wrong-PSK handshake must fail");

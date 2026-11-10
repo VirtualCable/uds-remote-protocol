@@ -95,7 +95,12 @@ fn psnr_vs_source(src: &[Vec<u8>], dec: &[codec::DecodedFrame]) -> f64 {
     let mut sum_sq = 0f64;
     let mut count = 0u64;
     for (s, d) in src.iter().zip(dec.iter()) {
-        for (sp, dp) in s.as_chunks::<4>().0.iter().zip(d.data.as_chunks::<4>().0.iter()) {
+        for (sp, dp) in s
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(d.data.as_chunks::<4>().0.iter())
+        {
             for c in 0..3 {
                 let diff = f64::from(sp[c]) - f64::from(dp[c]);
                 sum_sq += diff * diff;
@@ -120,8 +125,8 @@ fn process_cpu_ms() -> f64 {
     let after_paren = stat.rsplit(')').next().expect("comm paren");
     let fields: Vec<&str> = after_paren.split_whitespace().collect();
     // Fields 14/15 overall => indices 11/12 after removing pid+comm.
-    let ticks: f64 = fields[11].parse::<f64>().unwrap_or(0.0)
-        + fields[12].parse::<f64>().unwrap_or(0.0);
+    let ticks: f64 =
+        fields[11].parse::<f64>().unwrap_or(0.0) + fields[12].parse::<f64>().unwrap_or(0.0);
     ticks * 10.0 // clock ticks are 10 ms on Linux (USER_HZ=100)
 }
 
@@ -209,7 +214,9 @@ fn sweep(name: &str, preset: codec::CodecPreset, frames: &[Vec<u8>], w: u32, h: 
 fn bitrate_sweep_1080p() {
     let (w, h, n) = (1920u32, 1080u32, 90u32);
     let frames: Vec<Vec<u8>> = (0..n).map(|t| frame_at(w, h, t)).collect();
-    println!("--- {n} frames {w}x{h}: default presets + bitrate sweep (CPU = % of one core @30fps) ---");
+    println!(
+        "--- {n} frames {w}x{h}: default presets + bitrate sweep (CPU = % of one core @30fps) ---"
+    );
     // Defaults as shipped in the catalog.
     for name in [
         "vp9-bandwidth-saver",

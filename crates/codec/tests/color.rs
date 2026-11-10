@@ -76,7 +76,14 @@ fn pure_red_matches_bt601() {
 #[test]
 fn plane_sizes_and_strides_are_tight() {
     // 4x2 with padded stride 20 (GPU-style row alignment).
-    let data = frame(4, 2, 20, |x, y| [u8::try_from(x * 10).unwrap(), u8::try_from(y * 100).unwrap(), 30, 255]);
+    let data = frame(4, 2, 20, |x, y| {
+        [
+            u8::try_from(x * 10).unwrap(),
+            u8::try_from(y * 100).unwrap(),
+            30,
+            255,
+        ]
+    });
     let f = VideoFrame {
         width: 4,
         height: 2,
@@ -93,8 +100,12 @@ fn plane_sizes_and_strides_are_tight() {
 #[test]
 fn stride_padding_does_not_leak_into_luma() {
     // Same image, two different strides: the luma must be identical.
-    let tight = frame(2, 2, 8, |x, _| [u8::try_from(x).unwrap() * 100, 50, 200, 255]);
-    let padded = frame(2, 2, 16, |x, _| [u8::try_from(x).unwrap() * 100, 50, 200, 255]);
+    let tight = frame(2, 2, 8, |x, _| {
+        [u8::try_from(x).unwrap() * 100, 50, 200, 255]
+    });
+    let padded = frame(2, 2, 16, |x, _| {
+        [u8::try_from(x).unwrap() * 100, 50, 200, 255]
+    });
     let a = bgra_to_i420(&VideoFrame {
         width: 2,
         height: 2,
@@ -215,7 +226,11 @@ fn i420_to_bgra_known_values() {
         v: vec![128; 4],
     };
     let back = i420_to_bgra(&i420).expect("back");
-    assert!(back.data.as_chunks::<4>().0.iter().all(|&[b, g, r, a]| {
-        b == g && g == r && (110..=142).contains(&r) && a == 255
-    }));
+    assert!(
+        back.data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|&[b, g, r, a]| { b == g && g == r && (110..=142).contains(&r) && a == 255 })
+    );
 }

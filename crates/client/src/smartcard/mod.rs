@@ -180,7 +180,10 @@ impl SmartcardService {
                 .collect();
             for raw in contexts {
                 if let Err(code) = backend.cancel(&ScardContext::from_raw(raw)) {
-                    warn!(context = raw, code, "smartcard cancel failed during teardown");
+                    warn!(
+                        context = raw,
+                        code, "smartcard cancel failed during teardown"
+                    );
                 }
             }
         }
@@ -269,7 +272,8 @@ impl Dispatcher {
             return;
         }
         let code = self.execute(&msg);
-        self.gate.on_completed(op, card, context, code, Instant::now());
+        self.gate
+            .on_completed(op, card, context, code, Instant::now());
         // Cancel only interrupts blocking status waits, but a released
         // context can never run its parked operations: drop them now.
         if op == GateOp::ReleaseContext && code == SCARD_S_SUCCESS {
@@ -286,14 +290,19 @@ impl Dispatcher {
         while let Some((op, card, context, parked)) = self.gate.next_runnable() {
             trace!(?op, card, "smartcard op resumed");
             let code = self.execute(&parked);
-            self.gate.on_completed(op, card, context, code, Instant::now());
+            self.gate
+                .on_completed(op, card, context, code, Instant::now());
         }
     }
 
     /// Gate view of one request: operation kind, the card it touches
     /// (0 = none) and the context that owns it (0 = none).
     fn classify(&self, msg: &SmartcardMessage) -> (GateOp, u64, u64) {
-        let card_ctx = |card: u32| self.cards.get(&card).map_or(0, |info| u64::from(info.context));
+        let card_ctx = |card: u32| {
+            self.cards
+                .get(&card)
+                .map_or(0, |info| u64::from(info.context))
+        };
         match msg {
             SmartcardMessage::ReleaseContext { context, .. } => {
                 (GateOp::ReleaseContext, 0, u64::from(*context))
@@ -385,7 +394,10 @@ impl Dispatcher {
             SmartcardMessage::ListReaders { context, .. } => {
                 let ctx = ScardContext::from_raw(u64::from(*context));
                 match backend.list_readers(&ctx, None) {
-                    Ok(readers) => self.reply(SmartcardMessage::Readers { request_id, readers }),
+                    Ok(readers) => self.reply(SmartcardMessage::Readers {
+                        request_id,
+                        readers,
+                    }),
                     Err(code) => self.reply_error(msg, code),
                 }
             }
@@ -484,15 +496,15 @@ impl Dispatcher {
                 match backend.transmit(&handle, &pci, data) {
                     Ok(result) => self.reply(SmartcardMessage::TransmitReply {
                         request_id,
-                        recv_protocol: result
-                            .recv_pci
-                            .map_or(*send_protocol, |pci| pci.protocol),
+                        recv_protocol: result.recv_pci.map_or(*send_protocol, |pci| pci.protocol),
                         data: result.recv_buffer,
                     }),
                     Err(code) => self.reply_error(msg, code),
                 }
             }
-            SmartcardMessage::Control { card, code, data, .. } => {
+            SmartcardMessage::Control {
+                card, code, data, ..
+            } => {
                 let handle = self.scard_handle(*card);
                 match backend.control(&handle, *code, data) {
                     Ok(data) => self.reply(SmartcardMessage::ControlReply { request_id, data }),
@@ -520,7 +532,10 @@ impl Dispatcher {
                 self.reply_error(msg, SCARD_E_INVALID_HANDLE)
             }
             reply => {
-                warn!(?reply, "smartcard reply where a request was expected; ignored");
+                warn!(
+                    ?reply,
+                    "smartcard reply where a request was expected; ignored"
+                );
                 SCARD_S_SUCCESS
             }
         }
@@ -605,4 +620,3 @@ impl Dispatcher {
         }
     }
 }
-

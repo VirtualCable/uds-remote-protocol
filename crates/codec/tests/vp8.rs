@@ -9,7 +9,7 @@
 #![cfg(feature = "codec-vp8")]
 #![allow(clippy::cast_possible_truncation)]
 
-use codec::{Vp8Decoder, Vp8Encoder, VideoDecoder, VideoEncoder, VideoFrame};
+use codec::{VideoDecoder, VideoEncoder, VideoFrame, Vp8Decoder, Vp8Encoder};
 
 fn gradient_frame(width: u32, height: u32) -> Vec<u8> {
     let mut data = vec![0u8; (width * height * 4) as usize];

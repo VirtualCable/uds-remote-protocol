@@ -126,7 +126,9 @@ impl Credential {
 
     /// Whether a valid auto-logon credential is stored.
     pub fn is_valid(&self) -> bool {
-        self.creds.as_ref().is_some_and(logic::Credentials::is_valid)
+        self.creds
+            .as_ref()
+            .is_some_and(logic::Credentials::is_valid)
     }
 
     /// Takes the stored credential out (one-shot auto-logon), zeroizing the

@@ -19,13 +19,16 @@ pub struct VcamSink {
 impl VcamSink {
     /// Creates (or attaches to) the session shared slot.
     pub fn create() -> anyhow::Result<Self> {
-        Ok(Self { writer: CamSharedWriter::create()? })
+        Ok(Self {
+            writer: CamSharedWriter::create()?,
+        })
     }
 }
 
 impl CamSink for VcamSink {
     fn write_frame(&mut self, frame: &codec::DecodedFrame, capture_ts_ms: u32) {
         // DecodedFrame is tight BGRA (stride == width*4).
-        self.writer.write_frame(&frame.data, frame.width, frame.height, capture_ts_ms);
+        self.writer
+            .write_frame(&frame.data, frame.width, frame.height, capture_ts_ms);
     }
 }

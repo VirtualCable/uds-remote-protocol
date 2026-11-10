@@ -150,8 +150,9 @@ pub unsafe fn kerb_interactive_unlock_logon_pack(
         (*pkiul_out).LogonId = LUID::default();
     }
 
-    let mut pb_buffer =
-        unsafe { (pkiul_out.cast::<u8>()).add(std::mem::size_of::<KERB_INTERACTIVE_UNLOCK_LOGON>()) };
+    let mut pb_buffer = unsafe {
+        (pkiul_out.cast::<u8>()).add(std::mem::size_of::<KERB_INTERACTIVE_UNLOCK_LOGON>())
+    };
 
     unsafe {
         (*pkiul_out).Logon.MessageType = pkil_in.MessageType;

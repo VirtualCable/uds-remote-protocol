@@ -113,11 +113,7 @@ impl CodecPreset {
 
     /// Builds the encoder for this preset; fails if the codec feature is not
     /// compiled in.
-    pub fn build_encoder(
-        &self,
-        width: u32,
-        height: u32,
-    ) -> crate::Result<Box<dyn VideoEncoder>> {
+    pub fn build_encoder(&self, width: u32, height: u32) -> crate::Result<Box<dyn VideoEncoder>> {
         let kbps = self.params.bitrate_kbps;
         let cpu = self.params.cpu_used;
         let quality = self.params.quality;
@@ -147,9 +143,7 @@ impl CodecPreset {
                 VideoCodecType::Vp8 => "vp8 (build with --features codec/codec-vp8)",
                 VideoCodecType::H264 => "h264 (not implemented yet)",
                 VideoCodecType::Av1 => "av1 (not implemented yet)",
-                VideoCodecType::JpegRects => {
-                    "jpeg-rects (build with --features codec/codec-jpeg)"
-                }
+                VideoCodecType::JpegRects => "jpeg-rects (build with --features codec/codec-jpeg)",
                 VideoCodecType::Raw => unreachable!("raw handled above"),
             })),
         }
@@ -235,7 +229,9 @@ mod tests {
 
     #[test]
     fn with_bitrate_overrides_only_bitrate() {
-        let p = CodecPreset::by_name("vp9-balanced").unwrap().with_bitrate(8000);
+        let p = CodecPreset::by_name("vp9-balanced")
+            .unwrap()
+            .with_bitrate(8000);
         assert_eq!(p.params.bitrate_kbps, 8000);
         assert_eq!(p.codec, VideoCodecType::Vp9);
         assert_eq!(p.params.cpu_used, Some(6));

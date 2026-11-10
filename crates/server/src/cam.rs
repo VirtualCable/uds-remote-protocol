@@ -94,7 +94,10 @@ impl CamSink for NullSink {
         let _ = (frame, capture_ts_ms);
         self.frames += 1;
         if self.frames % 150 == 1 {
-            debug!(frames = self.frames, "null cam sink discarding webcam frames");
+            debug!(
+                frames = self.frames,
+                "null cam sink discarding webcam frames"
+            );
         }
     }
 }
@@ -146,7 +149,11 @@ impl CamSink for RawSink {
             len.to_le_bytes(),
         ]
         .concat();
-        if file.write_all(&header).and_then(|()| file.write_all(&frame.data)).is_err() {
+        if file
+            .write_all(&header)
+            .and_then(|()| file.write_all(&frame.data))
+            .is_err()
+        {
             warn!(path = %self.path, "cam sink: write failed; sink disabled");
             self.file = None;
             return;
@@ -244,7 +251,9 @@ impl CamPump {
         let new = dropped - self.dropped_seen;
         if new > 0 {
             self.dropped_seen = dropped;
-            self.signals.frames_dropped.fetch_add(new, Ordering::Relaxed);
+            self.signals
+                .frames_dropped
+                .fetch_add(new, Ordering::Relaxed);
             self.signals.keyframe_needed.store(true, Ordering::Relaxed);
         }
     }

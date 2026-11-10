@@ -276,7 +276,10 @@ async fn manager_loop(
     info!(state = ?manager.console, "console state machine up");
     let mut buf = [0u8; 2048];
     while !stop.load(Ordering::Relaxed) {
-        if matches!(manager.pending.as_ref().map(|p| &p.phase), Some(Phase::AwaitReply)) {
+        if matches!(
+            manager.pending.as_ref().map(|p| &p.phase),
+            Some(Phase::AwaitReply)
+        ) {
             // Awaiting the client's conflict answer: read its stream too.
             let pending = manager.pending.as_mut().expect("checked above");
             tokio::select! {
@@ -346,8 +349,10 @@ impl Manager {
             warn!("a session agent is already serving a client; dropping the connection");
             return;
         }
-        info!(mode = crate::listener::mode_name(&client.runtime),
-            "handshake validated (possession proof passed)");
+        info!(
+            mode = crate::listener::mode_name(&client.runtime),
+            "handshake validated (possession proof passed)"
+        );
         self.pending = Some(Pending {
             stream: client.stream,
             runtime: client.runtime,
@@ -374,9 +379,14 @@ impl Manager {
         // Without credentials there is no identity to compare and the
         // existing console is simply mirrored (no conflict).
         let conflict = match (&self.console, &pending.creds) {
-            (ConsoleState::Session { id, account, locked }, Some(creds))
-                if !crate::console::same_account(account, creds) =>
-            {
+            (
+                ConsoleState::Session {
+                    id,
+                    account,
+                    locked,
+                },
+                Some(creds),
+            ) if !crate::console::same_account(account, creds) => {
                 Some((*id, account.clone(), *locked))
             }
             _ => None,
@@ -397,20 +407,26 @@ impl Manager {
                 self.start_eviction(owner_id, &account).await;
             }
             server_config::ConsoleConflictPolicy::Deny => {
-                let Some(mut pending) = self.pending.take() else { return };
-                crate::console::send_session_end(&mut pending.stream, SESSION_END_CONSOLE_BUSY).await;
+                let Some(mut pending) = self.pending.take() else {
+                    return;
+                };
+                crate::console::send_session_end(&mut pending.stream, SESSION_END_CONSOLE_BUSY)
+                    .await;
                 info!("console busy (owned by another user); policy is deny");
             }
             server_config::ConsoleConflictPolicy::Ask => {
                 let query = ControlMessage::ConsoleConflict {
-                    user: pending
-                        .conflict
-                        .reveal_user
-                        .then(|| account.display()),
-                    state: if locked { CONSOLE_STATE_LOCKED } else { CONSOLE_STATE_ACTIVE },
+                    user: pending.conflict.reveal_user.then(|| account.display()),
+                    state: if locked {
+                        CONSOLE_STATE_LOCKED
+                    } else {
+                        CONSOLE_STATE_ACTIVE
+                    },
                 };
                 let timeout = pending.conflict.timeout;
-                let Some(pending) = &mut self.pending else { return };
+                let Some(pending) = &mut self.pending else {
+                    return;
+                };
                 match query.encode() {
                     Ok(encoded) => {
                         if let Err(err) = pending.stream.send(channel::CONTROL, &encoded).await {
@@ -432,7 +448,11 @@ impl Manager {
 
     /// The client's `ConsoleConflictReply` (or any other message / stream
     /// error) while in [`Phase::AwaitReply`].
-    async fn handle_conflict_reply(&mut self, msg: std::result::Result<(u16, usize), transport::TransportError>, buf: &[u8]) {
+    async fn handle_conflict_reply(
+        &mut self,
+        msg: std::result::Result<(u16, usize), transport::TransportError>,
+        buf: &[u8],
+    ) {
         let take_over = match msg {
             Ok((ch, n)) if ch == channel::CONTROL => {
                 match ControlMessage::decode(&buf[..n]) {
@@ -461,7 +481,9 @@ impl Manager {
                 None => self.enter_autologon_or_ready().await,
             }
         } else {
-            let Some(mut pending) = self.pending.take() else { return };
+            let Some(mut pending) = self.pending.take() else {
+                return;
+            };
             crate::console::send_session_end(&mut pending.stream, SESSION_END_DENIED_BY_USER).await;
             info!("console takeover refused by the connecting client");
         }
@@ -469,7 +491,9 @@ impl Manager {
 
     /// Fires the eviction and arms the settle wait.
     async fn start_eviction(&mut self, owner_id: u32, account: &Account) {
-        let Some(pending) = &mut self.pending else { return };
+        let Some(pending) = &mut self.pending else {
+            return;
+        };
         // The eviction can take a few seconds; tell the client what the
         // wait is about so it does not read it as a hang.
         crate::console::send_progress(&mut pending.stream, SESSION_STAGE_EVICTING).await;
@@ -492,7 +516,9 @@ impl Manager {
             self.complete_pending().await;
             return;
         }
-        let Some(pending) = &mut self.pending else { return };
+        let Some(pending) = &mut self.pending else {
+            return;
+        };
         let Some(creds) = &pending.creds else {
             warn!("no console session and no autologon credentials configured; dropping");
             self.pending = None;
@@ -517,7 +543,9 @@ impl Manager {
     /// Console up and conflict resolved: hand the connection to a fresh
     /// session agent.
     async fn complete_pending(&mut self) {
-        let Some(pending) = self.pending.take() else { return };
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
         if let Err(err) = crate::listener::complete_session(
             pending.stream,
             &pending.runtime,
@@ -547,7 +575,9 @@ impl Manager {
             match crate::agent::spawn_probe_in_console() {
                 Ok(Some(pid)) => info!(pid, "secure-desktop probe spawned"),
                 Ok(None) => info!("secure-desktop probe requested but there is no console session"),
-                Err(err) => warn!(error = %format!("{err:#}"), "cannot spawn the secure-desktop probe"),
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), "cannot spawn the secure-desktop probe")
+                }
             }
         }
     }
@@ -575,7 +605,9 @@ impl Manager {
                     if let Err(err) = crate::sas::send_sas() {
                         warn!(error = %format!("{err:#}"), "SAS retry failed");
                     }
-                    let Some(pending) = &mut self.pending else { return };
+                    let Some(pending) = &mut self.pending else {
+                        return;
+                    };
                     pending.last_sas = Instant::now();
                 }
             }
@@ -593,11 +625,17 @@ impl Manager {
         match pending.phase {
             Phase::AwaitReply => {
                 info!("console conflict ask timed out; denying");
-                let Some(mut pending) = self.pending.take() else { return };
-                crate::console::send_session_end(&mut pending.stream, SESSION_END_DENIED_BY_USER).await;
+                let Some(mut pending) = self.pending.take() else {
+                    return;
+                };
+                crate::console::send_session_end(&mut pending.stream, SESSION_END_DENIED_BY_USER)
+                    .await;
             }
             Phase::Evicting { owner_id } => {
-                warn!(session_id = owner_id, "console still active after the eviction; dropping");
+                warn!(
+                    session_id = owner_id,
+                    "console still active after the eviction; dropping"
+                );
                 self.pending = None;
             }
             Phase::Autologon => {
@@ -630,7 +668,9 @@ impl Manager {
             }
             if self.unlock_sas_sent < UNLOCK_MAX_SAS {
                 match crate::sas::send_sas() {
-                    Ok(()) => info!("console locked; synthetic SAS sent to reach the credential prompt"),
+                    Ok(()) => {
+                        info!("console locked; synthetic SAS sent to reach the credential prompt")
+                    }
                     Err(err) => warn!(error = %format!("{err:#}"), "cannot send the synthetic SAS"),
                 }
                 self.unlock_sas_sent += 1;
@@ -642,7 +682,14 @@ impl Manager {
     /// console session, with the crash-loop cap and the SAS nudge towards
     /// the logon screen. Runs on every snapshot tick.
     fn legacy_upkeep(&mut self) {
-        let Mode::Legacy { config, agent, respawns, gave_up, last_sas, last_attempt } = &mut self.mode
+        let Mode::Legacy {
+            config,
+            agent,
+            respawns,
+            gave_up,
+            last_sas,
+            last_attempt,
+        } = &mut self.mode
         else {
             return;
         };
@@ -680,7 +727,10 @@ impl Manager {
                     // service restarts.
                     if !*gave_up {
                         *gave_up = true;
-                        error!(LEGACY_MAX_RESPAWNS, "agent respawn limit reached; giving up until service restart");
+                        error!(
+                            LEGACY_MAX_RESPAWNS,
+                            "agent respawn limit reached; giving up until service restart"
+                        );
                     }
                     return;
                 }
@@ -712,7 +762,10 @@ impl Manager {
                 let _ = windows::Win32::System::Threading::TerminateProcess(process.raw(), 0);
             }
         }
-        if let Mode::Legacy { agent: Some(agent), .. } = &self.mode {
+        if let Mode::Legacy {
+            agent: Some(agent), ..
+        } = &self.mode
+        {
             info!("service stopping: terminating the session agent");
             agent.kill();
         }

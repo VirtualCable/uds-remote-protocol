@@ -31,11 +31,20 @@ pub(crate) struct Sanitizer<I> {
 )]
 impl<I: InputInjector> Sanitizer<I> {
     pub(crate) fn new(inner: I) -> Self {
-        Self { inner, alt_down: false, shift_down: false, shift_streak: 0 }
+        Self {
+            inner,
+            alt_down: false,
+            shift_down: false,
+            shift_streak: 0,
+        }
     }
 
     pub(crate) fn dispatch(&mut self, msg: protocol::InputMessage) {
-        if let protocol::InputMessage::Key { down, scancode, extended } = msg
+        if let protocol::InputMessage::Key {
+            down,
+            scancode,
+            extended,
+        } = msg
             && !self.key_allowed(down, scancode, extended)
         {
             return;
@@ -81,7 +90,11 @@ mod tests {
     use protocol::InputMessage;
 
     fn key(down: bool, scancode: u16, extended: bool) -> InputMessage {
-        InputMessage::Key { down, scancode, extended }
+        InputMessage::Key {
+            down,
+            scancode,
+            extended,
+        }
     }
 
     #[test]
@@ -147,8 +160,15 @@ mod tests {
     #[test]
     fn pointer_and_other_messages_pass_untouched() {
         let mut s = Sanitizer::new(LogInjector::default());
-        s.dispatch(InputMessage::PointerMove { display_id: 0, x: 100, y: 200 });
-        s.dispatch(InputMessage::PointerWheel { delta: 1, hdelta: 0 });
+        s.dispatch(InputMessage::PointerMove {
+            display_id: 0,
+            x: 100,
+            y: 200,
+        });
+        s.dispatch(InputMessage::PointerWheel {
+            delta: 1,
+            hdelta: 0,
+        });
         s.dispatch(InputMessage::SyncModifiers {
             caps_lock: false,
             num_lock: true,

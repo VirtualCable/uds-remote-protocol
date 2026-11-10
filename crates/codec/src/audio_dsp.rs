@@ -134,7 +134,8 @@ impl LinearResampler {
             }
             self.pos += self.step;
         }
-        self.prev.copy_from_slice(&input[(frames - 1) * ch..frames * ch]);
+        self.prev
+            .copy_from_slice(&input[(frames - 1) * ch..frames * ch]);
         self.consumed += frames as u64;
     }
 }
@@ -272,7 +273,13 @@ impl DevicePipeline {
     /// `silent` marks the whole packet as digital silence (its bytes are
     /// then undefined and ignored, but the frame count is trusted). The
     /// converted samples land in `ring`.
-    pub fn push_packet(&mut self, data: &[u8], frames: usize, silent: bool, ring: &mut CaptureRing) {
+    pub fn push_packet(
+        &mut self,
+        data: &[u8],
+        frames: usize,
+        silent: bool,
+        ring: &mut CaptureRing,
+    ) {
         let frames = if silent {
             frames
         } else {
@@ -305,7 +312,12 @@ impl DevicePipeline {
             }
         }
         self.remixed.clear();
-        remix_channels(&self.converted, self.in_channels, self.out_channels, &mut self.remixed);
+        remix_channels(
+            &self.converted,
+            self.in_channels,
+            self.out_channels,
+            &mut self.remixed,
+        );
         if let Some(resampler) = &mut self.resampler {
             self.resampled.clear();
             resampler.process(&self.remixed, &mut self.resampled);
@@ -315,7 +327,6 @@ impl DevicePipeline {
         }
     }
 }
-
 
 /// Circular playback buffer between the network pump and the audio device
 /// callback (§9.1): overflow drains the oldest samples down to the target,
@@ -535,9 +546,7 @@ mod tests {
     fn resample_is_continuous_across_blocks() {
         let mut whole = LinearResampler::new(44_100, 48_000, 1);
         let mut split = LinearResampler::new(44_100, 48_000, 1);
-        let input: Vec<i16> = (0..2000i32)
-            .map(|i| (i * 7 % 2000 - 1000) as i16)
-            .collect();
+        let input: Vec<i16> = (0..2000i32).map(|i| (i * 7 % 2000 - 1000) as i16).collect();
         let mut a = Vec::new();
         whole.process(&input, &mut a);
         let mut b = Vec::new();
@@ -716,14 +725,21 @@ mod tests {
         buf.push(&[0; 9]);
         let drained = buf.drained_samples();
         assert!(drained > 0);
-        assert_eq!(buf.play_pos(), 1 + drained, "drained samples skip the cursor");
+        assert_eq!(
+            buf.play_pos(),
+            1 + drained,
+            "drained samples skip the cursor"
+        );
         // Underrun: empty the buffer, then pop silence.
         while !buf.is_empty() {
             buf.pop_or_silence();
         }
         let pos = buf.play_pos();
         assert_eq!(buf.pop_or_silence(), 0);
-        assert_eq!(buf.play_pos(), pos + 1, "underrun advances the cursor in real time");
+        assert_eq!(
+            buf.play_pos(),
+            pos + 1,
+            "underrun advances the cursor in real time"
+        );
     }
-
 }

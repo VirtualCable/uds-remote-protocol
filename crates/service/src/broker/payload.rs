@@ -137,7 +137,6 @@ impl Default for ChannelPolicy {
     }
 }
 
-
 impl TicketPayload {
     /// Parses a payload from its JSON form, rejecting unknown versions.
     pub fn from_json(text: &str) -> anyhow::Result<Self> {
