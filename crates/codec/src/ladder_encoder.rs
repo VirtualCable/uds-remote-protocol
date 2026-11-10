@@ -388,7 +388,7 @@ impl LadderEncoder {
     pub fn set_vp9_aq(&mut self, mode: u32) {
         if let Vp9Backend::Software(e) = &mut self.vp9 {
             if let Err(err) = e.set_aq_mode(mode) {
-                warn!("VP9 AQ mode {mode} rejected: {err}");
+                tracing::warn!("VP9 AQ mode {mode} rejected: {err}");
             }
         }
     }
