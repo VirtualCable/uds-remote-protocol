@@ -169,16 +169,25 @@ pub fn mask_shape_to_rgba(
                 for col in 0..w_px {
                     let pixel = &buf[row_i * pitch + col * 4..row_i * pitch + col * 4 + 4];
                     let (blue, green, red) = (pixel[0], pixel[1], pixel[2]);
-                    let alpha = match (kind, mask_bit(col, row_i)) {
-                        // MaskedColor: mask bit means transparent.
-                        (MaskShapeKind::MaskedColor, true) => 0,
-                        (MaskShapeKind::MaskedColor, false) => 255,
+                    let alpha = match kind {
+                        MaskShapeKind::MaskedColor if has_mask => {
+                            // Mask bit means transparent.
+                            if mask_bit(col, row_i) { 0 } else { 255 }
+                        }
+                        // Some drivers (NVIDIA) report MaskedColor but deliver
+                        // only the color plane (`PointerShapeBufferSize` ==
+                        // pitch × height, no trailing 1bpp mask). Fall back to
+                        // the classic convention: black pixels are
+                        // transparent, everything else opaque.
+                        MaskShapeKind::MaskedColor => {
+                            if red == 0 && green == 0 && blue == 0 { 0 } else { 255 }
+                        }
                         // Color: BGRA with a real alpha channel — honor it or
                         // the client paints an opaque black tile around the
                         // pointer.
-                        (MaskShapeKind::Color, _) => pixel[3],
+                        MaskShapeKind::Color => pixel[3],
                         // Monochrome is handled by the dedicated arm above.
-                        (MaskShapeKind::Monochrome, _) => unreachable!(),
+                        MaskShapeKind::Monochrome => unreachable!(),
                     };
                     rgba.extend_from_slice(&[red, green, blue, alpha]);
                 }
@@ -429,6 +438,15 @@ mod tests {
         buf.push(0b1000_0000);
         let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 1, 1, 4, 0, 0, &buf).unwrap();
         assert_eq!(cur.rgba, vec![0, 255, 0, 0]);
+    }
+
+    #[test]
+    fn masked_color_without_mask_treats_black_as_transparent() {
+        // Some drivers (NVIDIA) report MaskedColor but deliver only the color
+        // plane: two pixels, black and white, no trailing 1bpp mask.
+        let buf = vec![0, 0, 0, 0, 255, 255, 255, 0];
+        let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 2, 1, 8, 0, 0, &buf).unwrap();
+        assert_eq!(cur.rgba, vec![0, 0, 0, 0, 255, 255, 255, 255]);
     }
 
     #[test]
