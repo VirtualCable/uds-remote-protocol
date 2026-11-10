@@ -173,7 +173,12 @@ impl Session {
         }
         // Printer (§18.57): like the webcam, the flag reflects a real
         // capability (an injected sink).
-        let printer = self.config.integrations.printer.take().map(crate::printer::PrinterJobs::new);
+        let printer = self
+            .config
+            .integrations
+            .printer
+            .take()
+            .map(crate::printer::PrinterJobs::new);
         if printer.is_some() {
             flags |= protocol::FLAG_PRINTER;
         }
@@ -331,12 +336,11 @@ impl Session {
     /// `AnswerConflict` command. Fail-closed: timeout, a disconnected
     /// command channel or an undeliverable query event all deny the
     /// takeover.
-    async fn answer_conflict(
-        &mut self,
-        user: Option<String>,
-        state: u8,
-    ) -> bool {
-        info!(revealed = user.is_some(), state, "console conflict; asking the consumer");
+    async fn answer_conflict(&mut self, user: Option<String>, state: u8) -> bool {
+        info!(
+            revealed = user.is_some(),
+            state, "console conflict; asking the consumer"
+        );
         if !emit(&self.events, ClientEvent::ConsoleConflict { user, state }) {
             return false;
         }
@@ -357,7 +361,9 @@ impl Session {
                     return false;
                 }
                 Err(_) => {
-                    warn!("no AnswerConflict within {CONFLICT_ANSWER_TIMEOUT:?}; denying the takeover");
+                    warn!(
+                        "no AnswerConflict within {CONFLICT_ANSWER_TIMEOUT:?}; denying the takeover"
+                    );
                     return false;
                 }
             }
@@ -653,10 +659,7 @@ impl Session {
     /// Logs the presentation rate every ~5 s of stats ticks. The F3 overlay
     /// shows the same numbers live; the log carries them for offline
     /// analysis (fps deltas of the cumulative `presented` counter).
-    fn log_present_fps(
-        prev: &mut Option<(u64, Instant)>,
-        snap: &crate::stats::StatsSnapshot,
-    ) {
+    fn log_present_fps(prev: &mut Option<(u64, Instant)>, snap: &crate::stats::StatsSnapshot) {
         let now = Instant::now();
         let Some((prev_presented, prev_at)) = *prev else {
             *prev = Some((snap.presented, now));
@@ -699,7 +702,10 @@ impl Session {
                 .is_none_or(|t| t.elapsed() >= KEYFRAME_REQUEST_MIN_INTERVAL)
         {
             let chain_dropped = core.chain_dropped.swap(0, Ordering::Relaxed);
-            info!(dropped, awaiting, chain_dropped, "stream broken; requesting keyframe");
+            info!(
+                dropped,
+                awaiting, chain_dropped, "stream broken; requesting keyframe"
+            );
             let req = ControlMessage::RequestKeyframe { display_id: 0 };
             stream.send(channel::CONTROL, &req.encode()?).await?;
             core.stats.record_keyframe_request();
@@ -792,7 +798,9 @@ impl Session {
             Ok(ClientCommand::SmartcardEnable(on)) => core.set_smartcard(on),
             Ok(ClientCommand::LockRemote) => {
                 info!("remote lock requested (Ctrl+Alt+Shift+L)");
-                stream.send(channel::CONTROL, &ControlMessage::LockRequest.encode()?).await?;
+                stream
+                    .send(channel::CONTROL, &ControlMessage::LockRequest.encode()?)
+                    .await?;
             }
             Ok(ClientCommand::AnswerConflict { .. }) => {
                 // Only meaningful during the pre-session gate (§18.53).
@@ -867,7 +875,14 @@ impl PresentQueue {
     /// is imperceptible, while dropping it collapses the frame rate (these
     /// are decoded frames — dropping presentation never breaks the codec's
     /// predictive chain).
-    fn hold(&mut self, display_id: u8, hold_until: u32, frame: codec::DecodedFrame, stats: &mut SyncStats, live: &crate::stats::SessionStats) -> Option<HeldFrame> {
+    fn hold(
+        &mut self,
+        display_id: u8,
+        hold_until: u32,
+        frame: codec::DecodedFrame,
+        stats: &mut SyncStats,
+        live: &crate::stats::SessionStats,
+    ) -> Option<HeldFrame> {
         stats.record_hold();
         let evicted = if self.frames.len() >= MAX_HELD_FRAMES {
             let old = self.frames.pop_front();
@@ -889,7 +904,10 @@ impl PresentQueue {
 /// One work item for the decode thread (§15.3).
 enum DecodeJob {
     /// Display announced (`DisplayInfo`): codec for the display.
-    Announce { display_id: u8, codec: VideoCodecType },
+    Announce {
+        display_id: u8,
+        codec: VideoCodecType,
+    },
     /// One reassembled display frame.
     Frame(protocol::fragment::ReassembledFrame),
 }
@@ -969,7 +987,12 @@ impl DecodeWorker {
         displays: Displays,
         audio_clock: Arc<AtomicI64>,
         stats: Arc<crate::stats::SessionStats>,
-    ) -> (flume::Sender<DecodeJob>, flume::Sender<DecodeJob>, Arc<AtomicBool>, Arc<AtomicU64>) {
+    ) -> (
+        flume::Sender<DecodeJob>,
+        flume::Sender<DecodeJob>,
+        Arc<AtomicBool>,
+        Arc<AtomicU64>,
+    ) {
         let (tx, rx) = flume::bounded(DECODE_QUEUE_CAPACITY);
         let (ctl_tx, ctl_rx) = flume::unbounded();
         let recovery_awaiting = Arc::new(AtomicBool::new(false));
@@ -1024,7 +1047,10 @@ impl DecodeWorker {
             self.audio_now_last = Some(v);
             self.audio_now_changed_at = Instant::now();
             if self.dead_clock {
-                info!(audio_now = v, "audio clock alive again; resuming audio-master sync");
+                info!(
+                    audio_now = v,
+                    "audio clock alive again; resuming audio-master sync"
+                );
                 self.dead_clock = false;
             }
         } else if !self.dead_clock && self.audio_now_changed_at.elapsed() >= DEAD_CLOCK_AFTER {
@@ -1104,7 +1130,10 @@ impl DecodeWorker {
         // reference decodes "fine" into garbage), so drop them until the
         // keyframe lands. Self-contained codecs carry no chain; they decode.
         if self.recovery_awaiting.load(Ordering::Relaxed)
-            && matches!(codec_type, VideoCodecType::Vp8 | VideoCodecType::Vp9 | VideoCodecType::H264)
+            && matches!(
+                codec_type,
+                VideoCodecType::Vp8 | VideoCodecType::Vp9 | VideoCodecType::H264
+            )
             && !codec::packet_is_keyframe(codec_type, &payload)
         {
             self.chain_dropped.fetch_add(1, Ordering::Relaxed);
@@ -1122,7 +1151,10 @@ impl DecodeWorker {
             }
             match codec::build_decoder(codec_type) {
                 Ok(dec) => {
-                    info!(display_id = complete.display_id, codec_id, "decoder built from frame tag");
+                    info!(
+                        display_id = complete.display_id,
+                        codec_id, "decoder built from frame tag"
+                    );
                     self.decoder_failures.remove(&key);
                     self.decoders.insert(key, dec);
                 }
@@ -1177,7 +1209,9 @@ impl DecodeWorker {
             return true; // registry poisoned: keep the session, lose the frame
         };
         let rect = {
-            let mut guard = display.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = display
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.write_frame(frame);
             guard.full_rect()
         };
@@ -1209,10 +1243,13 @@ impl DecodeWorker {
                 self.stale_since = None;
                 self.stale_valve_open = false;
                 self.stats.record_hold();
-                if let Some(evicted) = self
-                    .present_queue
-                    .hold(display_id, ts, frame, &mut self.avsync_stats, &self.stats)
-                {
+                if let Some(evicted) = self.present_queue.hold(
+                    display_id,
+                    ts,
+                    frame,
+                    &mut self.avsync_stats,
+                    &self.stats,
+                ) {
                     // Queue full: the evicted frame is the most due — present
                     // it now rather than dropping it (see PresentQueue::hold).
                     let _ = self.present(evicted.display_id, &evicted.frame);
@@ -1261,7 +1298,11 @@ impl DecodeWorker {
             if !due {
                 break;
             }
-            let held = self.present_queue.frames.pop_front().expect("front checked");
+            let held = self
+                .present_queue
+                .frames
+                .pop_front()
+                .expect("front checked");
             if let Some(now) = audio_now {
                 self.avsync_stats
                     .record_present(i64::from(held.hold_until) - i64::from(now));
@@ -1272,7 +1313,11 @@ impl DecodeWorker {
         }
         if self.avsync_log.elapsed() >= SYNC_LOG_INTERVAL {
             info!(
-                mode = if audio_now.is_some() { "audio" } else { "no-audio" },
+                mode = if audio_now.is_some() {
+                    "audio"
+                } else {
+                    "no-audio"
+                },
                 presented = self.avsync_stats.presented,
                 held = self.avsync_stats.held,
                 dropped_stale = self.avsync_stats.dropped_stale,
@@ -1327,7 +1372,8 @@ struct Core {
     smartcard: Option<crate::smartcard::SmartcardService>,
     /// Injected PC/SC backend, kept to restart the dispatcher on
     /// `ClientCommand::SmartcardEnable`.
-    smartcard_backend: Option<std::sync::Arc<dyn crate::integrations::smartcard::SmartcardIntegration>>,
+    smartcard_backend:
+        Option<std::sync::Arc<dyn crate::integrations::smartcard::SmartcardIntegration>>,
     /// Reply channel of the smartcard dispatcher (replies are drained by
     /// `flush_out` onto the reliable stream).
     scard_tx: flume::Sender<protocol::SmartcardMessage>,
@@ -1351,9 +1397,9 @@ impl Core {
     ) -> Self {
         let (scard_tx, scard_rx) = flume::unbounded();
         let smartcard_backend = config.integrations.smartcard.clone();
-        let smartcard = config
-            .smartcard_offered()
-            .then(|| crate::smartcard::SmartcardService::start(smartcard_backend.clone(), scard_tx.clone()));
+        let smartcard = config.smartcard_offered().then(|| {
+            crate::smartcard::SmartcardService::start(smartcard_backend.clone(), scard_tx.clone())
+        });
         let stats = std::sync::Arc::new(crate::stats::SessionStats::default());
         let audio = AudioClient::new(
             config.audio,
@@ -1432,8 +1478,9 @@ impl Core {
                     hot_x,
                     hot_y,
                     pixels,
+                    xor_mask,
                 }) => {
-                    info!(width, height, "cursor shape");
+                    info!(width, height, xor = xor_mask.len(), "cursor shape");
                     if !emit(
                         &self.events,
                         ClientEvent::CursorShape {
@@ -1442,6 +1489,7 @@ impl Core {
                             hot_x,
                             hot_y,
                             rgba: pixels,
+                            xor_mask,
                         },
                     ) {
                         return Ok(false);
@@ -1598,7 +1646,10 @@ impl Core {
                     self.displays.get_or_insert(display_id);
                     if self
                         .decode_ctl_tx
-                        .send(DecodeJob::Announce { display_id, codec: codec_type })
+                        .send(DecodeJob::Announce {
+                            display_id,
+                            codec: codec_type,
+                        })
                         .is_err()
                     {
                         warn!("decode worker gone; DisplayInfo lost");
@@ -1664,7 +1715,10 @@ impl Core {
                 bitrate_kbps,
             }) => {
                 // §18.57: the server picked the webcam wire format.
-                info!(codec, width, height, fps, bitrate_kbps, "webcam configured by server");
+                info!(
+                    codec,
+                    width, height, fps, bitrate_kbps, "webcam configured by server"
+                );
                 self.cam.configure(crate::webcam::CamSpec {
                     codec,
                     width,

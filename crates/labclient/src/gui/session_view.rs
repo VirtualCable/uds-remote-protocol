@@ -11,11 +11,10 @@ use client::{ClientCommand, ClientEvent, CommandSender, Displays, Rect, StatsSna
 use protocol::InputMessage;
 use tracing::{debug, info, warn};
 use winit::event::{MouseButton, MouseScrollDelta};
-use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{CursorIcon, CustomCursor, Window};
+use winit::window::Window;
 
-use crate::gui::gpu::{Gpu, Panel};
+use crate::gui::gpu::{CursorDraw, Gpu, Panel};
 use crate::gui::keymap;
 
 /// Live session state owned by the GUI thread.
@@ -57,11 +56,33 @@ pub struct SessionView {
     swallowed_keys: std::collections::HashSet<KeyCode>,
     /// AltGr↔Ctrl pairing state (Windows' fake LCtrl events are unreliable).
     altgr: crate::gui::altgr::AltGr,
+    /// Current remote cursor sprite; None until the first shape arrives.
+    cursor: Option<CursorSprite>,
+    /// Whether the remote cursor is visible (server-driven, §10).
+    cursor_visible: bool,
 }
 
 struct Texture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+}
+
+/// Software-rendered remote cursor (§10): the OS cursor cannot XOR-invert
+/// (masked-color shapes), so the sprite is drawn in the render pass at the
+/// local pointer position and the OS cursor stays hidden during the session.
+struct CursorSprite {
+    /// RGBA sprite; XOR pixels carry alpha 0 (the invert pass draws them).
+    tex: Texture,
+    /// R8 mask, 255 where the pixel XORs the background.
+    mask: Texture,
+    /// Sprite width in remote-desktop pixels.
+    width: u16,
+    /// Sprite height in remote-desktop pixels.
+    height: u16,
+    /// Hotspot X offset inside the sprite.
+    hot_x: u16,
+    /// Hotspot Y offset inside the sprite.
+    hot_y: u16,
 }
 
 /// Announces local clipboard text to the remote session (channels watcher
@@ -73,7 +94,9 @@ struct ClipboardAnnounce {
 impl channels::clipboard::ClipboardCallback for ClipboardAnnounce {
     fn text_available(&self, text: String) {
         info!(len = text.len(), "local clipboard changed");
-        let _ = self.commands.try_send(ClientCommand::ClipboardChanged(text));
+        let _ = self
+            .commands
+            .try_send(ClientCommand::ClipboardChanged(text));
     }
 }
 
@@ -133,6 +156,8 @@ impl SessionView {
             pressed_keys: std::collections::HashSet::new(),
             swallowed_keys: std::collections::HashSet::new(),
             altgr: crate::gui::altgr::AltGr::default(),
+            cursor: None,
+            cursor_visible: true,
         }
     }
 
@@ -157,16 +182,22 @@ impl SessionView {
     /// server re-applies its resolution policy and answers with a fresh
     /// `DisplayInfo` carrying the real geometry.
     pub fn resize(&self, width: u32, height: u32) {
-        let _ = self.commands.try_send(ClientCommand::Resize { width, height });
+        let _ = self
+            .commands
+            .try_send(ClientCommand::Resize { width, height });
     }
 
     /// Drains pending session events; returns false when the session is gone.
-    pub fn poll_events(&mut self, gpu: &Gpu, window: &Window, event_loop: &ActiveEventLoop) -> bool {
+    pub fn poll_events(&mut self, gpu: &Gpu, window: &Window) -> bool {
         while let Ok(event) = self.events.try_recv() {
             match event {
                 ClientEvent::Connected { udp } => {
                     self.udp = udp;
                     self.status = format!("connected ({})", if udp { "UDP" } else { "TCP" });
+                    // The remote pointer is painted by us (§10): the OS
+                    // cursor cannot XOR-invert masked-color shapes, so it
+                    // stays hidden for the whole session.
+                    window.set_cursor_visible(false);
                 }
                 ClientEvent::DisplayInfo {
                     display_id,
@@ -182,10 +213,9 @@ impl SessionView {
                         // on a codec switch (same size) keeping it retains the
                         // last presented frame instead of flashing black until
                         // the first frame of the new codec arrives.
-                        let size_changed = self
-                            .texture
-                            .as_ref()
-                            .is_none_or(|t| t.texture.width() != width || t.texture.height() != height);
+                        let size_changed = self.texture.as_ref().is_none_or(|t| {
+                            t.texture.width() != width || t.texture.height() != height
+                        });
                         if size_changed {
                             self.texture = Some(make_texture(gpu, width, height));
                         }
@@ -201,7 +231,7 @@ impl SessionView {
                     }
                 }
                 ClientEvent::CursorVisibility { visible } => {
-                    window.set_cursor_visible(visible);
+                    self.cursor_visible = visible;
                 }
                 ClientEvent::CursorShape {
                     width,
@@ -209,8 +239,11 @@ impl SessionView {
                     hot_x,
                     hot_y,
                     rgba,
+                    xor_mask,
                 } => {
-                    Self::apply_cursor(event_loop, window, width, height, hot_x, hot_y, &rgba);
+                    self.cursor = Some(make_cursor_sprite(
+                        gpu, width, height, hot_x, hot_y, &rgba, &xor_mask,
+                    ));
                 }
                 ClientEvent::ClipboardData { text } => {
                     if let Some(clipboard) = &self.clipboard
@@ -220,9 +253,7 @@ impl SessionView {
                     }
                 }
                 ClientEvent::Stats(snapshot) => {
-                    self.prev_stats = self
-                        .stats
-                        .replace((snapshot, std::time::Instant::now()));
+                    self.prev_stats = self.stats.replace((snapshot, std::time::Instant::now()));
                 }
                 ClientEvent::Error(message) | ClientEvent::Status(message) => {
                     self.status = message;
@@ -234,6 +265,7 @@ impl SessionView {
                 ClientEvent::Disconnected => {
                     self.disconnected = true;
                     self.status = "disconnected".to_string();
+                    window.set_cursor_visible(true);
                     return false;
                 }
                 ClientEvent::SecureDesktop { active } => {
@@ -243,9 +275,14 @@ impl SessionView {
                     // §18.53: default consumer answer is take-over (the
                     // ticket IS the authorization). A future dialog can ask
                     // the local user; for now we answer immediately.
-                    info!(?user, state, "console conflict; answering take-over (default)");
+                    info!(
+                        ?user,
+                        state, "console conflict; answering take-over (default)"
+                    );
                     self.status = "console conflict: taking over".to_string();
-                    let _ = self.commands.try_send(ClientCommand::AnswerConflict { take_over: true });
+                    let _ = self
+                        .commands
+                        .try_send(ClientCommand::AnswerConflict { take_over: true });
                 }
                 ClientEvent::StorageList { .. }
                 | ClientEvent::TransferDone { .. }
@@ -264,11 +301,13 @@ impl SessionView {
             self.pressed_keys.remove(&key);
         }
         let (scancode, extended) = key;
-        let _ = self.commands.try_send(ClientCommand::Input(InputMessage::Key {
-            down,
-            scancode,
-            extended,
-        }));
+        let _ = self
+            .commands
+            .try_send(ClientCommand::Input(InputMessage::Key {
+                down,
+                scancode,
+                extended,
+            }));
     }
 
     /// Forwards a key press/release to the remote and tracks the held set.
@@ -315,14 +354,16 @@ impl SessionView {
             (KeyCode::AltRight, down) => {
                 let now = std::time::Instant::now();
                 let action = if down {
-                    self.altgr.altgr_down(now, self.pressed_keys.contains(&LCTRL))
+                    self.altgr
+                        .altgr_down(now, self.pressed_keys.contains(&LCTRL))
                 } else {
                     self.altgr.altgr_up()
                 };
                 match action {
                     crate::gui::altgr::CtrlAction::Press => self.send_key(LCTRL, true),
                     // Release after the RAlt-up below (mirror of the OS order).
-                    crate::gui::altgr::CtrlAction::Release | crate::gui::altgr::CtrlAction::Keep => {}
+                    crate::gui::altgr::CtrlAction::Release
+                    | crate::gui::altgr::CtrlAction::Keep => {}
                 }
                 if let Some(key) = keymap::map_key(code) {
                     self.send_key(key, down);
@@ -345,11 +386,13 @@ impl SessionView {
         self.altgr.reset();
         self.swallowed_keys.clear();
         for (scancode, extended) in self.pressed_keys.drain() {
-            let _ = self.commands.try_send(ClientCommand::Input(InputMessage::Key {
-                down: false,
-                scancode,
-                extended,
-            }));
+            let _ = self
+                .commands
+                .try_send(ClientCommand::Input(InputMessage::Key {
+                    down: false,
+                    scancode,
+                    extended,
+                }));
         }
     }
 
@@ -364,8 +407,12 @@ impl SessionView {
         }
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let (nx, ny) = (
-            (x / f64::from(size.width) * 65535.0).round().clamp(0.0, 65535.0) as u16,
-            (y / f64::from(size.height) * 65535.0).round().clamp(0.0, 65535.0) as u16,
+            (x / f64::from(size.width) * 65535.0)
+                .round()
+                .clamp(0.0, 65535.0) as u16,
+            (y / f64::from(size.height) * 65535.0)
+                .round()
+                .clamp(0.0, 65535.0) as u16,
         );
         let _ = self
             .commands
@@ -388,7 +435,10 @@ impl SessionView {
         };
         let _ = self
             .commands
-            .try_send(ClientCommand::Input(InputMessage::PointerButton { button, down }));
+            .try_send(ClientCommand::Input(InputMessage::PointerButton {
+                button,
+                down,
+            }));
     }
 
     /// Forwards wheel motion (detents).
@@ -458,33 +508,41 @@ impl SessionView {
             .map_or(1.0, |(_, t)| t.elapsed().as_secs_f32())
             .max(0.001);
         let rate = |cur: u64, prev: u64| cur.saturating_sub(prev) as f32 / dt;
-        let (fps, dec_rate, plc_rate) = self.prev_stats.as_ref().map_or((0.0, 0.0, 0.0), |(p, _)| {
-            (
-                rate(snap.presented, p.presented),
-                rate(snap.audio_decoded, p.audio_decoded),
-                rate(snap.audio_plc, p.audio_plc),
-            )
-        });
+        let (fps, dec_rate, plc_rate) =
+            self.prev_stats.as_ref().map_or((0.0, 0.0, 0.0), |(p, _)| {
+                (
+                    rate(snap.presented, p.presented),
+                    rate(snap.audio_decoded, p.audio_decoded),
+                    rate(snap.audio_plc, p.audio_plc),
+                )
+            });
         let (w, h) = self.display_size;
-        let codec = self.codec.map_or_else(|| "?".to_string(), |c| format!("{c:?}").to_lowercase());
+        let codec = self
+            .codec
+            .map_or_else(|| "?".to_string(), |c| format!("{c:?}").to_lowercase());
         let underrun_s = snap.audio_underrun_samples as f32 / 96_000.0; // 48k stereo
         let lines = [
-            format!(
-                "{} {w}x{h} {codec}",
-                if snap.udp { "UDP" } else { "TCP" }
-            ),
+            format!("{} {w}x{h} {codec}", if snap.udp { "UDP" } else { "TCP" }),
             format!(
                 "rtt {:.2}ms · jit {:.2}ms · loss {:.1}‰",
                 snap.rtt_ms, snap.jitter_ms, snap.loss_permille
             ),
             format!(
                 "fps {fps:.0} · hold {} · ovf {} · stale {} · kf {}",
-                snap.present_queue_len, snap.dropped_overflow, snap.dropped_stale, snap.keyframe_requests
+                snap.present_queue_len,
+                snap.dropped_overflow,
+                snap.dropped_stale,
+                snap.keyframe_requests
             ),
             format!(
                 "avsync {} · skew {}/{}ms",
-                if snap.audio_clock_live { "audio" } else { "no-audio" },
-                snap.skew_avg_ms, snap.skew_max_abs_ms
+                if snap.audio_clock_live {
+                    "audio"
+                } else {
+                    "no-audio"
+                },
+                snap.skew_avg_ms,
+                snap.skew_max_abs_ms
             ),
             format!(
                 "audio {dec_rate:.0}/s · plc {plc_rate:.0}/s · rs {} · und {underrun_s:.1}s",
@@ -500,10 +558,18 @@ impl SessionView {
             .iter()
             .enumerate()
             .map(|(i, line)| {
-                let color = if i == 1 { loss_color } else { [0.85, 0.88, 0.92, 1.0] };
+                let color = if i == 1 {
+                    loss_color
+                } else {
+                    [0.85, 0.88, 0.92, 1.0]
+                };
                 OwnedSection::default()
                     .with_screen_position((panel.x + 8.0, panel.y + 6.0 + i as f32 * 16.0))
-                    .add_text(OwnedText::new(line.clone()).with_scale(13.0).with_color(color))
+                    .add_text(
+                        OwnedText::new(line.clone())
+                            .with_scale(13.0)
+                            .with_color(color),
+                    )
             })
             .collect()
     }
@@ -578,25 +644,110 @@ impl SessionView {
         }
     }
 
-    fn apply_cursor(
-        event_loop: &ActiveEventLoop,
-        window: &Window,
-        width: u16,
-        height: u16,
-        hot_x: u16,
-        hot_y: u16,
-        rgba: &[u8],
-    ) {
-        match CustomCursor::from_rgba(rgba.to_vec(), width, height, hot_x, hot_y) {
-            Ok(source) => {
-                let cursor = event_loop.create_custom_cursor(source);
-                window.set_cursor(cursor);
-            }
-            Err(e) => {
-                debug!("custom cursor rejected ({e}); falling back to the default arrow");
-                window.set_cursor(CursorIcon::Default);
-            }
+    /// The software cursor sprite to draw this frame (§10), positioned at the
+    /// local pointer with the remote hotspot and scaled like the display
+    /// (the frame quad is stretched to the whole window).
+    #[must_use]
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        reason = "window sizes fit in f32"
+    )]
+    pub fn cursor_draw(&self, window: &Window) -> Option<CursorDraw<'_>> {
+        if !self.cursor_visible || self.texture.is_none() {
+            return None;
         }
+        let sprite = self.cursor.as_ref()?;
+        let (disp_w, disp_h) = self.display_size;
+        let win = window.inner_size();
+        if disp_w == 0 || disp_h == 0 || win.width == 0 || win.height == 0 {
+            return None;
+        }
+        let sx = win.width as f32 / disp_w as f32;
+        let sy = win.height as f32 / disp_h as f32;
+        let (px, py) = (self.pointer.0 as f32, self.pointer.1 as f32);
+        Some(CursorDraw {
+            texture: &sprite.tex.view,
+            mask: &sprite.mask.view,
+            x: px - f32::from(sprite.hot_x) * sx,
+            y: py - f32::from(sprite.hot_y) * sy,
+            w: f32::from(sprite.width) * sx,
+            h: f32::from(sprite.height) * sy,
+        })
+    }
+}
+
+/// Builds the two sprite textures from a wire cursor shape: the RGBA one
+/// with XOR pixels' alpha zeroed (the invert pass draws them), and the R8
+/// mask with 255 where the pixel XORs the background.
+fn make_cursor_sprite(
+    gpu: &Gpu,
+    width: u16,
+    height: u16,
+    hot_x: u16,
+    hot_y: u16,
+    rgba: &[u8],
+    xor_mask: &[u8],
+) -> CursorSprite {
+    let mut pixels = rgba.to_vec();
+    let mut mask = vec![0u8; usize::from(width) * usize::from(height)];
+    for (i, m) in mask.iter_mut().enumerate() {
+        let xor = xor_mask
+            .get(i / 8)
+            .is_some_and(|b| b & (0x80 >> (i % 8)) != 0);
+        if xor {
+            *m = 255;
+            pixels[i * 4 + 3] = 0; // the invert pass owns this pixel
+        }
+    }
+    let upload = |data: &[u8], bpp: u32, format: wgpu::TextureFormat, label: &str| {
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: u32::from(width).max(1),
+                height: u32::from(height).max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        gpu.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(u32::from(width) * bpp),
+                rows_per_image: Some(u32::from(height)),
+            },
+            wgpu::Extent3d {
+                width: u32::from(width).max(1),
+                height: u32::from(height).max(1),
+                depth_or_array_layers: 1,
+            },
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Texture { texture, view }
+    };
+    // Same sRGB convention as the display texture: sampled values decode to
+    // linear and the surface write-back re-encodes, so blending matches.
+    let tex = upload(&pixels, 4, wgpu::TextureFormat::Rgba8UnormSrgb, "cursor");
+    let mask = upload(&mask, 1, wgpu::TextureFormat::R8Unorm, "cursor-mask");
+    CursorSprite {
+        tex,
+        mask,
+        width,
+        height,
+        hot_x,
+        hot_y,
     }
 }
 

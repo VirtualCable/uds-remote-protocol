@@ -100,6 +100,10 @@ pub enum ClientEvent {
         hot_y: u16,
         /// RGBA pixels, `width * height * 4` bytes.
         rgba: Vec<u8>,
+        /// 1bpp XOR-with-background mask (MSB first, row-major); a set bit
+        /// means the pixel inverts what is under it. Empty when no pixel
+        /// XORs.
+        xor_mask: Vec<u8>,
     },
     /// Text pulled from the remote clipboard (M8); the consumer should
     /// apply it to the local clipboard.
@@ -307,6 +311,7 @@ mod tests {
             hot_x: 0,
             hot_y: 0,
             rgba: vec![255; 16],
+            xor_mask: Vec::new(),
         };
         let dbg = format!("{shape:?}");
         assert!(dbg.contains("CursorShape"));

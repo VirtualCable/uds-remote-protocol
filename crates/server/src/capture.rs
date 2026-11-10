@@ -267,9 +267,7 @@ pub struct OutputCandidate {
 #[must_use]
 pub fn select_output(candidates: &[OutputCandidate], selector: &OutputSelector) -> Option<usize> {
     match selector {
-        OutputSelector::Index(n) => candidates
-            .iter()
-            .position(|c| c.index_in_adapter == *n),
+        OutputSelector::Index(n) => candidates.iter().position(|c| c.index_in_adapter == *n),
         OutputSelector::NameContains(needle) => {
             let needle = needle.to_lowercase();
             candidates.iter().position(|c| {
@@ -354,25 +352,60 @@ mod tests {
     #[test]
     fn bounding_ignores_empty_rects() {
         let rects = [
-            Rect { left: 5, top: 5, right: 5, bottom: 9 }, // empty
-            Rect { left: 10, top: 20, right: 30, bottom: 40 },
+            Rect {
+                left: 5,
+                top: 5,
+                right: 5,
+                bottom: 9,
+            }, // empty
+            Rect {
+                left: 10,
+                top: 20,
+                right: 30,
+                bottom: 40,
+            },
         ];
         assert_eq!(
             Rect::bounding(&rects),
-            Some(Rect { left: 10, top: 20, right: 30, bottom: 40 })
+            Some(Rect {
+                left: 10,
+                top: 20,
+                right: 30,
+                bottom: 40
+            })
         );
     }
 
     #[test]
     fn bounding_unions_all_rects() {
         let rects = [
-            Rect { left: 10, top: 10, right: 20, bottom: 20 },
-            Rect { left: 0, top: 50, right: 5, bottom: 60 },
-            Rect { left: 15, top: 5, right: 100, bottom: 15 },
+            Rect {
+                left: 10,
+                top: 10,
+                right: 20,
+                bottom: 20,
+            },
+            Rect {
+                left: 0,
+                top: 50,
+                right: 5,
+                bottom: 60,
+            },
+            Rect {
+                left: 15,
+                top: 5,
+                right: 100,
+                bottom: 15,
+            },
         ];
         assert_eq!(
             Rect::bounding(&rects),
-            Some(Rect { left: 0, top: 5, right: 100, bottom: 60 })
+            Some(Rect {
+                left: 0,
+                top: 5,
+                right: 100,
+                bottom: 60
+            })
         );
     }
 
@@ -410,13 +443,12 @@ mod tests {
     fn monochrome_shape_converts() {
         // 4x1 logical cursor: AND mask in row 0, XOR mask in row 1.
         // Pixels: (and,xor) = (0,0) black, (0,1) white, (1,0) transparent,
-        // (1,1) inverted → semi-gray.
+        // (1,1) inverted → white XOR pixel (bit set in the xor mask).
         let buf = [
             0b0011_0000, // AND row (pitch 1)
             0b0101_0000, // XOR row
         ];
-        let cur =
-            mask_shape_to_rgba(MaskShapeKind::Monochrome, 4, 1, 1, 0, 0, &buf).unwrap();
+        let cur = mask_shape_to_rgba(MaskShapeKind::Monochrome, 4, 1, 1, 0, 0, &buf).unwrap();
         assert_eq!((cur.width, cur.height), (4, 1));
         assert_eq!(
             cur.rgba,
@@ -424,9 +456,10 @@ mod tests {
                 0, 0, 0, 255, // black
                 255, 255, 255, 255, // white
                 0, 0, 0, 0, // transparent
-                128, 128, 128, 128, // inverted
+                255, 255, 255, 255, // inverted (white XOR)
             ]
         );
+        assert_eq!(cur.xor_mask, vec![0b0001_0000]);
     }
 
     #[test]
@@ -436,8 +469,15 @@ mod tests {
         let buf = vec![0xFFu8; 2 * 3]; // pitch 1, 3 AND rows + 3 XOR rows
         let cur = mask_shape_to_rgba(MaskShapeKind::Monochrome, 8, 3, 1, 0, 0, &buf).unwrap();
         assert_eq!((cur.width, cur.height), (8, 3));
-        // and=1, xor=1 everywhere → all inverted-gray.
-        assert!(cur.rgba.as_chunks::<4>().0.iter().all(|&p| p == [128, 128, 128, 128]));
+        // and=1, xor=1 everywhere → all white XOR pixels; 24 px = 3 mask bytes.
+        assert!(
+            cur.rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|&p| p == [255, 255, 255, 255])
+        );
+        assert_eq!(cur.xor_mask, vec![0xFF; 3]);
     }
 
     #[test]
@@ -460,13 +500,12 @@ mod tests {
     #[test]
     fn masked_color_uses_alpha_byte_as_xor_mask() {
         // MSDN: alpha 0x00 -> RGB replaces the screen (opaque); alpha 0xFF
-        // -> XOR with the screen. Black XOR is a no-op (transparent here),
-        // non-black XOR is emulated opaque. No outline expected: the opaque
-        // pixel is at the corner, and every transparent pixel borders it, so
-        // the outline pass turns them black.
+        // -> XOR with the screen. Black XOR is a no-op (transparent, NOT
+        // xor-marked); non-black XOR ships opaque with the bit set.
         let buf = vec![255, 255, 255, 0xFF, 0, 0, 0, 0xFF]; // white-XOR, black-XOR
         let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 2, 1, 8, 0, 0, &buf).unwrap();
-        assert_eq!(cur.rgba, vec![255, 255, 255, 255, 0, 0, 0, 255]);
+        assert_eq!(cur.rgba, vec![255, 255, 255, 255, 0, 0, 0, 0]);
+        assert_eq!(cur.xor_mask, vec![0b1000_0000]);
     }
 
     #[test]
@@ -476,22 +515,20 @@ mod tests {
         let buf = vec![0, 255, 0, 0x00];
         let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 1, 1, 4, 0, 0, &buf).unwrap();
         assert_eq!(cur.rgba, vec![0, 255, 0, 255]);
+        assert!(cur.xor_mask.is_empty());
     }
 
     #[test]
-    fn masked_color_isolated_black_xor_stays_transparent() {
-        // 3x1 row: white-XOR, black-XOR, black-XOR. The middle pixel borders
-        // the ink and becomes outline; the far one is isolated and stays
-        // transparent.
+    fn masked_color_black_xor_pixels_are_all_transparent() {
+        // 3x1 row: white-XOR, black-XOR, black-XOR: both blacks are no-ops
+        // (x^0 == x) and become transparent; only the white carries the bit.
         let mut buf = vec![];
         buf.extend_from_slice(&[255, 255, 255, 0xFF]);
         buf.extend_from_slice(&[0, 0, 0, 0xFF]);
         buf.extend_from_slice(&[0, 0, 0, 0xFF]);
         let cur = mask_shape_to_rgba(MaskShapeKind::MaskedColor, 3, 1, 12, 0, 0, &buf).unwrap();
-        assert_eq!(
-            cur.rgba,
-            vec![255, 255, 255, 255, 0, 0, 0, 255, 0, 0, 0, 0]
-        );
+        assert_eq!(cur.rgba, vec![255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(cur.xor_mask, vec![0b1000_0000]);
     }
 
     #[test]

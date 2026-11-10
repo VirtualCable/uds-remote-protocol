@@ -114,10 +114,14 @@ async fn serve_udp(listener: DirectListener, got_input: flume::Sender<()>) -> Re
         hot_x: 0,
         hot_y: 0,
         pixels: vec![255, 0, 0, 255],
+        xor_mask: Vec::new(),
     };
     stream.send(channel::CURSOR, &shape.encode()).await?;
     stream
-        .send(channel::CURSOR, &CursorMessage::Visibility { visible: true }.encode())
+        .send(
+            channel::CURSOR,
+            &CursorMessage::Visibility { visible: true }.encode(),
+        )
         .await?;
 
     // Serve probes and watch for input until the client disconnects.
@@ -274,7 +278,10 @@ async fn session_delivers_frames_cursor_and_input_end_to_end() -> Result<()> {
     // Close ends the session: Disconnected is the last event and run()
     // returns cleanly.
     commands.send(ClientCommand::Close)?;
-    collect!(&events_rx, |event| matches!(event, ClientEvent::Disconnected));
+    collect!(&events_rx, |event| matches!(
+        event,
+        ClientEvent::Disconnected
+    ));
     session_task.await.expect("session task")?;
     server.abort();
     Ok(())
@@ -316,7 +323,10 @@ async fn session_falls_back_to_tcp_when_udp_is_silent() -> Result<()> {
     });
     drop(commands);
     drop(displays);
-    collect!(&events_rx, |event| matches!(event, ClientEvent::Disconnected));
+    collect!(&events_rx, |event| matches!(
+        event,
+        ClientEvent::Disconnected
+    ));
     session_task.await.expect("session task")?;
     server.abort();
     Ok(())
