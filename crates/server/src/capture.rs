@@ -219,6 +219,13 @@ pub fn mask_shape_to_rgba(
             (rows, rgba, xor_mask)
         }
     };
+    // The wire format fixes the mask at ceil(w*h/8) bytes; a sparse mask
+    // shorter than that (last XOR pixel far from the bottom-right corner,
+    // e.g. the centered I-beam) must be zero-padded or decoders reject it.
+    let mut xor_mask = xor_mask;
+    if !xor_mask.is_empty() {
+        xor_mask.resize((w_px * logical_h).div_ceil(8), 0);
+    }
     Some(CapturedCursor {
         width,
         height: u16::try_from(logical_h).ok()?,

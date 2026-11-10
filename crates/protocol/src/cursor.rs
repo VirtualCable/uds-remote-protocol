@@ -159,7 +159,9 @@ impl CursorMessage {
                 let xor_mask = if tail.len() >= 4 {
                     let mlen = u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]) as usize;
                     let expected = (usize::from(width) * usize::from(height)).div_ceil(8);
-                    if mlen != 0 && mlen != expected {
+                    // Encoders pad to `expected`, but a shorter mask is still
+                    // well-formed (trailing zeros elided); longer is corrupt.
+                    if mlen > expected {
                         return Err(CursorError::BadMaskLength);
                     }
                     tail.get(4..4 + mlen)
@@ -219,6 +221,41 @@ mod tests {
             xor_mask: vec![0b1010_0000],
         };
         assert_eq!(CursorMessage::decode(&msg.encode()), Ok(msg));
+    }
+
+    #[test]
+    fn shape_with_short_xor_mask_decodes() {
+        // Sparse masks with trailing zeros elided are well-formed (the
+        // I-beam's XOR pixels sit in the middle rows, far from the end).
+        let msg = CursorMessage::Shape {
+            width: 48,
+            height: 48,
+            hot_x: 14,
+            hot_y: 15,
+            pixels: vec![0; 48 * 48 * 4],
+            xor_mask: vec![0xFF; 100], // < ceil(2304/8) = 288
+        };
+        let decoded = CursorMessage::decode(&msg.encode()).expect("short mask decodes");
+        let CursorMessage::Shape { xor_mask, .. } = decoded else {
+            panic!("expected shape");
+        };
+        assert_eq!(xor_mask.len(), 100);
+    }
+
+    #[test]
+    fn shape_with_oversized_xor_mask_is_rejected() {
+        let msg = CursorMessage::Shape {
+            width: 48,
+            height: 48,
+            hot_x: 14,
+            hot_y: 15,
+            pixels: vec![0; 48 * 48 * 4],
+            xor_mask: vec![0; 289], // > ceil(2304/8) = 288
+        };
+        assert_eq!(
+            CursorMessage::decode(&msg.encode()),
+            Err(CursorError::BadMaskLength)
+        );
     }
 
     #[test]
