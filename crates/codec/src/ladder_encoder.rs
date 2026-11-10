@@ -355,6 +355,7 @@ impl LadderEncoder {
     /// there. The next frame goes as a keyframe of the new codec.
     pub fn force_level(&mut self, level: Level) {
         if self.ladder.force(Instant::now(), level).is_some() {
+            tracing::info!(target: "ladder", to = ?level, "switch: external force (congestion)");
             self.begin_level(level);
         }
     }
@@ -467,6 +468,16 @@ impl VideoEncoder for LadderEncoder {
         }
 
         if let Some(switch) = self.ladder.update(Instant::now(), sample) {
+            tracing::info!(
+                target: "ladder",
+                to = ?switch.to,
+                sample = format_args!("{sample:.1}"),
+                ema = format_args!("{:.1}", self.ladder.ema().unwrap_or(-1.0)),
+                area_pct = format_args!("{area_pct:.2}"),
+                jpeg_bps_ema = self.jpeg_bps_ema.unwrap_or(0.0),
+                dwell_s = self.ladder.dwell().as_secs(),
+                "switch: metric"
+            );
             self.begin_level(switch.to);
             // The just-computed diff predates the switch; the new codec's
             // first frame is a full frame (keyframe).
@@ -512,6 +523,16 @@ impl VideoEncoder for LadderEncoder {
                             && big_change
                             && bps > burst_rate
                         {
+                            tracing::info!(
+                                target: "ladder",
+                                bps = bps as u64,
+                                burst_rate = burst_rate as u64,
+                                dirty_frac = format_args!(
+                                    "{:.2}",
+                                    dirty_area_px(&dirty) as f64 / screen_px as f64
+                                ),
+                                "switch: burst guard"
+                            );
                             self.force_level(Level::High);
                         }
                     }
