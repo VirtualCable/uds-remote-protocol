@@ -195,8 +195,9 @@ pub fn mask_shape_to_rgba(
                             // RGB XORs the screen pixel. A BLACK XOR is a
                             // no-op (x ^ 0 == x): emit it as transparent, NOT
                             // as an XOR pixel — the client approximates XOR
-                            // with a reverse-subtract blend, and 0 - dst
-                            // would clamp to black instead of keeping dst.
+                            // with a subtract blend (1 - dst), and a marked
+                            // black pixel would clamp to black instead of
+                            // keeping dst.
                             // Any other XOR color ships opaque + XOR bit.
                             0xFF if red == 0 && green == 0 && blue == 0 => 0,
                             0xFF => {

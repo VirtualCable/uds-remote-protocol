@@ -654,7 +654,9 @@ impl CursorPipeline {
             Some(wgpu::BlendState::ALPHA_BLENDING),
             wgpu::ColorWrites::ALL,
         );
-        // Invert = src - dst with src = 1 (ReverseSubtract, both factors One).
+        // Invert = src - dst with src = 1 → 1 - dst (true inversion). wgpu's
+        // Subtract is src*sf - dst*df; ReverseSubtract would be dst - src,
+        // which with src=1 clamps to black instead of inverting.
         // Alpha untouched (the surface alpha is meaningless on screen).
         let invert = make(
             "cursor-invert",
@@ -662,7 +664,7 @@ impl CursorPipeline {
                 color: wgpu::BlendComponent {
                     src_factor: wgpu::BlendFactor::One,
                     dst_factor: wgpu::BlendFactor::One,
-                    operation: wgpu::BlendOperation::ReverseSubtract,
+                    operation: wgpu::BlendOperation::Subtract,
                 },
                 alpha: wgpu::BlendComponent::REPLACE,
             }),
