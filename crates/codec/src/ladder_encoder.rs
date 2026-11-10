@@ -386,12 +386,17 @@ impl LadderEncoder {
     /// Marks the pending switch: keyframe + codec-change notification.
     fn begin_level(&mut self, level: Level) {
         if level == Level::Low {
-            // Re-arm the burst-guard calibration: the first frames of a
-            // Low visit are full-screen by definition, and a stale
+            // Re-arm the Low-leg calibration: the first frames of a Low
+            // visit are full-screen by definition, a stale
             // `last_low_encode` would measure a `dt` spanning the whole
-            // High visit.
+            // High visit, and a stale bandwidth EMA (still hot from the
+            // video content that drove the last up-switch) would start
+            // the visit already pressing against the up-trigger —
+            // together these were the flip-flop seen right after a
+            // down-switch.
             self.low_rate_samples = 0;
             self.last_low_encode = None;
+            self.jpeg_bps_ema = None;
         }
         self.force_full = true;
         let codec = match level {
@@ -413,6 +418,12 @@ impl VideoEncoder for LadderEncoder {
         self.check_dims(frame)?;
 
         // One diff per frame, shared by the metric and the JPEG encoder.
+        // An "artificial" full frame (level switch, keyframe request, or
+        // the very first frame ever) is protocol overhead, not a content
+        // change: it must not feed the metric, or it bumps the area EMA
+        // to the edge of the up threshold and the next menu pop flips the
+        // regime right back (the flip-flop seen after a down-switch).
+        let artificial_full = self.force_full || self.prev.is_none();
         let mut dirty = if self.force_full {
             self.force_full = false;
             vec![rects::Rect {
@@ -428,9 +439,13 @@ impl VideoEncoder for LadderEncoder {
         // NOT the exact encoding diff above — byte-exact diffing reports
         // ~100 % of the screen as "changed" on video (recompression
         // shimmer) and leaves the controllers without a working signal.
-        let area_pct = 100.0
-            * rects::changed_area_fraction(self.prev.as_deref(), frame.data, self.width, self.height, frame.stride)
-                .unwrap_or(1.0);
+        let area_pct = if artificial_full {
+            0.0
+        } else {
+            100.0
+                * rects::changed_area_fraction(self.prev.as_deref(), frame.data, self.width, self.height, frame.stride)
+                    .unwrap_or(1.0)
+        };
 
         // The ladder sees the worst of two pressures: changed area and JPEG
         // bandwidth. A small window playing video changes little area but
@@ -715,6 +730,32 @@ mod tests {
             enc.encode(&vf(w, h, &b)).unwrap();
             assert_eq!(enc.ladder.level(), Level::Low, "warm-up frame {i} must not fire");
         }
+    }
+
+    #[test]
+    fn down_switch_full_frame_does_not_feed_metric() {
+        // Regression (flip-flop): the full frame that opens every Low
+        // visit is protocol overhead, not content. With the test policy's
+        // aggressive EMA (alpha 0.5), feeding its 100 % area would slam
+        // the EMA against the up threshold and flip the regime right back.
+        let (w, h) = (128u32, 64u32);
+        let mut enc = LadderEncoder::new(w, h, policy(), 1000, 80).unwrap();
+        let quiet = solid(w, h, [10, 20, 30, 255]);
+        enc.encode(&vf(w, h, &quiet)).unwrap();
+        enc.force_level(Level::High);
+        // High visit on quiet content: real diffs are ~0, the EMA cools.
+        for _ in 0..4 {
+            enc.encode(&vf(w, h, &quiet)).unwrap();
+        }
+        let ema_before = enc.ladder().ema().expect("ema");
+        enc.force_level(Level::Low);
+        enc.encode(&vf(w, h, &quiet)).unwrap(); // artificial full frame
+        let ema_after = enc.ladder().ema().expect("ema");
+        assert!(
+            ema_after <= ema_before + 1e-9,
+            "artificial full frame bumped the EMA: {ema_before} -> {ema_after}"
+        );
+        assert_eq!(enc.ladder.level(), Level::Low);
     }
 
     #[test]
