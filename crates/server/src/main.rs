@@ -575,7 +575,7 @@ enum CaptureMsg {
 }
 
 /// Owned frame data crossing the capture-thread boundary.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct OwnedFrame {
     width: u32,
     height: u32,
@@ -1779,7 +1779,7 @@ fn dump_h264_packet(codec: codec::VideoCodecType, packet: &codec::EncodedPacket)
 /// order by [`handle_encoded`], so empty frames keep consuming no id.
 #[allow(clippy::too_many_arguments)] // session state travels as separate locals
 fn submit_frame<T: ReliableTransport>(
-    frame: Box<OwnedFrame>,
+    frame: Arc<OwnedFrame>,
     legs: &Legs<T>,
     enc: &EncoderHandle,
     in_flight: &mut usize,
@@ -2534,6 +2534,9 @@ async fn serve_stream<T: ReliableTransport>(
     // Set when a resize was applied and no frame of the new geometry has
     // arrived yet; drives the poison-mode revert (§18.37).
     let mut resize_pending: Option<Instant> = None;
+    // Latest captured frame, retained for the resize courtesy refresh
+    // (§18.74.1). One 1080p BGRA frame ≈ 8 MiB — bounded and worth it.
+    let mut last_frame: Option<Arc<OwnedFrame>> = None;
     // Modes that poisoned the capture this session (never delivered a
     // frame after being applied); excluded from future resizes.
     let mut bad_modes: Vec<(u32, u32)> = Vec::new();
@@ -2612,6 +2615,11 @@ async fn serve_stream<T: ReliableTransport>(
                     Some(CaptureMsg::Frame(frame)) => {
                         // Any frame proves the capture is healthy again.
                         resize_pending = None;
+                        // Retain the latest frame (§18.74.1): a DesktopResize
+                        // that changes no mode produces no damage, and the
+                        // courtesy refresh re-sends this frame as a keyframe.
+                        let frame = Arc::new(frame);
+                        last_frame = Some(Arc::clone(&frame));
                         // Geometry change (mid-session resize, §18.37): the
                         // capture recovered from access-lost with a new mode;
                         // rebuild the encoder and re-announce the display.
@@ -2632,7 +2640,7 @@ async fn serve_stream<T: ReliableTransport>(
                             enc.send(EncoderCmd::Swap(Box::new(new_encoder)));
                         }
                         submit_frame(
-                            Box::new(frame),
+                            frame,
                             &legs,
                             &enc,
                             &mut enc_in_flight,
@@ -2848,8 +2856,33 @@ async fn serve_stream<T: ReliableTransport>(
                         };
                         match display_mode.plan(&policy) {
                             // No change needed (no aspect match, or already
-                            // at the target mode): leave the console alone.
-                            None => {}
+                            // at the target mode): leave the console alone,
+                            // but refresh the client anyway (§18.74.1): with
+                            // the ladder degraded and a static desktop there
+                            // is no damage to repair the image with, so the
+                            // window↔fullscreen switch looked broken until
+                            // the safety keyframe happened to fire. Force a
+                            // keyframe and re-send the last captured frame.
+                            None => {
+                                if let Some(last) = &last_frame {
+                                    info!(
+                                        ?request,
+                                        "resize without mode change: courtesy keyframe refresh"
+                                    );
+                                    let mut courtesy = (**last).clone();
+                                    courtesy.capture_ts_ms = millis_since(clock_start);
+                                    enc.send(EncoderCmd::RequestKeyframe);
+                                    submit_frame(
+                                        Arc::new(courtesy),
+                                        &legs,
+                                        &enc,
+                                        &mut enc_in_flight,
+                                        &mut ctl,
+                                        &mut frame_stats,
+                                        &mut last_keyframe,
+                                    );
+                                }
+                            }
                             Some(target) if bad_modes.contains(&target) => {
                                 warn!(?target, "resize targeted a blacklisted mode; ignored");
                             }
@@ -3485,7 +3518,7 @@ const ENCODER_MAX_IN_FLIGHT: usize = 2;
 /// datagrams queued behind the same wait.
 enum EncoderCmd {
     /// One captured frame to encode.
-    Frame(Box<OwnedFrame>),
+    Frame(Arc<OwnedFrame>),
     /// Force the next encoded frame to be a keyframe.
     RequestKeyframe,
     /// Retarget the video bitrate (quality targets, §12.5).
