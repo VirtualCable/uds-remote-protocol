@@ -494,8 +494,26 @@ impl DxgiSource {
             info!(
                 width = shape.width,
                 height = shape.height,
+                kind = ?kind,
                 "cursor shape changed"
             );
+            // Lab aid (§18.66): with `UDSRP_DUMP_CURSOR=<dir>` in the
+            // environment, every captured shape lands as raw RGBA8 plus a
+            // `.txt` with the geometry, to inspect alpha handling offline.
+            if let Some(dir) = std::env::var_os("UDSRP_DUMP_CURSOR") {
+                let base = std::path::Path::new(&dir).join(format!(
+                    "cursor_{kind:?}_{}x{}",
+                    shape.width, shape.height
+                ));
+                let _ = std::fs::write(base.with_extension("rgba"), &shape.rgba);
+                let _ = std::fs::write(
+                    base.with_extension("txt"),
+                    format!(
+                        "kind={kind:?} w={} h={} hot={}x{} pitch={}\n",
+                        shape.width, shape.height, shape.hot_x, shape.hot_y, shape_info.Pitch
+                    ),
+                );
+            }
             self.pending_cursor.shape = Some(shape);
         } else {
             warn!(
