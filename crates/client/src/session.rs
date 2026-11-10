@@ -510,19 +510,9 @@ impl Session {
         let mut prev_fps_stats: Option<(u64, Instant)> = None;
         let mut liveness_tick = tokio::time::interval(Duration::from_secs(1));
         let mut last_recv = Instant::now();
-        // Lab override: UDSRP_SIM_LOSS=<permille 0..1000> drops inbound UDP
-        // media datagrams (CONTROL flows through, so probes/liveness stay
-        // sane) to exercise loss recovery — sustained values reproduce the
-        // B2 keyframe-request storm condition on a lossless LAN.
-        let sim_loss: u64 = std::env::var("UDSRP_SIM_LOSS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
-            .min(1000);
-        let mut sim_rng: u64 = 0x9E37_79B9_7F4A_7C15;
-        if sim_loss > 0 {
-            warn!(sim_loss, "lab: simulating inbound UDP loss (permille)");
-        }
+        // NOTE: the UDSRP_SIM_LOSS lab knob lives in the transport's
+        // DatagramSource (§18.77) so the sequence gap is real for the loss
+        // estimator; do NOT drop datagrams here (that would hide the gap).
         loop {
             tokio::select! {
                 res = leg.dgram.recv_into(&mut buf) => {
@@ -539,16 +529,6 @@ impl Session {
                         }
                         rtt_period_min = Some(rtt_period_min.map_or(rtt, |m: f64| m.min(rtt)));
                         continue;
-                    }
-                    if sim_loss > 0 && ch != channel::CONTROL {
-                        // xorshift64*
-                        sim_rng ^= sim_rng >> 12;
-                        sim_rng ^= sim_rng << 25;
-                        sim_rng ^= sim_rng >> 27;
-                        let sample = sim_rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32;
-                        if sample % 1000 < sim_loss {
-                            continue;
-                        }
                     }
                     if !core.handle_packet(ch, &buf[..n])? {
                         return Ok(());
