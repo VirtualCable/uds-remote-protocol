@@ -29,6 +29,35 @@ pub struct EncryptedDatagram<T: DatagramTransport> {
     tx_buf: Vec<u8>,
     /// Swallowed invalid datagrams: `(bad_token, aead, replay, too_old)`.
     invalid_dgrams: (u64, u64, u64, u64),
+    /// Lab knob (§18.77): `UDSRP_SIM_LOSS=<permille 0..1000>` drops raw
+    /// datagrams before decrypt, so the sequence gap is real for the loss
+    /// estimator (unlike dropping after `recv_into`, which hides it).
+    sim_loss: (u64, u64),
+}
+
+/// Reads the `UDSRP_SIM_LOSS` lab knob (permille + xorshift64* state).
+fn sim_loss_from_env() -> (u64, u64) {
+    let permille: u64 = std::env::var("UDSRP_SIM_LOSS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
+        .min(1000);
+    if permille > 0 {
+        tracing::warn!(permille, "lab: simulating inbound UDP loss (permille)");
+    }
+    (permille, 0x9E37_79B9_7F4A_7C15)
+}
+
+/// True when the next raw datagram must be dropped (lab knob, §18.77).
+fn sim_loss_hit(sim_loss: &mut (u64, u64)) -> bool {
+    let (permille, rng) = sim_loss;
+    if *permille == 0 {
+        return false;
+    }
+    *rng ^= *rng >> 12;
+    *rng ^= *rng << 25;
+    *rng ^= *rng >> 27;
+    (rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) % 1000 < *permille
 }
 
 impl<T: DatagramTransport> EncryptedDatagram<T> {
@@ -53,6 +82,7 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
                     + consts::TAG_LENGTH
             ],
             invalid_dgrams: (0, 0, 0, 0),
+            sim_loss: sim_loss_from_env(),
         }
     }
 
@@ -75,6 +105,9 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
     pub async fn recv_into(&mut self, buf: &mut [u8]) -> Result<(ChannelId, usize)> {
         loop {
             let n = self.inner.recv_into(&mut self.rx_buf).await?;
+            if sim_loss_hit(&mut self.sim_loss) {
+                continue;
+            }
             let dgram = &self.rx_buf[..n];
             let Self {
                 rx, invalid_dgrams, ..
@@ -138,7 +171,7 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
                 rx: self.rx,
                 rx_buf: self.rx_buf,
                 invalid_dgrams: (0, 0, 0, 0),
-                sim_loss: sim_loss_from_env(),
+                sim_loss: self.sim_loss,
             },
         )
     }
@@ -209,35 +242,8 @@ pub struct DatagramSource<T: DatagramTransport> {
     rx: DatagramDecrypt,
     rx_buf: Vec<u8>,
     invalid_dgrams: (u64, u64, u64, u64),
-    /// Lab knob (§18.77): `UDSRP_SIM_LOSS=<permille 0..1000>` drops raw
-    /// datagrams before decrypt, so the sequence gap is real for the loss
-    /// estimator (unlike dropping after `recv_into`, which hides it).
+    /// Lab knob (§18.77), inherited from [`EncryptedDatagram::into_split`].
     sim_loss: (u64, u64),
-}
-
-/// Reads the `UDSRP_SIM_LOSS` lab knob (permille + xorshift64* state).
-fn sim_loss_from_env() -> (u64, u64) {
-    let permille: u64 = std::env::var("UDSRP_SIM_LOSS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
-        .min(1000);
-    if permille > 0 {
-        tracing::warn!(permille, "lab: simulating inbound UDP loss (permille)");
-    }
-    (permille, 0x9E37_79B9_7F4A_7C15)
-}
-
-/// True when the next raw datagram must be dropped (lab knob, §18.77).
-fn sim_loss_hit(sim_loss: &mut (u64, u64)) -> bool {
-    let (permille, rng) = sim_loss;
-    if *permille == 0 {
-        return false;
-    }
-    *rng ^= *rng >> 12;
-    *rng ^= *rng << 25;
-    *rng ^= *rng >> 27;
-    (rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 32) % 1000 < *permille
 }
 
 impl<T: DatagramTransport> DatagramSource<T> {
