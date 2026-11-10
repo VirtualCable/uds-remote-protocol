@@ -198,8 +198,16 @@ impl Ladder {
         }
 
         let (threshold, hold, target) = match self.level {
-            Level::Low => (self.policy.up_threshold_pct, self.policy.hold_up, Level::High),
-            Level::High => (self.policy.down_threshold_pct, self.policy.hold_down, Level::Low),
+            Level::Low => (
+                self.policy.up_threshold_pct,
+                self.policy.hold_up,
+                Level::High,
+            ),
+            Level::High => (
+                self.policy.down_threshold_pct,
+                self.policy.hold_down,
+                Level::Low,
+            ),
         };
         let crossed = match self.level {
             Level::Low => ema > threshold,
@@ -292,7 +300,13 @@ mod tests {
         assert_eq!(l.update(t0() + Duration::from_millis(500), 50.0), None);
         assert_eq!(l.update(t0() + Duration::from_millis(550), 50.0), None);
         let sw = l.update(t0() + Duration::from_millis(650), 50.0);
-        assert_eq!(sw, Some(Switch { to: Level::High, forced: false }));
+        assert_eq!(
+            sw,
+            Some(Switch {
+                to: Level::High,
+                forced: false
+            })
+        );
         assert_eq!(l.level(), Level::High);
     }
 
@@ -340,7 +354,13 @@ mod tests {
         assert_eq!(l.update(base + Duration::from_millis(600), 1.0), None);
         assert_eq!(l.update(base + Duration::from_millis(900), 1.0), None);
         let sw = l.update(base + Duration::from_millis(1100), 1.0);
-        assert_eq!(sw, Some(Switch { to: Level::Low, forced: false }));
+        assert_eq!(
+            sw,
+            Some(Switch {
+                to: Level::Low,
+                forced: false
+            })
+        );
     }
 
     #[test]
@@ -366,7 +386,11 @@ mod tests {
                 }
             }
             let expected_ms = (500.0 * 1.5f64.powi(2 * (round + 1))) as u128;
-            assert_eq!(l.dwell().as_millis(), expected_ms.min(5_000), "round {round}");
+            assert_eq!(
+                l.dwell().as_millis(),
+                expected_ms.min(5_000),
+                "round {round}"
+            );
         }
     }
 
@@ -440,7 +464,13 @@ mod tests {
         assert!(l.update(now, 1.0).is_none(), "hold_down not complete yet");
         now += Duration::from_millis(400);
         let sw = l.update(now, 1.0);
-        assert_eq!(sw, Some(Switch { to: Level::Low, forced: false }));
+        assert_eq!(
+            sw,
+            Some(Switch {
+                to: Level::Low,
+                forced: false
+            })
+        );
     }
 
     #[test]
@@ -448,7 +478,13 @@ mod tests {
         let mut l = Ladder::new(test_policy(), t0());
         // Dwell is 500 ms; force applies immediately.
         let sw = l.force(t0() + Duration::from_millis(50), Level::High);
-        assert_eq!(sw, Some(Switch { to: Level::High, forced: true }));
+        assert_eq!(
+            sw,
+            Some(Switch {
+                to: Level::High,
+                forced: true
+            })
+        );
         assert_eq!(l.level(), Level::High);
         // Dwell untouched by the forced switch.
         assert_eq!(l.dwell(), Duration::from_millis(500));

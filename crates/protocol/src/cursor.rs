@@ -96,14 +96,18 @@ impl CursorMessage {
                 // Bounded in practice: decode rejects dims over
                 // MAX_CURSOR_DIM, so a well-formed shape is ≤ 256 KiB.
                 out.extend_from_slice(
-                    &u32::try_from(pixels.len()).unwrap_or(u32::MAX).to_be_bytes(),
+                    &u32::try_from(pixels.len())
+                        .unwrap_or(u32::MAX)
+                        .to_be_bytes(),
                 );
                 out.extend_from_slice(pixels);
                 // Trailing XOR mask (absent in pre-XOR encoders = no XOR
                 // pixels); one message per channel packet, so the tail is
                 // unambiguous.
                 out.extend_from_slice(
-                    &u32::try_from(xor_mask.len()).unwrap_or(u32::MAX).to_be_bytes(),
+                    &u32::try_from(xor_mask.len())
+                        .unwrap_or(u32::MAX)
+                        .to_be_bytes(),
                 );
                 out.extend_from_slice(xor_mask);
             }
@@ -145,7 +149,10 @@ impl CursorMessage {
                 if len != usize::from(width) * usize::from(height) * 4 {
                     return Err(CursorError::BadPixelLength);
                 }
-                let pixels = rest.get(12..12 + len).ok_or(CursorError::Truncated)?.to_vec();
+                let pixels = rest
+                    .get(12..12 + len)
+                    .ok_or(CursorError::Truncated)?
+                    .to_vec();
                 // Optional trailing XOR mask: absent means "no XOR pixels"
                 // (older encoders); present, it must cover the pixels 1bpp.
                 let tail = rest.get(12 + len..).unwrap_or(&[]);
@@ -155,7 +162,9 @@ impl CursorMessage {
                     if mlen != 0 && mlen != expected {
                         return Err(CursorError::BadMaskLength);
                     }
-                    tail.get(4..4 + mlen).ok_or(CursorError::Truncated)?.to_vec()
+                    tail.get(4..4 + mlen)
+                        .ok_or(CursorError::Truncated)?
+                        .to_vec()
                 } else {
                     Vec::new()
                 };
@@ -251,7 +260,10 @@ mod tests {
 
     #[test]
     fn unknown_tag_is_rejected() {
-        assert_eq!(CursorMessage::decode(&[99]), Err(CursorError::UnknownTag(99)));
+        assert_eq!(
+            CursorMessage::decode(&[99]),
+            Err(CursorError::UnknownTag(99))
+        );
     }
 
     #[test]
@@ -263,7 +275,10 @@ mod tests {
         buf.extend_from_slice(&0u16.to_be_bytes());
         buf.extend_from_slice(&1200u32.to_be_bytes());
         buf.extend_from_slice(&[0u8; 1200]);
-        assert_eq!(CursorMessage::decode(&buf), Err(CursorError::TooLarge(300, 1)));
+        assert_eq!(
+            CursorMessage::decode(&buf),
+            Err(CursorError::TooLarge(300, 1))
+        );
     }
 
     #[test]
@@ -275,7 +290,10 @@ mod tests {
         buf.extend_from_slice(&0u16.to_be_bytes());
         buf.extend_from_slice(&15u32.to_be_bytes()); // should be 16
         buf.extend_from_slice(&[0u8; 15]);
-        assert_eq!(CursorMessage::decode(&buf), Err(CursorError::BadPixelLength));
+        assert_eq!(
+            CursorMessage::decode(&buf),
+            Err(CursorError::BadPixelLength)
+        );
     }
 
     #[test]
@@ -304,6 +322,9 @@ mod tests {
             xor_mask: vec![0xAB, 0xCD],
         };
         let buf = msg.encode();
-        assert_eq!(CursorMessage::decode(&buf[..buf.len() - 1]), Err(CursorError::Truncated));
+        assert_eq!(
+            CursorMessage::decode(&buf[..buf.len() - 1]),
+            Err(CursorError::Truncated)
+        );
     }
 }

@@ -130,7 +130,8 @@ impl AudioControl {
 
     /// Stores the FEC switch.
     pub fn set_fec(&self, enabled: bool) {
-        self.fec.store(enabled, std::sync::atomic::Ordering::Relaxed);
+        self.fec
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -418,7 +419,11 @@ mod tests {
         for _ in 0..50 {
             src.fill_frame(&mut buf).unwrap();
         }
-        let peak = buf.iter().map(|s| s.unsigned_abs()).max().expect("non-empty");
+        let peak = buf
+            .iter()
+            .map(|s| s.unsigned_abs())
+            .max()
+            .expect("non-empty");
         assert!(peak > 5000, "tone is audible: {peak}");
         assert!(peak <= 10_000, "0.3 amplitude respected: {peak}");
     }

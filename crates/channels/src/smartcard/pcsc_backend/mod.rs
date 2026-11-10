@@ -24,15 +24,15 @@ use helpers::{
 };
 use registry::NativeRegistry;
 
-use crate::smartcard::{
-    SCARD_E_INVALID_HANDLE, SCARD_E_INVALID_PARAMETER, SCARD_E_TIMEOUT, SCARD_S_SUCCESS,
-    SCARD_TRANSMIT_MAX,
-};
+use crate::smartcard::SmartcardIntegration;
 use crate::smartcard::{
     ConnectResult, ReaderStateIn, ReaderStateOut, ScardContext, ScardHandle, ScardIORequest,
     ScardStatus, TransmitResult,
 };
-use crate::smartcard::SmartcardIntegration;
+use crate::smartcard::{
+    SCARD_E_INVALID_HANDLE, SCARD_E_INVALID_PARAMETER, SCARD_E_TIMEOUT, SCARD_S_SUCCESS,
+    SCARD_TRANSMIT_MAX,
+};
 
 /// [`SmartcardIntegration`] backed by the real PC/SC subsystem.
 #[derive(Debug)]
@@ -87,7 +87,11 @@ impl SmartcardIntegration for PcscBackend {
     }
 
     fn is_valid_context(&self, ctx: &ScardContext) -> bool {
-        self.registry.contexts.read().unwrap().contains_key(&ctx.raw())
+        self.registry
+            .contexts
+            .read()
+            .unwrap()
+            .contains_key(&ctx.raw())
     }
 
     fn list_readers(
@@ -287,7 +291,10 @@ impl SmartcardIntegration for PcscBackend {
         for rs in reader_states {
             let cstr = std::ffi::CString::new(rs.reader_name.as_str())
                 .map_err(|_| SCARD_E_INVALID_PARAMETER)?;
-            pcsc_states.push(pcsc::ReaderState::new(cstr, dword_to_state(rs.current_state)));
+            pcsc_states.push(pcsc::ReaderState::new(
+                cstr,
+                dword_to_state(rs.current_state),
+            ));
         }
 
         let pcsc_ctx = self
@@ -312,7 +319,9 @@ impl SmartcardIntegration for PcscBackend {
             #[expect(unsafe_code, reason = "no safe accessor for the raw dwEventState")]
             let raw: &pcsc::ffi::SCARD_READERSTATE =
                 unsafe { &*std::ptr::from_ref(out_state).cast() };
-            let atr_len = usize::try_from(raw.cbAtr).unwrap_or(0).min(raw.rgbAtr.len());
+            let atr_len = usize::try_from(raw.cbAtr)
+                .unwrap_or(0)
+                .min(raw.rgbAtr.len());
             results.push(ReaderStateOut {
                 reader_name: rs.reader_name.clone(),
                 current_state: rs.current_state,

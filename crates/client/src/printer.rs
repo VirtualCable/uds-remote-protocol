@@ -86,7 +86,9 @@ impl PrinterJobs {
                 self.sink.abort_job(*job_id);
             }
             // Client-originated replies never come back to us.
-            PrinterMessage::JobCreated { .. } | PrinterMessage::JobClosed { .. } => return Vec::new(),
+            PrinterMessage::JobCreated { .. } | PrinterMessage::JobClosed { .. } => {
+                return Vec::new();
+            }
         }
         self.sink
             .drain_done()
@@ -126,7 +128,10 @@ mod tests {
 
         fn close_job(&mut self, job_id: u32) -> Result<(), u32> {
             let data = self.jobs.remove(&job_id).ok_or(STATUS_FAILED)?;
-            self.done.push((std::path::PathBuf::from(format!("{job_id}.pdf")), data.len() as u64));
+            self.done.push((
+                std::path::PathBuf::from(format!("{job_id}.pdf")),
+                data.len() as u64,
+            ));
             Ok(())
         }
 

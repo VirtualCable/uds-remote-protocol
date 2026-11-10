@@ -138,9 +138,14 @@ impl CaptureState {
             sample_rate = mix.sample_rate,
             "WASAPI loopback mix format"
         );
-        let pipeline =
-            DevicePipeline::new(mix.format, mix.channels, mix.sample_rate, out_channels, out_rate)
-                .context("unsupported mix format")?;
+        let pipeline = DevicePipeline::new(
+            mix.format,
+            mix.channels,
+            mix.sample_rate,
+            out_channels,
+            out_rate,
+        )
+        .context("unsupported mix format")?;
         // SAFETY: the client is initialized and alive.
         let capture: IAudioCaptureClient =
             unsafe { client.GetService() }.context("IAudioCaptureClient service failed")?;
@@ -183,8 +188,11 @@ impl CaptureState {
             let mut flags = 0u32;
             // SAFETY: all out-params are valid; the buffer is released
             // exactly once below, on every path.
-            unsafe { self.capture.GetBuffer(&mut data, &mut frames, &mut flags, None, None) }
-                .context("GetBuffer failed")?;
+            unsafe {
+                self.capture
+                    .GetBuffer(&mut data, &mut frames, &mut flags, None, None)
+            }
+            .context("GetBuffer failed")?;
             let result = self.convert_packet(data, frames, flags, shared);
             // SAFETY: `frames` is the frame count obtained above.
             unsafe { self.capture.ReleaseBuffer(frames) }.context("ReleaseBuffer failed")?;
@@ -202,7 +210,10 @@ impl CaptureState {
         shared: &Shared,
     ) -> anyhow::Result<()> {
         let frames = usize::try_from(frames).unwrap_or(usize::MAX);
-        anyhow::ensure!(frames == 0 || !data.is_null(), "GetBuffer returned null data");
+        anyhow::ensure!(
+            frames == 0 || !data.is_null(),
+            "GetBuffer returned null data"
+        );
         // SAFETY: `data` points to `frames * block_align` readable bytes
         // owned by the capture client until ReleaseBuffer (called after
         // this function returns).
@@ -213,7 +224,10 @@ impl CaptureState {
         };
         let silent = flags & BUFFERFLAGS_SILENT != 0;
         // A poisoned ring must not kill capture: recover the inner state.
-        let mut ring = shared.ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ring = shared
+            .ring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.pipeline.push_packet(bytes, frames, silent, &mut ring);
         Ok(())
     }
@@ -249,7 +263,8 @@ fn parse_mix_format(mix: *const WAVEFORMATEX) -> anyhow::Result<MixFormat> {
             anyhow::ensure!(cb_size >= 22, "truncated WAVEFORMATEXTENSIBLE");
             // SAFETY: same buffer, reinterpreted as the extensible layout;
             // cbSize checked above. Copied to a local (packed field).
-            let sub_format = unsafe { mix.cast::<WAVEFORMATEXTENSIBLE>().read_unaligned() }.SubFormat;
+            let sub_format =
+                unsafe { mix.cast::<WAVEFORMATEXTENSIBLE>().read_unaligned() }.SubFormat;
             if sub_format == KSDATAFORMAT_SUBTYPE_IEEE_FLOAT {
                 SampleFormat::F32
             } else if sub_format == KSDATAFORMAT_SUBTYPE_PCM {
@@ -297,8 +312,7 @@ impl WasapiLoopbackSource {
         anyhow::ensure!(sample_rate >= 8000, "implausible sample rate {sample_rate}");
         anyhow::ensure!((1..=2).contains(&channels), "channels must be 1 or 2");
         anyhow::ensure!(frame_samples > 0, "empty frames");
-        let ring_samples =
-            sample_rate as usize * usize::from(channels) * RING_MS as usize / 1000;
+        let ring_samples = sample_rate as usize * usize::from(channels) * RING_MS as usize / 1000;
         let shared = Arc::new(Shared {
             ring: Mutex::new(CaptureRing::new(ring_samples)),
             quit: AtomicBool::new(false),
@@ -381,7 +395,11 @@ impl AudioSource for WasapiLoopbackSource {
             out.len()
         );
         let missing = {
-            let mut ring = self.shared.ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ring = self
+                .shared
+                .ring
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             ring.fill(out)
         };
         if missing > 0 {

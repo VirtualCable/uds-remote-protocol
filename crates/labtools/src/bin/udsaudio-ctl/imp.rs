@@ -20,9 +20,8 @@ use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Foundation::{CloseHandle, GENERIC_WRITE, HANDLE};
 use windows::Win32::Media::Audio::{
     AUDCLNT_SHAREMODE_EXCLUSIVE, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
-    DEVICE_STATE_ACTIVE, IAudioCaptureClient,
-    IAudioClient, IAudioRenderClient, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
-    WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eRender,
+    DEVICE_STATE_ACTIVE, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice,
+    IMMDeviceEnumerator, MMDeviceEnumerator, WAVEFORMATEX, WAVEFORMATEXTENSIBLE, eCapture, eRender,
 };
 use windows::Win32::Media::KernelStreaming::KSDATAFORMAT_SUBTYPE_PCM;
 use windows::Win32::Media::Multimedia::KSDATAFORMAT_SUBTYPE_IEEE_FLOAT;
@@ -306,7 +305,11 @@ fn parse_mix_format(mix: *const WAVEFORMATEX) -> anyhow::Result<MixFormat> {
         }
         other => bail!("unsupported mix format tag {other:#x}"),
     };
-    Ok(MixFormat { is_f32, channels, rate })
+    Ok(MixFormat {
+        is_f32,
+        channels,
+        rate,
+    })
 }
 
 /// Per-thread COM guard.
@@ -333,8 +336,9 @@ impl Drop for ComGuard {
 /// contains `needle`.
 fn find_endpoint(capture: bool, needle: &str) -> anyhow::Result<IMMDevice> {
     // SAFETY: coclass activation with valid out-params.
-    let enumerator: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
-        .context("MMDeviceEnumerator creation failed")?;
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+            .context("MMDeviceEnumerator creation failed")?;
     let flow = if capture { eCapture } else { eRender };
     // SAFETY: the enumerator is alive.
     let collection = unsafe { enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE) }
@@ -372,8 +376,9 @@ fn friendly_name(device: &IMMDevice) -> anyhow::Result<String> {
 fn list_endpoints() -> anyhow::Result<()> {
     let _com = ComGuard::init()?;
     // SAFETY: coclass activation with valid out-params.
-    let enumerator: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
-        .context("MMDeviceEnumerator creation failed")?;
+    let enumerator: IMMDeviceEnumerator =
+        unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+            .context("MMDeviceEnumerator creation failed")?;
     for (label, flow) in [("render", eRender), ("capture", eCapture)] {
         println!("{label}:");
         // SAFETY: the enumerator is alive.
@@ -386,7 +391,11 @@ fn list_endpoints() -> anyhow::Result<()> {
             let device = unsafe { collection.Item(i) };
             if let Ok(device) = device {
                 let name = friendly_name(&device).unwrap_or_else(|_| "<unnamed>".to_string());
-                let uds = if name.contains(UDS_NAME_NEEDLE) { "   <-- UDS" } else { "" };
+                let uds = if name.contains(UDS_NAME_NEEDLE) {
+                    "   <-- UDS"
+                } else {
+                    ""
+                };
                 println!("  {name}{uds}");
             }
         }
@@ -397,10 +406,14 @@ fn list_endpoints() -> anyhow::Result<()> {
 /// Captures `seconds` of audio from `device` (loopback when `loopback` is
 /// set, plain capture otherwise) and returns the samples as mono f32
 /// (channel 0) plus the mix rate.
-fn capture_samples(device: &IMMDevice, seconds: f32, loopback: bool) -> anyhow::Result<(Vec<f32>, u32)> {
+fn capture_samples(
+    device: &IMMDevice,
+    seconds: f32,
+    loopback: bool,
+) -> anyhow::Result<(Vec<f32>, u32)> {
     // SAFETY: activation on a live device.
-    let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
-        .context("IAudioClient activation failed")?;
+    let client: IAudioClient =
+        unsafe { device.Activate(CLSCTX_ALL, None) }.context("IAudioClient activation failed")?;
     // SAFETY: the client is alive; freed below with CoTaskMemFree.
     let mix = unsafe { client.GetMixFormat() }.context("GetMixFormat failed")?;
     anyhow::ensure!(!mix.is_null(), "GetMixFormat returned null");
@@ -411,14 +424,28 @@ fn capture_samples(device: &IMMDevice, seconds: f32, loopback: bool) -> anyhow::
         parsed.channels,
         parsed.rate
     );
-    let flags = if loopback { AUDCLNT_STREAMFLAGS_LOOPBACK } else { 0 };
+    let flags = if loopback {
+        AUDCLNT_STREAMFLAGS_LOOPBACK
+    } else {
+        0
+    };
     // SAFETY: shared-mode init with the device's own mix format.
-    unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, BUFFER_DURATION_HNS, 0, mix, None) }
-        .context("IAudioClient::Initialize failed")?;
+    unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            flags,
+            BUFFER_DURATION_HNS,
+            0,
+            mix,
+            None,
+        )
+    }
+    .context("IAudioClient::Initialize failed")?;
     // SAFETY: `mix` came from GetMixFormat and is freed exactly once.
     unsafe { CoTaskMemFree(Some(mix.cast_const().cast())) };
     // SAFETY: the client is initialized.
-    let capture: IAudioCaptureClient = unsafe { client.GetService() }.context("IAudioCaptureClient")?;
+    let capture: IAudioCaptureClient =
+        unsafe { client.GetService() }.context("IAudioCaptureClient")?;
     // SAFETY: starting an initialized client.
     unsafe { client.Start() }.context("IAudioClient::Start")?;
 
@@ -445,8 +472,7 @@ fn capture_samples(device: &IMMDevice, seconds: f32, loopback: bool) -> anyhow::
             } else {
                 // SAFETY: `data` points to frames*block readable bytes owned
                 // by the capture client until ReleaseBuffer.
-                let bytes =
-                    unsafe { std::slice::from_raw_parts(data, frames_usize * block) };
+                let bytes = unsafe { std::slice::from_raw_parts(data, frames_usize * block) };
                 for frame in 0..frames_usize {
                     let off = frame * block;
                     let s = if parsed.is_f32 {
@@ -485,14 +511,21 @@ fn analyze(samples: &[f32], rate: u32, freq: f32) -> (f32, f32, f32) {
     let rms = (sum_sq / samples.len().max(1) as f64).sqrt() as f32;
     // Ratio of tone power to total signal power (0..1 for a pure tone).
     let total = sum_sq as f32;
-    let ratio = if total > 0.0 { (power / total).clamp(0.0, 1.0) } else { 0.0 };
+    let ratio = if total > 0.0 {
+        (power / total).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     (ratio, rms, power)
 }
 
 /// Prints the analysis and exits the process 0 (PASS) / 2 (FAIL).
 fn verdict(what: &str, samples: &[f32], rate: u32, freq: f32) -> ! {
     let (ratio, rms, _power) = analyze(samples, rate, freq);
-    println!("{what}: {} samples, rms={rms:.5}, tone ratio={ratio:.3}", samples.len());
+    println!(
+        "{what}: {} samples, rms={rms:.5}, tone ratio={ratio:.3}",
+        samples.len()
+    );
     if ratio > 0.3 && rms > 0.005 {
         println!("PASS: {freq} Hz tone detected in {what}");
         std::process::exit(0);
@@ -510,8 +543,8 @@ fn probe_capture(needle: &str) -> anyhow::Result<()> {
     let _com = ComGuard::init()?;
     let device = find_endpoint(true, needle)?;
     // SAFETY: activation on a live device.
-    let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
-        .context("IAudioClient activation failed")?;
+    let client: IAudioClient =
+        unsafe { device.Activate(CLSCTX_ALL, None) }.context("IAudioClient activation failed")?;
     // SAFETY: the client is alive; freed below with CoTaskMemFree.
     let mix = unsafe { client.GetMixFormat() }.context("GetMixFormat failed")?;
     anyhow::ensure!(!mix.is_null(), "GetMixFormat returned null");
@@ -523,7 +556,16 @@ fn probe_capture(needle: &str) -> anyhow::Result<()> {
         parsed.rate
     );
     // SAFETY: shared-mode init with the device's own mix format.
-    let init = unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, BUFFER_DURATION_HNS, 0, mix, None) };
+    let init = unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            0,
+            BUFFER_DURATION_HNS,
+            0,
+            mix,
+            None,
+        )
+    };
     // SAFETY: `mix` came from GetMixFormat and is freed exactly once.
     unsafe { CoTaskMemFree(Some(mix.cast_const().cast())) };
     match init {
@@ -541,11 +583,18 @@ fn probe_capture(needle: &str) -> anyhow::Result<()> {
     // Exclusive mode bypasses the AudioDG shared engine: if this succeeds
     // while shared fails, the block lives in the audio service path, not
     // in the driver or the KS pin security.
-    let client2: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
-        .context("IAudioClient activation failed")?;
+    let client2: IAudioClient =
+        unsafe { device.Activate(CLSCTX_ALL, None) }.context("IAudioClient activation failed")?;
     let mix2 = unsafe { client2.GetMixFormat() }.context("GetMixFormat failed")?;
     let init2 = unsafe {
-        client2.Initialize(AUDCLNT_SHAREMODE_EXCLUSIVE, 0, BUFFER_DURATION_HNS, BUFFER_DURATION_HNS, mix2, None)
+        client2.Initialize(
+            AUDCLNT_SHAREMODE_EXCLUSIVE,
+            0,
+            BUFFER_DURATION_HNS,
+            BUFFER_DURATION_HNS,
+            mix2,
+            None,
+        )
     };
     unsafe { CoTaskMemFree(Some(mix2.cast_const().cast())) };
     match init2 {
@@ -554,7 +603,6 @@ fn probe_capture(needle: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
-
 
 /// Pushes the tone into the mic control device while capturing from the UDS
 /// microphone endpoint; the captured signal must contain the tone.
@@ -614,21 +662,36 @@ fn verify_loopback(seconds: f32, freq: f32) -> anyhow::Result<()> {
 /// Renders a tone to `device` (shared mode, mix format) until `seconds`
 /// elapse or `stop` is set.
 #[allow(clippy::cast_possible_truncation)]
-fn render_tone(device: &IMMDevice, seconds: f32, freq: f32, stop: &AtomicBool) -> anyhow::Result<()> {
+fn render_tone(
+    device: &IMMDevice,
+    seconds: f32,
+    freq: f32,
+    stop: &AtomicBool,
+) -> anyhow::Result<()> {
     // SAFETY: activation on a live device.
-    let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
-        .context("IAudioClient activation failed")?;
+    let client: IAudioClient =
+        unsafe { device.Activate(CLSCTX_ALL, None) }.context("IAudioClient activation failed")?;
     // SAFETY: the client is alive; freed below with CoTaskMemFree.
     let mix = unsafe { client.GetMixFormat() }.context("GetMixFormat failed")?;
     anyhow::ensure!(!mix.is_null(), "GetMixFormat returned null");
     let parsed = parse_mix_format(mix)?;
     // SAFETY: shared-mode init with the device's own mix format.
-    unsafe { client.Initialize(AUDCLNT_SHAREMODE_SHARED, 0, BUFFER_DURATION_HNS, 0, mix, None) }
-        .context("IAudioClient::Initialize failed")?;
+    unsafe {
+        client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            0,
+            BUFFER_DURATION_HNS,
+            0,
+            mix,
+            None,
+        )
+    }
+    .context("IAudioClient::Initialize failed")?;
     // SAFETY: `mix` came from GetMixFormat and is freed exactly once.
     unsafe { CoTaskMemFree(Some(mix.cast_const().cast())) };
     // SAFETY: the client is initialized.
-    let render: IAudioRenderClient = unsafe { client.GetService() }.context("IAudioRenderClient")?;
+    let render: IAudioRenderClient =
+        unsafe { client.GetService() }.context("IAudioRenderClient")?;
     // SAFETY: the client is initialized.
     let buffer_frames = unsafe { client.GetBufferSize() }.context("GetBufferSize")?;
     // SAFETY: starting an initialized client.
@@ -644,7 +707,8 @@ fn render_tone(device: &IMMDevice, seconds: f32, freq: f32, stop: &AtomicBool) -
         if avail > 0 {
             // SAFETY: the render client is alive; the returned buffer holds
             // `avail` frames of `block` bytes and is released below.
-            let data = unsafe { render.GetBuffer(avail) }.context("IAudioRenderClient::GetBuffer")?;
+            let data =
+                unsafe { render.GetBuffer(avail) }.context("IAudioRenderClient::GetBuffer")?;
             anyhow::ensure!(!data.is_null(), "GetBuffer returned null");
             // SAFETY: writes stay within the buffer (avail*block bytes).
             unsafe {

@@ -393,7 +393,11 @@ fn rects_vs_fullframe() {
         merge_ms += t.elapsed().as_secs_f64() * 1000.0;
         rect_total += rects.len() as u64;
         let frame_area = u64::from(frame.width) * u64::from(frame.height);
-        area_total += rects.iter().map(|r| area(r) as u64).sum::<u64>().min(frame_area);
+        area_total += rects
+            .iter()
+            .map(|r| area(r) as u64)
+            .sum::<u64>()
+            .min(frame_area);
 
         // VP9: full frame, PSNR measured over the changed rects.
         let vf = codec::VideoFrame {
@@ -403,7 +407,11 @@ fn rects_vs_fullframe() {
             data: &frame.data,
         };
         let t = Instant::now();
-        let pkt = vp9.as_mut().expect("inited").encode(&vf).expect("vp9 encode");
+        let pkt = vp9
+            .as_mut()
+            .expect("inited")
+            .encode(&vf)
+            .expect("vp9 encode");
         acc_vp9.ms += t.elapsed().as_secs_f64() * 1000.0;
         acc_vp9.bytes += pkt.data.len() as u64;
         let decoded = vp9_dec

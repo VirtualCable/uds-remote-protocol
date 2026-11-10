@@ -7,9 +7,9 @@
 //! capture loop of uds-client (`channels/src/webcam`): closest-format
 //! negotiation, paced read, drop-on-lag.
 
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -78,9 +78,7 @@ impl NokhwaSource {
 
 /// Picks the device indicated by `UDSRP_CAM_DEVICE` (index or name
 /// substring), defaulting to the first one.
-fn select_device(
-    devices: &[nokhwa::utils::CameraInfo],
-) -> nokhwa::utils::CameraInfo {
+fn select_device(devices: &[nokhwa::utils::CameraInfo]) -> nokhwa::utils::CameraInfo {
     if let Ok(val) = std::env::var(DEVICE_ENV) {
         if let Ok(idx) = val.parse::<u32>() {
             let wanted = CameraIndex::Index(idx);
@@ -102,9 +100,8 @@ fn select_device(
 
 /// Reads the device's maximum resolution and frame rate.
 fn query_limits(index: &CameraIndex) -> Option<((u32, u32), u32)> {
-    let requested = RequestedFormat::new::<nokhwa::pixel_format::RgbFormat>(
-        RequestedFormatType::None,
-    );
+    let requested =
+        RequestedFormat::new::<nokhwa::pixel_format::RgbFormat>(RequestedFormatType::None);
     let mut cam = nokhwa::Camera::new(index.clone(), requested).ok()?;
     let formats = cam.compatible_camera_formats().ok()?;
     let max_res = formats
@@ -123,10 +120,14 @@ fn query_limits(index: &CameraIndex) -> Option<((u32, u32), u32)> {
 /// Returns the camera and the negotiated frame rate (like uds-client:
 /// `Camera::frame_rate` is unreliable under Media Foundation, the value
 /// returned when applying the format is the only trustworthy one).
-fn open_camera(index: &CameraIndex, width: u32, height: u32, fps: u32) -> anyhow::Result<(nokhwa::Camera, u32)> {
-    let requested_none = RequestedFormat::new::<nokhwa::pixel_format::RgbFormat>(
-        RequestedFormatType::None,
-    );
+fn open_camera(
+    index: &CameraIndex,
+    width: u32,
+    height: u32,
+    fps: u32,
+) -> anyhow::Result<(nokhwa::Camera, u32)> {
+    let requested_none =
+        RequestedFormat::new::<nokhwa::pixel_format::RgbFormat>(RequestedFormatType::None);
     let mut cam = nokhwa::Camera::new(index.clone(), requested_none)
         .context("webcam: failed to create camera")?;
 
@@ -140,10 +141,9 @@ fn open_camera(index: &CameraIndex, width: u32, height: u32, fps: u32) -> anyhow
         });
         if let Some(&closest) = best {
             info!(?closest, "webcam: selected closest camera format");
-            let requested_closest =
-                RequestedFormat::new::<nokhwa::pixel_format::RgbFormat>(
-                    RequestedFormatType::Exact(closest),
-                );
+            let requested_closest = RequestedFormat::new::<nokhwa::pixel_format::RgbFormat>(
+                RequestedFormatType::Exact(closest),
+            );
             match cam.set_camera_requset(requested_closest) {
                 Ok(applied) => negotiated_fps = applied.frame_rate(),
                 Err(err) => warn!("webcam: camera rejected the selected format: {err}"),
@@ -151,7 +151,8 @@ fn open_camera(index: &CameraIndex, width: u32, height: u32, fps: u32) -> anyhow
         }
     }
 
-    cam.open_stream().context("webcam: failed to open camera stream")?;
+    cam.open_stream()
+        .context("webcam: failed to open camera stream")?;
     Ok((cam, negotiated_fps))
 }
 
@@ -218,7 +219,8 @@ impl WebcamSource for NokhwaSource {
                                 let frame = RawFrame {
                                     width: image.width(),
                                     height: image.height(),
-                                    timestamp_ms: u32::try_from(epoch.elapsed().as_millis()).unwrap_or(u32::MAX),
+                                    timestamp_ms: u32::try_from(epoch.elapsed().as_millis())
+                                        .unwrap_or(u32::MAX),
                                     rgb: image.into_vec(),
                                 };
                                 // Drop when the consumer lags: real cameras

@@ -29,9 +29,9 @@ use super::{
     credential::UdsRpCredential, fields::CREDENTIAL_PROVIDER_FIELD_DESCRIPTORS, store,
     types::UdsFieldId,
 };
+use crate::imp::pipe;
 use crate::imp::utils::com;
 use crate::imp::utils::log::{self, error};
-use crate::imp::pipe;
 use crate::{debug_dev, debug_flow};
 
 /// GIT cookie and advise context of the most recently Advise'd provider
@@ -58,7 +58,9 @@ impl UdsRpCredentialsProvider {
         debug_flow!("UdsRpCredentialsProvider::new");
         pipe::ensure_started();
         Self {
-            credential: Arc::new(RwLock::new(UdsRpCredential::new(pipe::shared_pipe().clone()))),
+            credential: Arc::new(RwLock::new(UdsRpCredential::new(
+                pipe::shared_pipe().clone(),
+            ))),
             cookie: Arc::new(RwLock::new(None)),
             up_advise_context: Arc::new(RwLock::new(0)),
         }
@@ -199,7 +201,10 @@ impl ICredentialProvider_Impl for UdsRpCredentialsProvider_Impl {
         pcpe: windows::core::Ref<'_, ICredentialProviderEvents>,
         upadvisecontext: usize,
     ) -> windows::core::Result<()> {
-        debug_flow!("ICredentialProvider::Advise({:?}, {upadvisecontext:?})", pcpe.unwrap());
+        debug_flow!(
+            "ICredentialProvider::Advise({:?}, {upadvisecontext:?})",
+            pcpe.unwrap()
+        );
         self.register_event_manager(pcpe.unwrap().clone(), upadvisecontext)
     }
 

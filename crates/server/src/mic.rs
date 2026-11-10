@@ -147,7 +147,9 @@ impl WavSink {
 
     /// Flushes and patches the header with the real sizes.
     fn finalize(&mut self) {
-        let Some(mut file) = self.file.take() else { return };
+        let Some(mut file) = self.file.take() else {
+            return;
+        };
         let result = (|| -> anyhow::Result<()> {
             file.flush()?;
             file.seek(SeekFrom::Start(0))?;
@@ -347,14 +349,25 @@ mod tests {
         assert_eq!(&bytes[8..12], b"WAVE");
         assert_eq!(&bytes[12..16], b"fmt ");
         assert_eq!(&bytes[36..40], b"data");
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 36 + 4000);
-        assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 1, "mono");
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            36 + 4000
+        );
+        assert_eq!(
+            u16::from_le_bytes(bytes[22..24].try_into().unwrap()),
+            1,
+            "mono"
+        );
         assert_eq!(
             u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
             48_000,
             "wire rate"
         );
-        assert_eq!(u16::from_le_bytes(bytes[34..36].try_into().unwrap()), 16, "16-bit");
+        assert_eq!(
+            u16::from_le_bytes(bytes[34..36].try_into().unwrap()),
+            16,
+            "16-bit"
+        );
         assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 4000);
         let pcm: Vec<i16> = bytes[44..]
             .as_chunks::<2>()
@@ -370,9 +383,9 @@ mod tests {
     #[cfg(feature = "opus")]
     #[test]
     fn pump_decodes_and_conceals() {
+        use protocol::audio::{AudioHeader, encode};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU64, Ordering};
-        use protocol::audio::{AudioHeader, encode};
 
         /// Sink that counts the samples it receives.
         struct CountSink(Arc<AtomicU64>);

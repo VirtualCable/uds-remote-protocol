@@ -28,7 +28,8 @@ pub fn send_sas() -> Result<()> {
     // the library reference is released before returning.
     let sas: HMODULE = unsafe { LoadLibraryW(w!("sas.dll")) }.context("LoadLibraryW(sas.dll)")?;
     let result = (|| {
-        let addr = unsafe { GetProcAddress(sas, s!("SendSAS")) }.context("sas.dll!SendSAS missing")?;
+        let addr =
+            unsafe { GetProcAddress(sas, s!("SendSAS")) }.context("sas.dll!SendSAS missing")?;
         let send_sas: unsafe extern "system" fn(BOOL) = unsafe { std::mem::transmute(addr) };
         // FALSE: the SAS is simulated by a service, not sent on behalf of
         // the logged-on user.

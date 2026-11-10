@@ -63,7 +63,10 @@ fn roundtrip(
         let (ch, plain) = rx.decrypt(&dgram).expect("decrypt");
         assert_eq!(ch, channel::DISPLAY);
         if let Some(complete) = reasm.push(&plain).expect("reassemble") {
-            assert_eq!(complete.capture_ts_ms, 1_000, "capture ts survives the wire");
+            assert_eq!(
+                complete.capture_ts_ms, 1_000,
+                "capture ts survives the wire"
+            );
             decoded = Some(decode_frame(complete.data));
         }
     }

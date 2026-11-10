@@ -35,7 +35,9 @@ pub fn build_integrations(
         webcam: webcam.then(channels::webcam::default_source).flatten(),
         printer: printer_dir.and_then(|dir| {
             match channels::printer::PdfToDirSink::new(dir.clone(), protocol::MAX_JOB_BYTES) {
-                Ok(sink) => Some(Box::new(sink) as Box<dyn client::integrations::printer::PrinterSink>),
+                Ok(sink) => {
+                    Some(Box::new(sink) as Box<dyn client::integrations::printer::PrinterSink>)
+                }
                 Err(e) => {
                     tracing::warn!(dir = %dir.display(), "printer save dir unavailable: {e}");
                     None
@@ -44,6 +46,8 @@ pub fn build_integrations(
         }),
         mic: mic_device.then(channels::audio::input::default_mic_factory),
         audio_out: audio.then(channels::audio::output::default_output_factory),
-        smartcard: smartcard.then(channels::smartcard::default_backend).flatten(),
+        smartcard: smartcard
+            .then(channels::smartcard::default_backend)
+            .flatten(),
     }
 }

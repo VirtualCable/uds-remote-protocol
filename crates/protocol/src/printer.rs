@@ -146,7 +146,9 @@ fn take<'a>(buf: &mut &'a [u8], n: usize) -> Result<&'a [u8], PrinterError> {
 }
 
 fn take_u32(buf: &mut &[u8]) -> Result<u32, PrinterError> {
-    Ok(u32::from_be_bytes(take(buf, 4)?.try_into().expect("4 bytes")))
+    Ok(u32::from_be_bytes(
+        take(buf, 4)?.try_into().expect("4 bytes"),
+    ))
 }
 
 fn take_str(buf: &mut &[u8]) -> Result<String, PrinterError> {
@@ -183,7 +185,9 @@ impl PrinterMessage {
                 out.push(TAG_JOB_DATA);
                 out.extend_from_slice(&job_id.to_be_bytes());
                 out.extend_from_slice(
-                    &u32::try_from(payload.len()).unwrap_or(u32::MAX).to_be_bytes(),
+                    &u32::try_from(payload.len())
+                        .unwrap_or(u32::MAX)
+                        .to_be_bytes(),
                 );
                 out.extend_from_slice(payload);
             }
@@ -319,10 +323,7 @@ mod tests {
         let mut buf = vec![TAG_JOB_DATA];
         buf.extend_from_slice(&1u32.to_be_bytes());
         buf.extend_from_slice(&(u32::try_from(MAX_JOB_CHUNK).expect("fits") + 1).to_be_bytes());
-        assert_eq!(
-            PrinterMessage::decode(&buf),
-            Err(PrinterError::TooLarge)
-        );
+        assert_eq!(PrinterMessage::decode(&buf), Err(PrinterError::TooLarge));
     }
 
     #[test]

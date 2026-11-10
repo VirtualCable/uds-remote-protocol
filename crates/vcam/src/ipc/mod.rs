@@ -19,7 +19,11 @@
 
 // Mapping bases come from MapViewOfFile (64K-aligned); pointer alignment and
 // raw-pointer casts are safe by construction.
-#![allow(clippy::cast_ptr_alignment, clippy::ptr_cast_constness, clippy::must_use_candidate)]
+#![allow(
+    clippy::cast_ptr_alignment,
+    clippy::ptr_cast_constness,
+    clippy::must_use_candidate
+)]
 
 use std::sync::atomic::AtomicU32;
 

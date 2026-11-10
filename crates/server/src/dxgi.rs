@@ -22,25 +22,26 @@ use windows::Win32::Foundation::{HMODULE, RECT};
 use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_UNKNOWN;
 use windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0;
 use windows::Win32::Graphics::Direct3D11::{
+    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAP_READ,
+    D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
     D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_MAPPED_SUBRESOURCE,
-    D3D11_MAP_READ, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY,
+};
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
-    IDXGIResource, IDXGISurface, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_INVALID_CALL,
-    DXGI_ERROR_WAIT_TIMEOUT, DXGI_MAPPED_RECT, DXGI_MAP_READ, DXGI_OUTDUPL_FRAME_INFO,
-    DXGI_OUTDUPL_POINTER_SHAPE_INFO,
+    CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_WAIT_TIMEOUT,
+    DXGI_MAP_READ, DXGI_MAPPED_RECT, DXGI_OUTDUPL_FRAME_INFO, DXGI_OUTDUPL_POINTER_SHAPE_INFO,
     DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR, DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR,
-    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME,
+    DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1,
+    IDXGIOutputDuplication, IDXGIResource, IDXGISurface,
 };
+use windows::Win32::Graphics::Gdi::{DISPLAY_DEVICEW, EnumDisplayDevicesW};
 use windows::core::Interface;
-use windows::Win32::Graphics::Gdi::{EnumDisplayDevicesW, DISPLAY_DEVICEW};
 
 use crate::capture::{
-    copy_bgra_rows, mask_shape_to_rgba, select_output, CapturedFrame, CursorUpdate, FrameSource,
-    MaskShapeKind, OutputCandidate, OutputSelector, Rect,
+    CapturedFrame, CursorUpdate, FrameSource, MaskShapeKind, OutputCandidate, OutputSelector, Rect,
+    copy_bgra_rows, mask_shape_to_rgba, select_output,
 };
 
 /// How long a reinit may keep retrying before it is declared fatal (see
@@ -206,9 +207,10 @@ impl DxgiSource {
         // The lock curtain is NOT a secure desktop (§18.52.3): gate on the
         // WTS lock state too, or a lock cycle recreates duplications while
         // the console is still switching (§18.52.4).
-        if crate::secure_helper::secure_desktop_active() || crate::secure_helper::console_locked()
-        {
-            anyhow::bail!("access lost to a secure desktop; the secure transition owns the restart");
+        if crate::secure_helper::secure_desktop_active() || crate::secure_helper::console_locked() {
+            anyhow::bail!(
+                "access lost to a secure desktop; the secure transition owns the restart"
+            );
         }
         let since_healthy = self.last_healthy.elapsed();
         anyhow::ensure!(
@@ -350,7 +352,8 @@ impl FrameSource for DxgiSource {
         // SAFETY: `info` and `resource` are valid out-params; the duplication
         // object is alive for the whole call.
         let result = unsafe {
-            self.dup().AcquireNextFrame(timeout_ms, &mut info, &mut resource)
+            self.dup()
+                .AcquireNextFrame(timeout_ms, &mut info, &mut resource)
         };
         if let Err(e) = &result {
             if e.code() == DXGI_ERROR_WAIT_TIMEOUT {
@@ -444,7 +447,8 @@ impl DxgiSource {
         if info.PointerShapeBufferSize == 0 {
             return;
         }
-        self.shape_buf.resize(info.PointerShapeBufferSize as usize, 0);
+        self.shape_buf
+            .resize(info.PointerShapeBufferSize as usize, 0);
         let shape_ptr = self.shape_buf.as_mut_ptr();
         let mut shape_info = DXGI_OUTDUPL_POINTER_SHAPE_INFO::default();
         let mut needed = 0u32;
@@ -465,8 +469,14 @@ impl DxgiSource {
             t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MONOCHROME.0.cast_unsigned() => {
                 MaskShapeKind::Monochrome
             }
-            t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0.cast_unsigned() => MaskShapeKind::Color,
-            t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR.0.cast_unsigned() => {
+            t if t == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR.0.cast_unsigned() => {
+                MaskShapeKind::Color
+            }
+            t if t
+                == DXGI_OUTDUPL_POINTER_SHAPE_TYPE_MASKED_COLOR
+                    .0
+                    .cast_unsigned() =>
+            {
                 MaskShapeKind::MaskedColor
             }
             other => {
@@ -501,10 +511,8 @@ impl DxgiSource {
             // environment, every captured shape lands as raw RGBA8 plus a
             // `.txt` with the geometry, to inspect alpha handling offline.
             if let Some(dir) = std::env::var_os("UDSRP_DUMP_CURSOR") {
-                let base = std::path::Path::new(&dir).join(format!(
-                    "cursor_{kind:?}_{}x{}",
-                    shape.width, shape.height
-                ));
+                let base = std::path::Path::new(&dir)
+                    .join(format!("cursor_{kind:?}_{}x{}", shape.width, shape.height));
                 let _ = std::fs::write(base.with_extension("rgba"), &shape.rgba);
                 // Raw DXGI buffer as delivered (color + optional 1bpp mask),
                 // to see whether the driver actually appends the mask.
@@ -563,7 +571,10 @@ impl DxgiSource {
                 copy_bgra_rows(src, pitch, width, height, &mut data)
             })();
             // SAFETY: the surface was mapped above and is unmapped exactly once.
-            if let Err(e) = unsafe { surface.Unmap() }.ok().context("surface Unmap failed") {
+            if let Err(e) = unsafe { surface.Unmap() }
+                .ok()
+                .context("surface Unmap failed")
+            {
                 return Some(Err(e));
             }
             Some(result)
@@ -628,7 +639,8 @@ impl DxgiSource {
         // SAFETY: `mapped` is a valid out-param; the staging texture is alive
         // and the returned pointer is used only until `Unmap`.
         unsafe {
-            self.ctx().Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+            self.ctx()
+                .Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
         }
         .context("staging Map failed")?;
         let result = (|| {
@@ -636,8 +648,9 @@ impl DxgiSource {
             let pitch = usize::try_from(mapped.RowPitch).context("negative RowPitch")?;
             // SAFETY: `pData` points to `RowPitch * height` readable bytes
             // while the staging texture is mapped.
-            let src =
-                unsafe { std::slice::from_raw_parts(mapped.pData.cast(), pitch * self.height as usize) };
+            let src = unsafe {
+                std::slice::from_raw_parts(mapped.pData.cast(), pitch * self.height as usize)
+            };
             copy_bgra_rows(src, pitch, self.width, self.height, data)
         })();
         // SAFETY: the staging texture was mapped above and is unmapped once.
@@ -666,11 +679,8 @@ impl DxgiSource {
         // properly aligned `RECT`s, as the API requires; `needed` is a valid
         // out-param.
         unsafe {
-            self.dup().GetFrameDirtyRects(
-                info.TotalMetadataBufferSize,
-                dirty_ptr,
-                &mut needed,
-            )
+            self.dup()
+                .GetFrameDirtyRects(info.TotalMetadataBufferSize, dirty_ptr, &mut needed)
         }
         // Keep the windows error in the chain: `next_frame` routes
         // ACCESS_LOST / INVALID_CALL (desktop switch mid-extract, e.g. the
@@ -737,7 +747,10 @@ fn wide_to_string(buf: &[u16]) -> String {
 /// strings are the reliable identity of the monitor. Returns an empty
 /// string when nothing can be resolved.
 fn gdi_device_string(device_name: &str) -> String {
-    let name_wide: Vec<u16> = device_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let name_wide: Vec<u16> = device_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let mut parts: Vec<String> = Vec::new();
     for dev_num in 0..=1u32 {
         let mut dd = DISPLAY_DEVICEW {
@@ -820,8 +833,7 @@ fn init_duplication(selector: &OutputSelector, quiet: bool) -> anyhow::Result<Du
         unsafe { CreateDXGIFactory1() }.context("CreateDXGIFactory1 failed")?;
 
     let enumerated = enumerate_outputs(&factory);
-    let candidates: Vec<OutputCandidate> =
-        enumerated.iter().map(|e| e.candidate.clone()).collect();
+    let candidates: Vec<OutputCandidate> = enumerated.iter().map(|e| e.candidate.clone()).collect();
     let pos = select_output(&candidates, selector).with_context(|| {
         let available = candidates
             .iter()
@@ -853,7 +865,10 @@ fn init_duplication(selector: &OutputSelector, quiet: bool) -> anyhow::Result<Du
         )
     }
     .with_context(|| {
-        format!("D3D11CreateDevice failed on adapter {}", chosen.candidate.adapter)
+        format!(
+            "D3D11CreateDevice failed on adapter {}",
+            chosen.candidate.adapter
+        )
     })?;
     let device = device.context("no D3D11 device returned")?;
 
@@ -927,9 +942,9 @@ mod tests {
                     frames += 1;
                     dirty_total += f.dirty_rects.len();
                     let full = w as i64 * h as i64;
-                    if Rect::bounding(&f.dirty_rects)
-                        .is_some_and(|r| i64::from(r.right - r.left) * i64::from(r.bottom - r.top) >= full)
-                    {
+                    if Rect::bounding(&f.dirty_rects).is_some_and(|r| {
+                        i64::from(r.right - r.left) * i64::from(r.bottom - r.top) >= full
+                    }) {
                         full_dirty += 1;
                     }
                 }
@@ -944,6 +959,9 @@ mod tests {
             acquire_total.as_secs_f64() * 1000.0 / f64::from(frames.max(1)),
             dirty_total as f64 / f64::from(frames.max(1)),
         );
-        assert!(frames > 0, "no frames captured in 5s (idle desktop is fine, but zero frames + zero dirty means the duplication is not delivering)");
+        assert!(
+            frames > 0,
+            "no frames captured in 5s (idle desktop is fine, but zero frames + zero dirty means the duplication is not delivering)"
+        );
     }
 }

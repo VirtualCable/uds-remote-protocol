@@ -199,7 +199,9 @@ mod tests {
     #[test]
     fn white_bgra_gives_max_luma() {
         // BGRA white.
-        let bgra = [255u8, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0];
+        let bgra = [
+            255u8, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0, 255, 255, 255, 0,
+        ];
         let mut nv = vec![0u8; nv12_len(2, 2)];
         bgra_to_nv12(&bgra, 2, 2, &mut nv);
         assert_eq!(&nv[..4], &[235u8; 4]); // studio-swing white

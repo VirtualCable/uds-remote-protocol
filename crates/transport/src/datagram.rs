@@ -10,8 +10,8 @@
 //! (foreign tokens, tampering, replays) is dropped silently — over UDP that
 //! is normal network behaviour, not necessarily an attack.
 
-use protocol::crypt::{CryptError, DatagramCrypt, DatagramDecrypt, consts};
 use protocol::ChannelId;
+use protocol::crypt::{CryptError, DatagramCrypt, DatagramDecrypt, consts};
 
 use crate::error::{Result, TransportError};
 use crate::traits::DatagramTransport;
@@ -76,7 +76,9 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
         loop {
             let n = self.inner.recv_into(&mut self.rx_buf).await?;
             let dgram = &self.rx_buf[..n];
-            let Self { rx, invalid_dgrams, .. } = self;
+            let Self {
+                rx, invalid_dgrams, ..
+            } = self;
             if let Some(result) = try_decrypt(rx, dgram, buf, invalid_dgrams)? {
                 return Ok(result);
             }
@@ -102,11 +104,7 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
         self.invalid_dgrams
     }
 
-    fn try_decrypt(
-        &mut self,
-        dgram: &[u8],
-        buf: &mut [u8],
-    ) -> Result<Option<(ChannelId, usize)>> {
+    fn try_decrypt(&mut self, dgram: &[u8], buf: &mut [u8]) -> Result<Option<(ChannelId, usize)>> {
         try_decrypt(&mut self.rx, dgram, buf, &mut self.invalid_dgrams)
     }
 
@@ -130,8 +128,17 @@ impl<T: DatagramTransport> EncryptedDatagram<T> {
     pub fn into_split(self) -> (DatagramSink<T>, DatagramSource<T>) {
         let inner = Arc::new(self.inner);
         (
-            DatagramSink { inner: Arc::clone(&inner), tx: self.tx, tx_buf: self.tx_buf },
-            DatagramSource { inner, rx: self.rx, rx_buf: self.rx_buf, invalid_dgrams: (0, 0, 0, 0) },
+            DatagramSink {
+                inner: Arc::clone(&inner),
+                tx: self.tx,
+                tx_buf: self.tx_buf,
+            },
+            DatagramSource {
+                inner,
+                rx: self.rx,
+                rx_buf: self.rx_buf,
+                invalid_dgrams: (0, 0, 0, 0),
+            },
         )
     }
 }
@@ -151,11 +158,13 @@ fn try_decrypt(
             size: needed,
             max: buf.len(),
         }),
-        Err(e @ (CryptError::BadToken
-        | CryptError::Aead
-        | CryptError::PacketTooShort(_)
-        | CryptError::Replay { .. }
-        | CryptError::TooOld { .. })) => {
+        Err(
+            e @ (CryptError::BadToken
+            | CryptError::Aead
+            | CryptError::PacketTooShort(_)
+            | CryptError::Replay { .. }
+            | CryptError::TooOld { .. }),
+        ) => {
             match e {
                 CryptError::BadToken => counters.0 += 1,
                 CryptError::Aead | CryptError::PacketTooShort(_) => counters.1 += 1,

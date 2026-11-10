@@ -103,7 +103,10 @@ mod tests {
     use super::*;
 
     fn at(ms: u64) -> Instant {
-        Instant::now().checked_sub(Duration::from_millis(2000)).map(|b| b + Duration::from_millis(ms)).unwrap()
+        Instant::now()
+            .checked_sub(Duration::from_millis(2000))
+            .map(|b| b + Duration::from_millis(ms))
+            .unwrap()
     }
 
     #[test]

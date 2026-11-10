@@ -27,7 +27,10 @@ use udsscard_proto::{
 const DEFAULT_ATR: &str = "3b8901455544532d43617264 96";
 
 fn parse_hex(s: &str) -> anyhow::Result<Vec<u8>> {
-    let clean: String = s.chars().filter(|c| !c.is_whitespace() && *c != ':').collect();
+    let clean: String = s
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != ':')
+        .collect();
     if !clean.len().is_multiple_of(2) {
         bail!("hex string must have an even number of digits");
     }
@@ -41,7 +44,10 @@ fn parse_hex(s: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 fn hex_of(data: &[u8]) -> String {
-    data.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
+    data.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// SDDL for the pipes: full access to SYSTEM, Administrators and Everyone.

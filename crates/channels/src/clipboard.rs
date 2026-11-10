@@ -17,7 +17,9 @@
 use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::Result;
-use clipboard_rs::{Clipboard, ClipboardContext, ClipboardHandler, ClipboardWatcher, ClipboardWatcherContext};
+use clipboard_rs::{
+    Clipboard, ClipboardContext, ClipboardHandler, ClipboardWatcher, ClipboardWatcherContext,
+};
 
 /// Consumer notified when the LOCAL clipboard gains new text.
 pub trait ClipboardCallback: Send + Sync {
@@ -116,7 +118,11 @@ impl ClipboardHandle {
 
     /// Reads the current local text.
     pub fn get_text(&self) -> Result<String> {
-        self.context.read().unwrap().get_text().map_err(|e| anyhow::anyhow!(e))
+        self.context
+            .read()
+            .unwrap()
+            .get_text()
+            .map_err(|e| anyhow::anyhow!(e))
     }
 }
 

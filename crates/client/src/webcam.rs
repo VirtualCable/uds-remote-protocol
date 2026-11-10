@@ -25,9 +25,9 @@ use std::thread::JoinHandle;
 use codec::VideoCodecType;
 #[cfg(feature = "vp9")]
 use codec::{VideoEncoder, VideoFrame};
+use protocol::ControlMessage;
 #[cfg(feature = "vp9")]
 use protocol::{fragment::Fragmenter, webcam as wc};
-use protocol::ControlMessage;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -98,9 +98,7 @@ impl CamClient {
         let (max_width, max_height) = source.max_dimensions();
         info!(
             device = source.device_name(),
-            max_width,
-            max_height,
-            "webcam source available"
+            max_width, max_height, "webcam source available"
         );
         Some(ControlMessage::WebcamCaps {
             max_width,
@@ -114,7 +112,10 @@ impl CamClient {
     /// not start until [`CamClient::start`] (the server's `WebcamStart`).
     pub fn configure(&mut self, spec: CamSpec) {
         if spec.codec != VideoCodecType::Vp9.wire_id() {
-            warn!(codec = spec.codec, "unknown webcam codec id; webcam disabled");
+            warn!(
+                codec = spec.codec,
+                "unknown webcam codec id; webcam disabled"
+            );
             return;
         }
         self.spec = Some(spec);

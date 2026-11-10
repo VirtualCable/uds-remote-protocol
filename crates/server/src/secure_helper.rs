@@ -77,8 +77,8 @@ pub fn secure_desktop_active() -> bool {
 #[cfg(all(windows, feature = "windows-capture"))]
 pub fn console_locked() -> bool {
     use windows::Win32::System::RemoteDesktop::{
-        WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
-        WTS_CURRENT_SESSION,
+        WTS_CURRENT_SESSION, WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW,
+        WTSSessionInfoEx,
     };
     let mut buf = windows::core::PWSTR::null();
     let mut bytes = 0u32;
@@ -124,7 +124,10 @@ pub fn gdi_capture_frame() -> Result<(u32, u32, Vec<u8>)> {
     let result = (|| -> Result<(i32, i32, Vec<u8>)> {
         let width = unsafe { GetDeviceCaps(Some(screen), HORZRES) };
         let height = unsafe { GetDeviceCaps(Some(screen), VERTRES) };
-        anyhow::ensure!(width > 0 && height > 0, "GetDeviceCaps returned no geometry");
+        anyhow::ensure!(
+            width > 0 && height > 0,
+            "GetDeviceCaps returned no geometry"
+        );
         let mem: HDC = unsafe { CreateCompatibleDC(Some(screen)) };
         let bmp = unsafe { CreateCompatibleBitmap(screen, width, height) };
         let old = unsafe { SelectObject(mem, HGDIOBJ(bmp.0)) };

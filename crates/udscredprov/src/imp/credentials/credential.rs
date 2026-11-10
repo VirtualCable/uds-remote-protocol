@@ -109,11 +109,7 @@ impl UdsRpCredential {
             debug_dev!("Notifying LogonUI to clear the password field");
             let icred: ICredentialProviderCredential = (*self).clone().into();
             unsafe {
-                events.SetFieldString(
-                    &icred,
-                    types::UdsFieldId::Password as u32,
-                    PCWSTR::null(),
-                )
+                events.SetFieldString(&icred, types::UdsFieldId::Password as u32, PCWSTR::null())
             }?;
         }
         Ok(())
@@ -282,7 +278,10 @@ impl ICredentialProviderCredential_Impl for UdsRpCredential_Impl {
         &self,
         pcpce: windows::core::Ref<'_, ICredentialProviderCredentialEvents>,
     ) -> windows::core::Result<()> {
-        debug_flow!("ICredentialProviderCredential::Advise({:?})", pcpce.unwrap());
+        debug_flow!(
+            "ICredentialProviderCredential::Advise({:?})",
+            pcpce.unwrap()
+        );
         self.register_event_manager(pcpce.unwrap().clone())
     }
 

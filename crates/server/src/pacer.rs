@@ -87,7 +87,11 @@ impl Pacer {
     /// leaves immediately.
     #[must_use]
     pub fn new(rate: PacerRate) -> Self {
-        Self { rate, tokens: BUCKET_BYTES, last: Instant::now() }
+        Self {
+            rate,
+            tokens: BUCKET_BYTES,
+            last: Instant::now(),
+        }
     }
 
     /// Bytes a send batch should aim for so its pacing sleep lasts about

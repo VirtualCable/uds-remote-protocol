@@ -75,13 +75,17 @@ mod windows_impl {
     use std::sync::mpsc::{Receiver, Sender, channel};
     use tokio::sync::mpsc::UnboundedSender;
     use tracing::{info, warn};
-    use windows::Win32::Foundation::{GetLastError, GlobalFree, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{
+        GetLastError, GlobalFree, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+    };
     use windows::Win32::System::DataExchange::{
         AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
         OpenClipboard, SetClipboardData,
     };
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE};
+    use windows::Win32::System::Memory::{
+        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, GetMessageW, HWND_MESSAGE, MSG, PostMessageW,
         RegisterClassW, WM_APP, WM_CLIPBOARDUPDATE, WNDCLASSW, WS_OVERLAPPED,
@@ -125,7 +129,8 @@ mod windows_impl {
                     if let Some(hwnd) = *shared.hwnd.lock().unwrap_or_else(|e| e.into_inner()) {
                         let hwnd = HWND(hwnd as *mut core::ffi::c_void);
                         unsafe {
-                            let _ = PostMessageW(Some(hwnd), WM_COMMAND_READY, WPARAM(0), LPARAM(0));
+                            let _ =
+                                PostMessageW(Some(hwnd), WM_COMMAND_READY, WPARAM(0), LPARAM(0));
                         }
                     }
                 }),
@@ -225,7 +230,11 @@ mod windows_impl {
         let Some(text) = read_clipboard_text() else {
             return;
         };
-        let last = shared.last_set.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let last = shared
+            .last_set
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if last.as_deref() == Some(text.as_str()) {
             return; // echo of our own set
         }
@@ -290,27 +299,35 @@ mod windows_impl {
         let mut wide: Vec<u16> = text.encode_utf16().collect();
         wide.push(0);
         let bytes = wide.len() * 2;
-        let ok = open_clipboard() && unsafe {
-            let _guard = ClipboardGuard;
-            let result: windows::core::Result<()> = (|| {
-                EmptyClipboard()?;
-                let hglobal = GlobalAlloc(GMEM_MOVEABLE, bytes)?;
-                let ptr = GlobalLock(hglobal);
-                if ptr.is_null() {
-                    let _ = GlobalFree(Some(hglobal));
-                    return Err(windows::core::Error::from_thread());
-                }
-                std::ptr::copy_nonoverlapping(wide.as_ptr() as *const u8, ptr as *mut u8, bytes);
-                let _ = GlobalUnlock(hglobal);
-                if let Err(e) = SetClipboardData(CF_UNICODETEXT, Some(windows::Win32::Foundation::HANDLE(hglobal.0))) {
-                    let _ = GlobalFree(Some(hglobal));
-                    return Err(e);
-                }
-                // Ownership of the global passed to the clipboard.
-                Ok(())
-            })();
-            result.is_ok()
-        };
+        let ok = open_clipboard()
+            && unsafe {
+                let _guard = ClipboardGuard;
+                let result: windows::core::Result<()> = (|| {
+                    EmptyClipboard()?;
+                    let hglobal = GlobalAlloc(GMEM_MOVEABLE, bytes)?;
+                    let ptr = GlobalLock(hglobal);
+                    if ptr.is_null() {
+                        let _ = GlobalFree(Some(hglobal));
+                        return Err(windows::core::Error::from_thread());
+                    }
+                    std::ptr::copy_nonoverlapping(
+                        wide.as_ptr() as *const u8,
+                        ptr as *mut u8,
+                        bytes,
+                    );
+                    let _ = GlobalUnlock(hglobal);
+                    if let Err(e) = SetClipboardData(
+                        CF_UNICODETEXT,
+                        Some(windows::Win32::Foundation::HANDLE(hglobal.0)),
+                    ) {
+                        let _ = GlobalFree(Some(hglobal));
+                        return Err(e);
+                    }
+                    // Ownership of the global passed to the clipboard.
+                    Ok(())
+                })();
+                result.is_ok()
+            };
         if ok {
             *shared.last_set.lock().unwrap_or_else(|e| e.into_inner()) = Some(text.to_string());
         } else {

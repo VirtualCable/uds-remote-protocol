@@ -91,7 +91,10 @@ impl Connector for DirectConnector {
     async fn connect(
         &self,
         target: &Target,
-    ) -> Result<(Box<dyn ReliableTransport>, Option<Box<dyn DatagramTransport>>)> {
+    ) -> Result<(
+        Box<dyn ReliableTransport>,
+        Option<Box<dyn DatagramTransport>>,
+    )> {
         debug!(addr = %target.addr(), "connecting direct TCP");
         let stream = TcpStream::connect(target.addr()).await?;
         // No datagrams in Phase 0 (UDP arrives in Phase 1).

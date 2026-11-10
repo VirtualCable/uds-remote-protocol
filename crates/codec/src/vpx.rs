@@ -18,7 +18,11 @@
 // FFI boundary: implicit borrows as raw pointers and C-integer casts are
 // idiomatic here; the values (ABI versions, flags, deadlines) are small
 // constants.
-#![allow(clippy::borrow_as_ptr, clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+#![allow(
+    clippy::borrow_as_ptr,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
 // Rate control scales the configured bitrate by a measured-fps factor; the
 // float→int casts involved are rounded and clamped to provably safe ranges.
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
@@ -112,7 +116,9 @@ const RATE_REAPPLY_DRIFT: f64 = 0.15;
 /// (see `TIMEBASE_FPS`). Pure helper, unit-tested.
 fn scaled_kbps_for(target_kbps: u32, fps_ema: f64) -> u32 {
     let scale = TIMEBASE_FPS / fps_ema.clamp(1.0, TIMEBASE_FPS * 2.0);
-    (f64::from(target_kbps) * scale).round().clamp(1.0, 100_000.0) as u32
+    (f64::from(target_kbps) * scale)
+        .round()
+        .clamp(1.0, 100_000.0) as u32
 }
 
 impl VpxEncoder {
@@ -182,7 +188,11 @@ impl VpxEncoder {
                 VideoCodecType::Vp9 => 6,
                 _ => -10,
             });
-            let e = sys::vpx_codec_control_(&mut ctx, sys::vp8e_enc_control_id_VP8E_SET_CPUUSED as i32, cpu);
+            let e = sys::vpx_codec_control_(
+                &mut ctx,
+                sys::vp8e_enc_control_id_VP8E_SET_CPUUSED as i32,
+                cpu,
+            );
             if e != sys::vpx_codec_err_t_VPX_CODEC_OK {
                 return Err(ctx_err(&ctx, "vpx_codec_control(CPUUSED)"));
             }
@@ -355,8 +365,7 @@ impl VpxEncoder {
                 let pkt = &*pkt;
                 if pkt.kind == sys::vpx_codec_cx_pkt_kind_VPX_CODEC_CX_FRAME_PKT {
                     let f = pkt.data.frame;
-                    let slice =
-                        std::slice::from_raw_parts(f.buf.cast::<u8>(), f.sz);
+                    let slice = std::slice::from_raw_parts(f.buf.cast::<u8>(), f.sz);
                     self.out.extend_from_slice(slice);
                     keyframe |= f.flags & sys::VPX_FRAME_IS_KEY != 0;
                 }
@@ -505,7 +514,12 @@ unsafe impl Send for VpxDecoder {}
 impl Vp9Encoder {
     /// Creates a VP9 encoder for `width`x`height` at `kbps` target bitrate.
     pub fn new(width: u32, height: u32, kbps: u32) -> Result<Self> {
-        Ok(Self(VpxEncoder::new(VideoCodecType::Vp9, width, height, kbps)?))
+        Ok(Self(VpxEncoder::new(
+            VideoCodecType::Vp9,
+            width,
+            height,
+            kbps,
+        )?))
     }
 
     /// Creates a VP9 encoder with an explicit `cpu_used` (0 best/slowest ..
@@ -587,7 +601,12 @@ pub struct Vp8Encoder(VpxEncoder);
 impl Vp8Encoder {
     /// Creates a VP8 encoder for `width`x`height` at `kbps` target bitrate.
     pub fn new(width: u32, height: u32, kbps: u32) -> Result<Self> {
-        Ok(Self(VpxEncoder::new(VideoCodecType::Vp8, width, height, kbps)?))
+        Ok(Self(VpxEncoder::new(
+            VideoCodecType::Vp8,
+            width,
+            height,
+            kbps,
+        )?))
     }
 
     /// Creates a VP8 encoder with an explicit `cpu_used` (+16 best .. -16

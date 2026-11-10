@@ -39,8 +39,8 @@ pub mod webcam;
 
 pub use command::{ClientCommand, CommandSender};
 pub use events::{ClientEvent, Rect, TransferDirection};
-pub use stats::StatsSnapshot;
 pub use framebuffer::{DisplayBuffer, Displays, SharedDisplay};
 pub use session::{ClientConfig, Session};
+pub use stats::StatsSnapshot;
 
 pub use events::EVENT_CHANNEL_CAPACITY;

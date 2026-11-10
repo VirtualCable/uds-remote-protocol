@@ -56,7 +56,11 @@ pub enum RecoverOutcome<T: ReliableTransport> {
 impl<T: ReliableTransport> EncryptedStream<T> {
     /// Creates the encrypted stream with explicit send/receive keys.
     #[must_use]
-    pub fn new(inner: T, tx_key: &[u8; consts::KEY_LENGTH], rx_key: &[u8; consts::KEY_LENGTH]) -> Self {
+    pub fn new(
+        inner: T,
+        tx_key: &[u8; consts::KEY_LENGTH],
+        rx_key: &[u8; consts::KEY_LENGTH],
+    ) -> Self {
         Self {
             inner,
             tx: StreamCrypt::new(tx_key),

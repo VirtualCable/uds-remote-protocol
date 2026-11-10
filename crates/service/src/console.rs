@@ -30,8 +30,7 @@ use protocol::channel;
 /// How long the state machine waits for an evicted console to actually
 /// flip before giving up (logoff/disconnect are asynchronous on the WTS
 /// side).
-pub(crate) const EVICT_SETTLE_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(10);
+pub(crate) const EVICT_SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Server-side conflict configuration, resolved from the standalone config
 /// or the broker ticket payload.
@@ -86,7 +85,10 @@ pub enum ConsoleState {
 }
 
 /// Queries one null-terminated UTF-16 string field of a WTS session.
-fn query_session_string(session_id: u32, class: windows::Win32::System::RemoteDesktop::WTS_INFO_CLASS) -> Option<String> {
+fn query_session_string(
+    session_id: u32,
+    class: windows::Win32::System::RemoteDesktop::WTS_INFO_CLASS,
+) -> Option<String> {
     let mut buf = windows::core::PWSTR::null();
     let mut bytes = 0u32;
     // SAFETY: valid out-params; on success the buffer is freed below.
@@ -146,12 +148,17 @@ pub(crate) fn same_account(owner: &Account, creds: &Credentials) -> bool {
 /// (default — a takeover reassigns the WHOLE machine) or
 /// `WTSDisconnectSession`. Asynchronous on the WTS side: the caller (state
 /// machine) waits for the console to flip with `EVICT_SETTLE_TIMEOUT`.
-pub(crate) fn evict_start(session_id: u32, account: &Account, mode: server_config::TakeoverMode) -> Result<()> {
+pub(crate) fn evict_start(
+    session_id: u32,
+    account: &Account,
+    mode: server_config::TakeoverMode,
+) -> Result<()> {
     match mode {
         server_config::TakeoverMode::Disconnect => {
             debug!(session_id, user = %account.display(), "disconnecting the console session (takeover)");
             // SAFETY: local server handle, valid session id.
-            unsafe { WTSDisconnectSession(None, session_id, true) }.context("WTSDisconnectSession")?;
+            unsafe { WTSDisconnectSession(None, session_id, true) }
+                .context("WTSDisconnectSession")?;
         }
         server_config::TakeoverMode::Logoff => {
             debug!(session_id, user = %account.display(), "LOGGING OFF the console session (takeover mode logoff)");
@@ -164,7 +171,10 @@ pub(crate) fn evict_start(session_id: u32, account: &Account, mode: server_confi
 
 /// Best-effort `SessionEnd` notification right before dropping a refused
 /// connection (§18.53 reason codes).
-pub(crate) async fn send_session_end<T: ReliableTransport>(stream: &mut EncryptedStream<T>, reason: u8) {
+pub(crate) async fn send_session_end<T: ReliableTransport>(
+    stream: &mut EncryptedStream<T>,
+    reason: u8,
+) {
     let msg = ControlMessage::SessionEnd { reason };
     if let Ok(encoded) = msg.encode() {
         let _ = stream.send(channel::CONTROL, &encoded).await;
@@ -173,7 +183,10 @@ pub(crate) async fn send_session_end<T: ReliableTransport>(stream: &mut Encrypte
 
 /// Best-effort `SessionProgress` notice so the client can show what the
 /// pre-session wait is about (§18.53 stage codes).
-pub(crate) async fn send_progress<T: ReliableTransport>(stream: &mut EncryptedStream<T>, stage: u8) {
+pub(crate) async fn send_progress<T: ReliableTransport>(
+    stream: &mut EncryptedStream<T>,
+    stage: u8,
+) {
     let msg = ControlMessage::SessionProgress { stage };
     if let Ok(encoded) = msg.encode() {
         let _ = stream.send(channel::CONTROL, &encoded).await;

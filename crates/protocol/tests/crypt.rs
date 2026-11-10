@@ -120,7 +120,10 @@ fn truncated_packet_is_rejected() {
     let (mut enc, mut dec) = pair();
     let p = enc.encrypt(0, b"cortame").unwrap();
     let err = dec.decrypt(&p[..p.len() - 5]).unwrap_err();
-    assert!(matches!(err, CryptError::PacketTooShort { .. } | CryptError::Aead));
+    assert!(matches!(
+        err,
+        CryptError::PacketTooShort { .. } | CryptError::Aead
+    ));
 }
 
 #[test]
@@ -137,7 +140,11 @@ fn session_keys_debug_does_not_leak() {
 fn udp_token_is_derived_deterministically() {
     let t1 = protocol::crypt::derive_udp_token(&ticket(), &secret()).unwrap();
     let t2 = protocol::crypt::derive_udp_token(&ticket(), &secret()).unwrap();
-    let other = protocol::crypt::derive_udp_token(&[0x99; protocol::crypt::consts::TICKET_LENGTH], &secret()).unwrap();
+    let other = protocol::crypt::derive_udp_token(
+        &[0x99; protocol::crypt::consts::TICKET_LENGTH],
+        &secret(),
+    )
+    .unwrap();
     assert_eq!(t1, t2);
     assert_ne!(t1, other);
     assert_eq!(t1.len(), protocol::crypt::consts::TOKEN_LENGTH);

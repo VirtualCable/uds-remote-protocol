@@ -21,7 +21,9 @@
 use aes_gcm::aead::{AeadInOut, KeyInit, consts::U12};
 use aes_gcm::{Aes256Gcm, Nonce, Tag};
 
-use crate::crypt::consts::{CHANNEL_ID_SIZE, KEY_LENGTH, MAX_PLAINTEXT, STREAM_HEADER_SIZE, TAG_LENGTH};
+use crate::crypt::consts::{
+    CHANNEL_ID_SIZE, KEY_LENGTH, MAX_PLAINTEXT, STREAM_HEADER_SIZE, TAG_LENGTH,
+};
 use crate::crypt::error::CryptError;
 
 fn nonce_from_seq(seq: u64) -> Nonce<U12> {

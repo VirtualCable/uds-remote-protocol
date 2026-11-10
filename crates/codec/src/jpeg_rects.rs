@@ -84,7 +84,11 @@ impl JpegRectsEncoder {
     /// metric). An empty set yields an empty packet ("no changes"). Updates
     /// the internal previous-frame copy so later [`VideoEncoder::encode`]
     /// calls stay consistent.
-    pub fn encode_with_dirty(&mut self, frame: &VideoFrame<'_>, dirty: &[Rect]) -> Result<EncodedPacket> {
+    pub fn encode_with_dirty(
+        &mut self,
+        frame: &VideoFrame<'_>,
+        dirty: &[Rect],
+    ) -> Result<EncodedPacket> {
         let prev = frame.data.to_vec();
 
         if dirty.is_empty() {
@@ -180,7 +184,13 @@ impl VideoEncoder for JpegRectsEncoder {
                 bottom: self.height as i32,
             }]
         } else {
-            rects::dirty_rects(self.prev.as_deref(), frame.data, self.width, self.height, frame.stride)
+            rects::dirty_rects(
+                self.prev.as_deref(),
+                frame.data,
+                self.width,
+                self.height,
+                frame.stride,
+            )
         };
         self.encode_with_dirty(frame, &dirty)
     }
@@ -240,11 +250,15 @@ fn take<'a>(buf: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
 }
 
 fn u16_at(buf: &mut &[u8]) -> Result<u16> {
-    Ok(u16::from_le_bytes(take(buf, 2)?.try_into().expect("2 bytes")))
+    Ok(u16::from_le_bytes(
+        take(buf, 2)?.try_into().expect("2 bytes"),
+    ))
 }
 
 fn u32_at(buf: &mut &[u8]) -> Result<u32> {
-    Ok(u32::from_le_bytes(take(buf, 4)?.try_into().expect("4 bytes")))
+    Ok(u32::from_le_bytes(
+        take(buf, 4)?.try_into().expect("4 bytes"),
+    ))
 }
 
 /// Upper bound for the geometry a packet header may declare: anything
@@ -328,7 +342,12 @@ mod tests {
         let mut dec = JpegRectsDecoder::new();
 
         let f1 = frame(w, h, [10, 20, 30, 255]);
-        let vf1 = VideoFrame { width: w, height: h, stride: w as usize * 4, data: &f1 };
+        let vf1 = VideoFrame {
+            width: w,
+            height: h,
+            stride: w as usize * 4,
+            data: &f1,
+        };
         let p1 = enc.encode(&vf1).unwrap();
         assert!(p1.keyframe); // first frame is a full-screen rect
         let d1 = dec.decode(&p1).unwrap().expect("frame");
@@ -347,7 +366,12 @@ mod tests {
                 f2[(y * w as usize + x) * 4..][..4].copy_from_slice(&[200, 100, 50, 255]);
             }
         }
-        let vf2 = VideoFrame { width: w, height: h, stride: w as usize * 4, data: &f2 };
+        let vf2 = VideoFrame {
+            width: w,
+            height: h,
+            stride: w as usize * 4,
+            data: &f2,
+        };
         let p2 = enc.encode(&vf2).unwrap();
         assert!(!p2.keyframe);
         assert!(p2.data.len() < p1.data.len());
@@ -362,7 +386,12 @@ mod tests {
     fn unchanged_frame_yields_empty_packet() {
         let mut enc = JpegRectsEncoder::new(64, 64, 80).unwrap();
         let f = frame(64, 64, [1, 2, 3, 255]);
-        let vf = VideoFrame { width: 64, height: 64, stride: 256, data: &f };
+        let vf = VideoFrame {
+            width: 64,
+            height: 64,
+            stride: 256,
+            data: &f,
+        };
         enc.encode(&vf).unwrap();
         let p = enc.encode(&vf).unwrap();
         assert_eq!(p.data, [] as [u8; 0]);
@@ -372,7 +401,12 @@ mod tests {
     fn request_keyframe_forces_full_rect() {
         let mut enc = JpegRectsEncoder::new(64, 64, 80).unwrap();
         let f = frame(64, 64, [1, 2, 3, 255]);
-        let vf = VideoFrame { width: 64, height: 64, stride: 256, data: &f };
+        let vf = VideoFrame {
+            width: 64,
+            height: 64,
+            stride: 256,
+            data: &f,
+        };
         enc.encode(&vf).unwrap();
         enc.request_keyframe();
         let p = enc.encode(&vf).unwrap();
@@ -383,7 +417,10 @@ mod tests {
     fn decoder_rejects_truncated_packet() {
         let mut dec = JpegRectsDecoder::new();
         for len in [1usize, 5, 9, 11, 15] {
-            let p = EncodedPacket { data: vec![0u8; len], keyframe: false };
+            let p = EncodedPacket {
+                data: vec![0u8; len],
+                keyframe: false,
+            };
             assert!(dec.decode(&p).is_err(), "len {len} must fail");
         }
     }
@@ -392,7 +429,12 @@ mod tests {
     fn decoder_rejects_out_of_bounds_rect() {
         let mut enc = JpegRectsEncoder::new(64, 64, 80).unwrap();
         let f = frame(64, 64, [1, 2, 3, 255]);
-        let vf = VideoFrame { width: 64, height: 64, stride: 256, data: &f };
+        let vf = VideoFrame {
+            width: 64,
+            height: 64,
+            stride: 256,
+            data: &f,
+        };
         let mut p = enc.encode(&vf).unwrap();
         // Corrupt the rect x so it overruns the canvas (x=65535).
         p.data[10] = 0xFF;

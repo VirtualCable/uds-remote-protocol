@@ -130,7 +130,10 @@ impl StorageClient {
             return vec![Self::err_event(0, "an upload is already active")];
         }
         let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
-            return vec![Self::err_event(0, format!("{}: no valid leaf name", path.display()))];
+            return vec![Self::err_event(
+                0,
+                format!("{}: no valid leaf name", path.display()),
+            )];
         };
         if let Err(e) = validate_name(&name) {
             return vec![Self::err_event(0, format!("{name}: {e}"))];
@@ -141,7 +144,10 @@ impl StorageClient {
             Err(e) => return vec![Self::err_event(0, format!("{}: {e}", path.display()))],
         };
         if size > protocol::MAX_FILE_SIZE {
-            return vec![Self::err_event(0, format!("{name}: exceeds the 4 GiB limit"))];
+            return vec![Self::err_event(
+                0,
+                format!("{name}: exceeds the 4 GiB limit"),
+            )];
         }
         self.next_id = self.next_id.wrapping_add(1);
         let id = self.next_id;
@@ -246,24 +252,32 @@ impl StorageClient {
     pub fn pump(&mut self) -> Vec<ClientEvent> {
         let mut events = Vec::new();
         for _ in 0..PUMP_CHUNKS {
-            let Some(up) = self.upload.as_mut() else { break };
+            let Some(up) = self.upload.as_mut() else {
+                break;
+            };
             if up.offset >= up.size {
                 if !up.done_sent {
                     up.done_sent = true;
-                    self.out.push(StorageMessage::PutDone { transfer_id: up.id });
+                    self.out
+                        .push(StorageMessage::PutDone { transfer_id: up.id });
                 }
                 // Keep the state until the server acks (or errors).
                 break;
             }
-            let want = usize::try_from((up.size - up.offset).min(protocol::STORAGE_CHUNK_SIZE as u64))
-                .unwrap_or(protocol::STORAGE_CHUNK_SIZE);
+            let want =
+                usize::try_from((up.size - up.offset).min(protocol::STORAGE_CHUNK_SIZE as u64))
+                    .unwrap_or(protocol::STORAGE_CHUNK_SIZE);
             let mut data = vec![0u8; want];
             match up.file.read(&mut data) {
                 Ok(0) => {
                     // Local file truncated under us: abort.
                     let up = self.upload.take().expect("checked");
-                    self.out.push(StorageMessage::PutAbort { transfer_id: up.id });
-                    events.push(Self::err_event(up.id, format!("{}: truncated while reading", up.name)));
+                    self.out
+                        .push(StorageMessage::PutAbort { transfer_id: up.id });
+                    events.push(Self::err_event(
+                        up.id,
+                        format!("{}: truncated while reading", up.name),
+                    ));
                     break;
                 }
                 Ok(n) => {
@@ -278,7 +292,8 @@ impl StorageClient {
                 }
                 Err(e) => {
                     let up = self.upload.take().expect("checked");
-                    self.out.push(StorageMessage::PutAbort { transfer_id: up.id });
+                    self.out
+                        .push(StorageMessage::PutAbort { transfer_id: up.id });
                     events.push(Self::err_event(up.id, format!("{}: {e}", up.name)));
                     break;
                 }
@@ -305,7 +320,12 @@ impl StorageClient {
             StorageMessage::PutAck { transfer_id } => {
                 match self.upload.take() {
                     Some(up) if up.id == *transfer_id => {
-                        info!(transfer_id, name = up.name, bytes = up.size, "upload committed");
+                        info!(
+                            transfer_id,
+                            name = up.name,
+                            bytes = up.size,
+                            "upload committed"
+                        );
                         vec![ClientEvent::TransferDone {
                             transfer_id: up.id,
                             direction: TransferDirection::Upload,
@@ -370,7 +390,10 @@ impl StorageClient {
             if self.download.as_ref().is_some_and(|d| d.id == transfer_id) {
                 self.download = None; // Drop removes the .part file.
                 self.out.push(StorageMessage::GetAbort { transfer_id });
-                return vec![Self::err_event(transfer_id, "out-of-order chunk; download aborted")];
+                return vec![Self::err_event(
+                    transfer_id,
+                    "out-of-order chunk; download aborted",
+                )];
             }
             return Vec::new();
         }
@@ -425,7 +448,10 @@ impl StorageClient {
                     bytes,
                 }]
             }
-            Err(e) => vec![Self::err_event(transfer_id, format!("{}: {e}", dest.display()))],
+            Err(e) => vec![Self::err_event(
+                transfer_id,
+                format!("{}: {e}", dest.display()),
+            )],
         }
     }
 }
@@ -489,7 +515,11 @@ mod tests {
         let events = c.handle(&StorageMessage::PutAck { transfer_id: id });
         assert!(matches!(
             events.as_slice(),
-            [ClientEvent::TransferDone { direction: TransferDirection::Upload, bytes: 4, .. }]
+            [ClientEvent::TransferDone {
+                direction: TransferDirection::Upload,
+                bytes: 4,
+                ..
+            }]
         ));
         assert!(c.upload.is_none());
     }
@@ -514,7 +544,11 @@ mod tests {
         let events = c.handle(&StorageMessage::GetDone { transfer_id: id });
         assert!(matches!(
             events.as_slice(),
-            [ClientEvent::TransferDone { direction: TransferDirection::Download, bytes: 6, .. }]
+            [ClientEvent::TransferDone {
+                direction: TransferDirection::Download,
+                bytes: 6,
+                ..
+            }]
         ));
         assert_eq!(std::fs::read(&dest).expect("committed"), b"123456");
         // No .part left behind.
@@ -585,11 +619,17 @@ mod tests {
         let mut c = StorageClient::new();
         assert_eq!(c.start_upload(&path), Vec::new());
         let events = c.start_upload(&path);
-        assert!(matches!(events.as_slice(), [ClientEvent::TransferError { .. }]));
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::TransferError { .. }]
+        ));
         let events = c.start_download("a.bin", &dir.path().join("b.bin"));
         assert_eq!(events, Vec::new());
         let events = c.start_download("a.bin", &dir.path().join("c.bin"));
-        assert!(matches!(events.as_slice(), [ClientEvent::TransferError { .. }]));
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::TransferError { .. }]
+        ));
     }
     #[test]
     fn upload_progress_is_throttled() {
@@ -601,8 +641,9 @@ mod tests {
         // First pump: no progress yet (interval not elapsed).
         assert_eq!(c.pump(), Vec::new());
         // Force the interval and pump again: exactly one progress event.
-        c.upload.as_mut().expect("active").last_progress =
-            Instant::now().checked_sub(PROGRESS_INTERVAL + Duration::from_millis(1)).expect("test clock");
+        c.upload.as_mut().expect("active").last_progress = Instant::now()
+            .checked_sub(PROGRESS_INTERVAL + Duration::from_millis(1))
+            .expect("test clock");
         let events = c.pump();
         let progress: Vec<_> = events
             .iter()
@@ -636,8 +677,9 @@ mod tests {
         let dest = dir.path().join("y.bin");
         assert_eq!(c.start_download("y.bin", &dest), Vec::new());
         let id = c.download.as_ref().expect("active").id;
-        c.download.as_mut().expect("active").last_progress =
-            Instant::now().checked_sub(PROGRESS_INTERVAL + Duration::from_millis(1)).expect("test clock");
+        c.download.as_mut().expect("active").last_progress = Instant::now()
+            .checked_sub(PROGRESS_INTERVAL + Duration::from_millis(1))
+            .expect("test clock");
         let events = c.handle(&StorageMessage::GetChunk {
             transfer_id: id,
             offset: 0,

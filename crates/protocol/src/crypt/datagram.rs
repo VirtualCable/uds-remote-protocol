@@ -101,7 +101,8 @@ impl DatagramCrypt {
         dgram[TOKEN_LENGTH..DATAGRAM_HEADER_SIZE].copy_from_slice(&seq.to_be_bytes());
         dgram[DATAGRAM_HEADER_SIZE..DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE]
             .copy_from_slice(&channel_id.to_be_bytes());
-        dgram[DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE..DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE + plaintext.len()]
+        dgram[DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE
+            ..DATAGRAM_HEADER_SIZE + CHANNEL_ID_SIZE + plaintext.len()]
             .copy_from_slice(plaintext);
 
         let (head, rest) = dgram.split_at_mut(DATAGRAM_HEADER_SIZE);

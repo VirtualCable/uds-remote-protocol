@@ -103,7 +103,9 @@ impl ClipboardMessage {
                 out.extend_from_slice(&seq.to_be_bytes());
                 out.extend_from_slice(&format.to_be_bytes());
                 out.extend_from_slice(
-                    &u32::try_from(payload.len()).unwrap_or(u32::MAX).to_be_bytes(),
+                    &u32::try_from(payload.len())
+                        .unwrap_or(u32::MAX)
+                        .to_be_bytes(),
                 );
                 out.extend_from_slice(payload);
             }
@@ -221,7 +223,10 @@ impl ClipboardSession {
         if formats & FORMAT_TEXT == 0 {
             return None;
         }
-        if self.peer_seq.is_some_and(|seen| seq.wrapping_sub(seen).cast_signed() <= 0) {
+        if self
+            .peer_seq
+            .is_some_and(|seen| seq.wrapping_sub(seen).cast_signed() <= 0)
+        {
             return None; // stale or already seen generation
         }
         self.peer_seq = Some(seq);
@@ -307,12 +312,18 @@ mod tests {
 
     #[test]
     fn empty_buffer_is_truncated() {
-        assert_eq!(ClipboardMessage::decode(&[]), Err(ClipboardError::Truncated));
+        assert_eq!(
+            ClipboardMessage::decode(&[]),
+            Err(ClipboardError::Truncated)
+        );
     }
 
     #[test]
     fn unknown_tag_is_rejected() {
-        assert_eq!(ClipboardMessage::decode(&[99]), Err(ClipboardError::UnknownTag(99)));
+        assert_eq!(
+            ClipboardMessage::decode(&[99]),
+            Err(ClipboardError::UnknownTag(99))
+        );
     }
 
     #[test]
@@ -364,11 +375,7 @@ mod tests {
         };
         // Client pulls.
         let request = client.peer_offer(seq, formats).expect("should pull");
-        let ClipboardMessage::Request {
-            seq: rseq,
-            format,
-        } = request
-        else {
+        let ClipboardMessage::Request { seq: rseq, format } = request else {
             panic!("expected request");
         };
         // Server answers from cache, client accepts the data.
@@ -381,7 +388,10 @@ mod tests {
         else {
             panic!("expected data");
         };
-        assert_eq!(client.peer_data(dseq, dformat, &payload), Some(b"hola".to_vec()));
+        assert_eq!(
+            client.peer_data(dseq, dformat, &payload),
+            Some(b"hola".to_vec())
+        );
     }
 
     #[test]

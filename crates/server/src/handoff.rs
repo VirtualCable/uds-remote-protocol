@@ -11,8 +11,8 @@
 use anyhow::{Context, Result, bail};
 use tokio::net::TcpStream;
 use windows::Win32::Networking::WinSock::{
-    AF_INET, IPPROTO_TCP, SOCK_STREAM, WSA_FLAG_OVERLAPPED, WSAPROTOCOL_INFOW, WSASocketW,
-    WSAStartup, WSADATA,
+    AF_INET, IPPROTO_TCP, SOCK_STREAM, WSA_FLAG_OVERLAPPED, WSADATA, WSAPROTOCOL_INFOW, WSASocketW,
+    WSAStartup,
 };
 
 /// Rebuilds the connected socket from the opaque `WSAPROTOCOL_INFO` blob the
@@ -66,6 +66,8 @@ pub fn reconstruct_tcp(blob: &[u8]) -> Result<TcpStream> {
     use std::os::windows::io::FromRawSocket;
     // SAFETY: `socket` is a live, connected socket owned by this process.
     let std_stream = unsafe { std::net::TcpStream::from_raw_socket(socket.0 as u64) };
-    std_stream.set_nonblocking(true).context("set_nonblocking")?;
+    std_stream
+        .set_nonblocking(true)
+        .context("set_nonblocking")?;
     TcpStream::from_std(std_stream).context("tokio TcpStream from std")
 }

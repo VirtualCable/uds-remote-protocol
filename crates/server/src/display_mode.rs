@@ -112,8 +112,8 @@ mod stub {
 mod win {
     use super::ResolutionPolicy;
     use windows::Win32::Graphics::Gdi::{
-        CDS_FULLSCREEN, ChangeDisplaySettingsExW, DEVMODE_FIELD_FLAGS, DEVMODEW, DM_BITSPERPEL,
-        DM_PELSHEIGHT, DM_PELSWIDTH, DISP_CHANGE_SUCCESSFUL, ENUM_CURRENT_SETTINGS,
+        CDS_FULLSCREEN, ChangeDisplaySettingsExW, DEVMODE_FIELD_FLAGS, DEVMODEW,
+        DISP_CHANGE_SUCCESSFUL, DM_BITSPERPEL, DM_PELSHEIGHT, DM_PELSWIDTH, ENUM_CURRENT_SETTINGS,
         ENUM_DISPLAY_SETTINGS_FLAGS, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsExW,
     };
     use windows::core::PCWSTR;
@@ -171,7 +171,13 @@ mod win {
     fn set_mode(mode: &DEVMODEW) -> bool {
         // SAFETY: `mode` is a valid, correctly sized struct.
         let result = unsafe {
-            ChangeDisplaySettingsExW(PCWSTR::null(), Some(&raw const *mode), None, CDS_FULLSCREEN, None)
+            ChangeDisplaySettingsExW(
+                PCWSTR::null(),
+                Some(&raw const *mode),
+                None,
+                CDS_FULLSCREEN,
+                None,
+            )
         };
         result == DISP_CHANGE_SUCCESSFUL
     }
@@ -180,7 +186,10 @@ mod win {
         /// Creates a guard with nothing applied yet.
         #[must_use]
         pub fn new() -> Self {
-            Self { original: None, applied: None }
+            Self {
+                original: None,
+                applied: None,
+            }
         }
 
         /// Applies the policy to the primary display. Returns true when the

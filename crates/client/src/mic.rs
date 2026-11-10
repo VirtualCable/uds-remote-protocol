@@ -86,7 +86,6 @@ impl MicSource for ToneSource {
     }
 }
 
-
 /// Client-side mic entry point: created from the CLI mode, started when the
 /// server announces audio-in support, drained by the session loop.
 pub struct MicClient {
@@ -127,7 +126,10 @@ impl MicClient {
             return;
         }
         let Some(codec_type) = AudioCodecType::from_wire_id(spec.codec) else {
-            warn!(codec = spec.codec, "unknown audio-in codec id; mic disabled");
+            warn!(
+                codec = spec.codec,
+                "unknown audio-in codec id; mic disabled"
+            );
             return;
         };
         let preset = AudioPreset {
@@ -164,7 +166,16 @@ impl MicClient {
         let (tx, rx) = mpsc::channel(8);
         let frame_time = Duration::from_millis(u64::from(preset.frame_ms));
         let clock_start = self.clock_start;
-        std::thread::spawn(move || run(source, &mut *encoder, &tx, frame_samples, frame_time, clock_start));
+        std::thread::spawn(move || {
+            run(
+                source,
+                &mut *encoder,
+                &tx,
+                frame_samples,
+                frame_time,
+                clock_start,
+            )
+        });
         info!(
             sample_rate = spec.sample_rate,
             channels = spec.channels,
@@ -273,7 +284,10 @@ mod tests {
         let mut buf = vec![0i16; 960];
         src.fill_frame(&mut buf).unwrap();
         assert!(buf.iter().any(|&s| s != 0), "not silence");
-        assert!(src.fill_frame(&mut [0i16; 100]).is_err(), "wrong size is an error");
+        assert!(
+            src.fill_frame(&mut [0i16; 100]).is_err(),
+            "wrong size is an error"
+        );
     }
 
     /// The test tone must be the requested frequency (rising zero crossings
@@ -339,7 +353,9 @@ mod tests {
             fec: true,
         });
         assert!(mic.rx.is_some(), "tone mode needs no device");
-        let mut decoder = codec::build_audio_decoder(&codec::AudioPreset::by_name("opus-voice").unwrap()).unwrap();
+        let mut decoder =
+            codec::build_audio_decoder(&codec::AudioPreset::by_name("opus-voice").unwrap())
+                .unwrap();
         let mut pcm = vec![0i16; 960];
         let mut prev_seq = None;
         for _ in 0..5 {

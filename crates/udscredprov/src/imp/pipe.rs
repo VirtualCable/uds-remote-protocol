@@ -115,7 +115,10 @@ pub fn send_response(pipe: &SharedPipe, response: &Response) {
             pipe.lock().unwrap().take();
         }
     } else {
-        debug_dev!("No pipe connection; dropping response {:?}", kind_of(response));
+        debug_dev!(
+            "No pipe connection; dropping response {:?}",
+            kind_of(response)
+        );
     }
 }
 

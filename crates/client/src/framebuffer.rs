@@ -161,13 +161,37 @@ mod tests {
         f.data[4] = 0x02;
         buf.write_frame(&f);
         let mut out = Vec::new();
-        buf.copy_rect_to(Rect { x: 1, y: 0, w: 5, h: 1 }, &mut out);
+        buf.copy_rect_to(
+            Rect {
+                x: 1,
+                y: 0,
+                w: 5,
+                h: 1,
+            },
+            &mut out,
+        );
         assert_eq!(out, &[0x02, 0, 0, 0]);
         out.clear();
-        buf.copy_rect_to(Rect { x: -1, y: 0, w: 2, h: 1 }, &mut out);
+        buf.copy_rect_to(
+            Rect {
+                x: -1,
+                y: 0,
+                w: 2,
+                h: 1,
+            },
+            &mut out,
+        );
         assert_eq!(out, &[0x01, 0, 0, 0]);
         out.clear();
-        buf.copy_rect_to(Rect { x: 0, y: 3, w: 1, h: 1 }, &mut out);
+        buf.copy_rect_to(
+            Rect {
+                x: 0,
+                y: 3,
+                w: 1,
+                h: 1,
+            },
+            &mut out,
+        );
         assert!(out.is_empty(), "expected no copied samples, got {out:?}");
     }
 

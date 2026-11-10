@@ -9,7 +9,9 @@
 //! If any fragment is missing, the whole frame is dropped — a half frame
 //! never reaches the decoder.
 
-use protocol::fragment::{Fragmenter, HEADER_SIZE, ReassembledFrame, Reassembler, fragment_payload_max};
+use protocol::fragment::{
+    Fragmenter, HEADER_SIZE, ReassembledFrame, Reassembler, fragment_payload_max,
+};
 use protocol::{ProtocolError, channel};
 
 fn element(size: usize) -> Vec<u8> {
@@ -64,7 +66,10 @@ fn large_element_roundtrip() {
     }
     let frame = out.unwrap();
     assert_eq!(frame.data, data);
-    assert_eq!(frame.capture_ts_ms, 500, "ts survives multi-fragment reassembly");
+    assert_eq!(
+        frame.capture_ts_ms, 500,
+        "ts survives multi-fragment reassembly"
+    );
 }
 
 #[test]
@@ -154,10 +159,7 @@ fn evicted_incomplete_frames_are_counted() {
 #[test]
 fn garbage_fragment_is_rejected() {
     let mut rx = Reassembler::new();
-    assert!(matches!(
-        rx.push(&[0u8; 4]),
-        Err(ProtocolError::Truncated)
-    ));
+    assert!(matches!(rx.push(&[0u8; 4]), Err(ProtocolError::Truncated)));
     // frag_idx >= frag_count is inconsistent.
     let bad = Fragmenter::split(0, 5, 0, &element(100))[0].clone();
     let mut bad = bad;

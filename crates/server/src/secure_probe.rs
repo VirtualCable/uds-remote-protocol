@@ -112,7 +112,10 @@ fn run(log_path: &Path) -> ExitCode {
                     last_name = name.clone();
                 }
                 if name != "Default" {
-                    log_line(&mut log, "secure desktop active; exercising capture + input");
+                    log_line(
+                        &mut log,
+                        "secure desktop active; exercising capture + input",
+                    );
                     exercise(&mut log, log_path, hdesk);
                     log_line(&mut log, "PROBE DONE");
                     return ExitCode::SUCCESS;
@@ -220,8 +223,10 @@ fn spawn_child_on_secure_desktop(log: &mut std::fs::File, log_path: &Path) {
     .encode_utf16()
     .chain(std::iter::once(0))
     .collect();
-    let mut desktop: Vec<u16> =
-        "winsta0\\Winlogon".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut desktop: Vec<u16> = "winsta0\\Winlogon"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let startup = STARTUPINFOW {
         cb: u32::try_from(size_of::<STARTUPINFOW>()).expect("struct fits in u32"),
         lpDesktop: PWSTR(desktop.as_mut_ptr()),
@@ -247,7 +252,13 @@ fn spawn_child_on_secure_desktop(log: &mut std::fs::File, log_path: &Path) {
     };
     match created {
         Ok(()) => {
-            log_line(log, &format!("child spawned on winsta0\\Winlogon pid={}", info.dwProcessId));
+            log_line(
+                log,
+                &format!(
+                    "child spawned on winsta0\\Winlogon pid={}",
+                    info.dwProcessId
+                ),
+            );
             // SAFETY: valid process handle; bounded wait.
             let waited = unsafe { WaitForSingleObject(info.hProcess, 15_000) };
             log_line(log, &format!("child wait result: {waited:?}"));
@@ -348,10 +359,9 @@ fn capture_from_dc(screen: HDC) -> windows::core::Result<(i32, i32, Vec<u8>)> {
         let _ = DeleteDC(mem);
     }
     if lines != height {
-        return Err(std::io::Error::other(format!(
-            "GetDIBits copied {lines}/{height} lines"
-        ))
-        .into());
+        return Err(
+            std::io::Error::other(format!("GetDIBits copied {lines}/{height} lines")).into(),
+        );
     }
     Ok((width, height, pixels))
 }

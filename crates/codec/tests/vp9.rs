@@ -12,7 +12,7 @@
 #![cfg(feature = "codec-vp9")]
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)] // test pattern math
 
-use codec::{Vp9Decoder, Vp9Encoder, VideoDecoder, VideoEncoder, VideoFrame};
+use codec::{VideoDecoder, VideoEncoder, VideoFrame, Vp9Decoder, Vp9Encoder};
 
 fn gradient_frame(width: u32, height: u32) -> Vec<u8> {
     let mut data = vec![0u8; (width * height * 4) as usize];
@@ -50,7 +50,11 @@ fn vp9_roundtrip_preserves_geometry_and_rough_color() {
 
     // Lossy + color conversion: compare averages with generous tolerance.
     let avg = |d: &[u8], c: usize| -> f64 {
-        d.iter().skip(c).step_by(4).map(|&v| f64::from(v)).sum::<f64>()
+        d.iter()
+            .skip(c)
+            .step_by(4)
+            .map(|&v| f64::from(v))
+            .sum::<f64>()
             / (d.len() / 4) as f64
     };
     for c in 0..3 {

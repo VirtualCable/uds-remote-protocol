@@ -12,10 +12,10 @@
 use anyhow::{Context, Result};
 use tracing::info;
 use windows::Win32::System::Services::{
-    CloseServiceHandle, CreateServiceW, DeleteService, OpenSCManagerW, OpenServiceW,
-    SC_ACTION, SC_HANDLE, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
-    SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_ERROR_NORMAL, SERVICE_FAILURE_ACTIONSW,
-    SERVICE_WIN32_OWN_PROCESS, ChangeServiceConfig2W,
+    ChangeServiceConfig2W, CloseServiceHandle, CreateServiceW, DeleteService, OpenSCManagerW,
+    OpenServiceW, SC_ACTION, SC_HANDLE, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS,
+    SERVICE_AUTO_START, SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_ERROR_NORMAL,
+    SERVICE_FAILURE_ACTIONSW, SERVICE_WIN32_OWN_PROCESS,
 };
 use windows::core::HSTRING;
 
@@ -75,13 +75,10 @@ pub fn install() -> Result<()> {
 /// stop, up to three attempts, resetting the failure counter after a day
 /// without failures.
 fn set_failure_actions(service: SC_HANDLE) -> Result<()> {
-    let mut actions = [
-        SC_ACTION {
-            Type: windows::Win32::System::Services::SC_ACTION_RESTART,
-            Delay: 5000,
-        };
-        3
-    ];
+    let mut actions = [SC_ACTION {
+        Type: windows::Win32::System::Services::SC_ACTION_RESTART,
+        Delay: 5000,
+    }; 3];
     let failure_actions = SERVICE_FAILURE_ACTIONSW {
         dwResetPeriod: 86400,
         lpRebootMsg: windows::core::PWSTR::null(),

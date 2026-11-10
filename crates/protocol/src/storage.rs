@@ -90,7 +90,11 @@ pub fn validate_name(name: &str) -> Result<(), StorageError> {
         && name
             .chars()
             .all(|c| !c.is_control() && c != '/' && c != '\\' && c != ':');
-    if ok { Ok(()) } else { Err(StorageError::BadName) }
+    if ok {
+        Ok(())
+    } else {
+        Err(StorageError::BadName)
+    }
 }
 
 /// Errors decoding storage messages.
@@ -212,7 +216,11 @@ pub enum StorageMessage {
 /// Encodes a leaf name: `u16` length + UTF-8 bytes.
 fn encode_name(out: &mut Vec<u8>, name: &str) {
     // Validated names fit (≤ MAX_NAME_LEN); clamp defensively on encode.
-    out.extend_from_slice(&u16::try_from(name.len()).unwrap_or(MAX_NAME_LEN).to_be_bytes());
+    out.extend_from_slice(
+        &u16::try_from(name.len())
+            .unwrap_or(MAX_NAME_LEN)
+            .to_be_bytes(),
+    );
     out.extend_from_slice(name.as_bytes());
 }
 
@@ -455,8 +463,8 @@ impl StorageMessage {
                     return Err(StorageError::ErrorMsgTooLong);
                 }
                 let raw = rest.get(10..10 + msg_len).ok_or(StorageError::Truncated)?;
-                let message = String::from_utf8(raw.to_vec())
-                    .map_err(|_| StorageError::ErrorMsgTooLong)?;
+                let message =
+                    String::from_utf8(raw.to_vec()).map_err(|_| StorageError::ErrorMsgTooLong)?;
                 Ok(Self::Error {
                     transfer_id,
                     code,
@@ -574,10 +582,7 @@ mod tests {
         // Name longer than the cap.
         let mut buf = vec![TAG_LIST_ENTRY];
         buf.extend_from_slice(&(MAX_NAME_LEN + 1).to_be_bytes());
-        assert_eq!(
-            StorageMessage::decode(&buf),
-            Err(StorageError::BadName)
-        );
+        assert_eq!(StorageMessage::decode(&buf), Err(StorageError::BadName));
         // Path traversal inside an otherwise well-formed entry.
         let mut buf = vec![TAG_LIST_ENTRY];
         let name = "../evil".as_bytes();

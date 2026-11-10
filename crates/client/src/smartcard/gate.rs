@@ -130,7 +130,10 @@ impl<T> TransactionGate<T> {
 
     /// Oldest parked operation that can run now, if any.
     pub fn next_runnable(&mut self) -> Option<(GateOp, u64, u64, T)> {
-        let index = self.parked.iter().position(|p| !self.must_wait(p.op, p.card))?;
+        let index = self
+            .parked
+            .iter()
+            .position(|p| !self.must_wait(p.op, p.card))?;
         self.parked
             .remove(index)
             .map(|p| (p.op, p.card, p.context, p.item))
@@ -323,7 +326,13 @@ mod tests {
         begin(&mut gate, CARD_A, CTX_A);
         gate.on_completed(GateOp::Disconnect, CARD_A, CTX_A, 0x8010_0001, now());
         assert_eq!(gate.owner_card(), Some(CARD_A));
-        gate.on_completed(GateOp::Disconnect, CARD_A, CTX_A, SCARD_E_INVALID_HANDLE, now());
+        gate.on_completed(
+            GateOp::Disconnect,
+            CARD_A,
+            CTX_A,
+            SCARD_E_INVALID_HANDLE,
+            now(),
+        );
         assert_eq!(gate.owner_card(), None);
     }
 
@@ -412,7 +421,13 @@ mod tests {
         let mut gate: TransactionGate<u32> = TransactionGate::new();
         let start = Instant::now();
         gate.on_completed(GateOp::Begin, CARD_A, CTX_A, OK, start);
-        gate.on_completed(GateOp::Other, CARD_B, CTX_B, OK, start + Duration::from_secs(4));
+        gate.on_completed(
+            GateOp::Other,
+            CARD_B,
+            CTX_B,
+            OK,
+            start + Duration::from_secs(4),
+        );
         assert_eq!(
             gate.expire_idle(start + TRANSACTION_IDLE_TIMEOUT + Duration::from_millis(1)),
             Some(CARD_A)

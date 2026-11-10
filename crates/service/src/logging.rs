@@ -30,7 +30,10 @@ impl LogFile {
 
 impl io::Write for &LogFile {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut guard = self.writer.lock().map_err(|_| io::Error::other("log lock"))?;
+        let mut guard = self
+            .writer
+            .lock()
+            .map_err(|_| io::Error::other("log lock"))?;
         if guard.is_none() {
             *guard = open_log().ok().flatten();
         }
@@ -41,7 +44,10 @@ impl io::Write for &LogFile {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut guard = self.writer.lock().map_err(|_| io::Error::other("log lock"))?;
+        let mut guard = self
+            .writer
+            .lock()
+            .map_err(|_| io::Error::other("log lock"))?;
         if let Some(file) = guard.as_mut() {
             file.flush()?;
         }
@@ -52,7 +58,11 @@ impl io::Write for &LogFile {
 fn open_log() -> io::Result<Option<fs::File>> {
     fs::create_dir_all(STATE_DIR)?;
     let path = PathBuf::from(STATE_DIR).join("service.log");
-    OpenOptions::new().create(true).append(true).open(path).map(Some)
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map(Some)
 }
 
 /// Install the global tracing subscriber writing to the service log file.

@@ -12,8 +12,12 @@
 #[cfg(windows)]
 mod imp {
     use windows::Win32::Media::DirectShow::{ICaptureGraphBuilder2, IGraphBuilder, IMediaControl};
-    use windows::Win32::Media::MediaFoundation::{CLSID_CaptureGraphBuilder2, CLSID_FilterGraph, PIN_CATEGORY_CAPTURE};
-    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx};
+    use windows::Win32::Media::MediaFoundation::{
+        CLSID_CaptureGraphBuilder2, CLSID_FilterGraph, PIN_CATEGORY_CAPTURE,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+    };
     use windows::core::GUID;
 
     /// CLSID of the "UDS Webcam" filter (crates/vcam/src/globals.rs).
@@ -24,39 +28,52 @@ mod imp {
     const MEDIATYPE_VIDEO: GUID = GUID::from_u128(0x73646976_0000_0010_8000_00aa00389b71);
 
     pub fn run() -> anyhow::Result<()> {
-    use anyhow::Context as _;
-    unsafe {
-        CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
-        let graph: IGraphBuilder =
-            CoCreateInstance(&CLSID_FilterGraph, None, CLSCTX_INPROC_SERVER).context("FilterGraph")?;
-        let builder: ICaptureGraphBuilder2 =
-            CoCreateInstance(&CLSID_CaptureGraphBuilder2, None, CLSCTX_INPROC_SERVER)
-                .context("CaptureGraphBuilder2")?;
-        builder.SetFiltergraph(&graph).context("SetFiltergraph")?;
+        use anyhow::Context as _;
+        unsafe {
+            CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+            let graph: IGraphBuilder =
+                CoCreateInstance(&CLSID_FilterGraph, None, CLSCTX_INPROC_SERVER)
+                    .context("FilterGraph")?;
+            let builder: ICaptureGraphBuilder2 =
+                CoCreateInstance(&CLSID_CaptureGraphBuilder2, None, CLSCTX_INPROC_SERVER)
+                    .context("CaptureGraphBuilder2")?;
+            builder.SetFiltergraph(&graph).context("SetFiltergraph")?;
 
-        let cam: windows::Win32::Media::DirectShow::IBaseFilter =
-            CoCreateInstance(&CLSID_UDS_VCAM, None, CLSCTX_INPROC_SERVER)
-                .context("CoCreateInstance(UDS Webcam) — is vcam.dll registered?")?;
-        graph.AddFilter(&cam, &windows::core::HSTRING::from("UDS Webcam")).context("AddFilter(cam)")?;
+            let cam: windows::Win32::Media::DirectShow::IBaseFilter =
+                CoCreateInstance(&CLSID_UDS_VCAM, None, CLSCTX_INPROC_SERVER)
+                    .context("CoCreateInstance(UDS Webcam) — is vcam.dll registered?")?;
+            graph
+                .AddFilter(&cam, &windows::core::HSTRING::from("UDS Webcam"))
+                .context("AddFilter(cam)")?;
 
-        let null: windows::Win32::Media::DirectShow::IBaseFilter =
-            CoCreateInstance(&CLSID_NULL_RENDERER, None, CLSCTX_INPROC_SERVER).context("NullRenderer")?;
-        graph.AddFilter(&null, &windows::core::HSTRING::from("Null")).context("AddFilter(null)")?;
+            let null: windows::Win32::Media::DirectShow::IBaseFilter =
+                CoCreateInstance(&CLSID_NULL_RENDERER, None, CLSCTX_INPROC_SERVER)
+                    .context("NullRenderer")?;
+            graph
+                .AddFilter(&null, &windows::core::HSTRING::from("Null"))
+                .context("AddFilter(null)")?;
 
-        println!("rendering stream...");
-        builder
-            .RenderStream(Some(&PIN_CATEGORY_CAPTURE), &MEDIATYPE_VIDEO, &cam, None, &null)
-            .context("RenderStream")?;
-        println!("stream connected");
+            println!("rendering stream...");
+            builder
+                .RenderStream(
+                    Some(&PIN_CATEGORY_CAPTURE),
+                    &MEDIATYPE_VIDEO,
+                    &cam,
+                    None,
+                    &null,
+                )
+                .context("RenderStream")?;
+            println!("stream connected");
 
-        let control: IMediaControl = windows::core::Interface::cast(&graph).context("IMediaControl")?;
-        control.Run().context("Run")?;
-        println!("running 5s (frames land in vcam.log as 'stream: first sample')...");
-        std::thread::sleep(std::time::Duration::from_secs(5));
-        control.Stop().context("Stop")?;
-    }
-    println!("PROBE-OK");
-    Ok(())
+            let control: IMediaControl =
+                windows::core::Interface::cast(&graph).context("IMediaControl")?;
+            control.Run().context("Run")?;
+            println!("running 5s (frames land in vcam.log as 'stream: first sample')...");
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            control.Stop().context("Stop")?;
+        }
+        println!("PROBE-OK");
+        Ok(())
     }
 }
 

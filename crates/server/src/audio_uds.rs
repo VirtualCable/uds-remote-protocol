@@ -109,7 +109,10 @@ fn reader_loop(shared: &Shared, out_rate: u32, out_channels: u8) -> anyhow::Resu
                 .chunks_exact(2)
                 .map(|b| i16::from_le_bytes([b[0], b[1]]))
                 .collect();
-            let mut ring = shared.ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ring = shared
+                .ring
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             ring.push(&samples);
         }
         std::thread::sleep(POLL_INTERVAL);
@@ -259,7 +262,11 @@ impl AudioSource for UdsLoopbackSource {
             out.len()
         );
         let missing = {
-            let mut ring = self.shared.ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut ring = self
+                .shared
+                .ring
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             ring.fill(out)
         };
         if missing > 0 {

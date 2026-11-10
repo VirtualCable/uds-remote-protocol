@@ -122,7 +122,10 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<(u8, Vec<u8>)> {
     let tag = hdr[0];
     let len = u32::from_le_bytes(hdr[1..5].try_into().expect("4 bytes")) as usize;
     if len > MAX_PAYLOAD {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
     }
     let mut payload = vec![0u8; len];
     r.read_exact(&mut payload)?;
@@ -163,7 +166,10 @@ mod tests {
             Command::parse(CMD_INJECT_CARD, vec![0x3B, 0x00]),
             Some(Command::InjectCard(vec![0x3B, 0x00]))
         );
-        assert_eq!(Command::parse(CMD_EJECT_CARD, vec![]), Some(Command::EjectCard));
+        assert_eq!(
+            Command::parse(CMD_EJECT_CARD, vec![]),
+            Some(Command::EjectCard)
+        );
         assert_eq!(Command::parse(0xEE, vec![]), None);
     }
 

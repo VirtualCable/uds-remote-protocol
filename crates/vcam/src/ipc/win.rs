@@ -18,12 +18,14 @@ use windows::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_ALL_ACCESS, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
     PAGE_READWRITE, UnmapViewOfFile,
 };
-use windows::Win32::System::Threading::{CreateEventW, OpenEventW, SetEvent, SYNCHRONIZATION_ACCESS_RIGHTS};
+use windows::Win32::System::Threading::{
+    CreateEventW, OpenEventW, SYNCHRONIZATION_ACCESS_RIGHTS, SetEvent,
+};
 use windows::core::HSTRING;
 
 use super::{
-    CamHeader, EVENT_NAME, MAGIC, MAPPING_BYTES, MAPPING_NAME, MAX_FRAME_BYTES, VERSION, frame_slot,
-    header_seq,
+    CamHeader, EVENT_NAME, MAGIC, MAPPING_BYTES, MAPPING_NAME, MAX_FRAME_BYTES, VERSION,
+    frame_slot, header_seq,
 };
 
 /// `EVENT_MODIFY_STATE`, needed to signal the frame-ready event.
@@ -79,7 +81,11 @@ impl CamSharedWriter {
                 hdr.reserved = [0; 9];
                 header_seq(base_ptr).store(0, Ordering::Release);
             }
-            Ok(Self { mapping, event, base })
+            Ok(Self {
+                mapping,
+                event,
+                base,
+            })
         }
     }
 
@@ -176,7 +182,11 @@ impl CamSharedReader {
                 hdr.height = 0;
                 header_seq(base_ptr).store(0, Ordering::Release);
             }
-            Ok(Self { mapping, event, base })
+            Ok(Self {
+                mapping,
+                event,
+                base,
+            })
         }
     }
 
@@ -191,7 +201,8 @@ impl CamSharedReader {
     pub fn current_dims(&self) -> Option<(u32, u32)> {
         unsafe {
             let hdr = base_ptr_header(self.base.Value.cast::<u8>());
-            (hdr.magic == MAGIC && hdr.width > 0 && hdr.height > 0).then_some((hdr.width, hdr.height))
+            (hdr.magic == MAGIC && hdr.width > 0 && hdr.height > 0)
+                .then_some((hdr.width, hdr.height))
         }
     }
 

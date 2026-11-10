@@ -33,7 +33,9 @@ use aes_gcm::aead::{Aead as _, KeyInit as _};
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose};
 use hkdf::Hkdf;
-use libcrux_ml_kem::mlkem768::{MlKem768Ciphertext, MlKem768PrivateKey, decapsulate, generate_key_pair};
+use libcrux_ml_kem::mlkem768::{
+    MlKem768Ciphertext, MlKem768PrivateKey, decapsulate, generate_key_pair,
+};
 use sha2::Sha256;
 use tracing::warn;
 
@@ -120,7 +122,10 @@ impl PqProvider {
             .await
             .context("broker request failed")?;
         let status = response.status();
-        let text = response.text().await.context("reading the broker response")?;
+        let text = response
+            .text()
+            .await
+            .context("reading the broker response")?;
         if !status.is_success() {
             bail!("broker answered HTTP {status}");
         }
@@ -131,11 +136,18 @@ impl PqProvider {
         {
             bail!("broker denied the request: {error}");
         }
-        Ok(envelope.get("result").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(envelope
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     /// Decrypts a KEM-encrypted ticket response with our private key.
-    fn decrypt_response(&self, ticket: &str, encrypted: &EncryptedTicketResponse) -> Result<BrokerTicketResponse> {
+    fn decrypt_response(
+        &self,
+        ticket: &str,
+        encrypted: &EncryptedTicketResponse,
+    ) -> Result<BrokerTicketResponse> {
         let kem_ciphertext: [u8; KEM_CIPHERTEXT_SIZE] = general_purpose::STANDARD
             .decode(&encrypted.ciphertext)
             .context("decoding the KEM ciphertext")?
@@ -155,7 +167,9 @@ impl PqProvider {
         let cipher = Aes256Gcm::new((&key).into());
         let plaintext = cipher
             .decrypt((&nonce).into(), data.as_ref())
-            .map_err(|_| anyhow::anyhow!("payload decryption failed (wrong ticket or tampered response)"))?;
+            .map_err(|_| {
+                anyhow::anyhow!("payload decryption failed (wrong ticket or tampered response)")
+            })?;
         serde_json::from_slice(&plaintext).context("decrypted payload is not a ticket response")
     }
 }
@@ -183,8 +197,8 @@ impl ConnectionProvider for PqProvider {
                 "kem_kyber_key": general_purpose::STANDARD.encode(self.kem_public_key),
             }))
             .await?;
-        let encrypted: EncryptedTicketResponse =
-            serde_json::from_value(result).context("broker response is not a KEM-encrypted payload")?;
+        let encrypted: EncryptedTicketResponse = serde_json::from_value(result)
+            .context("broker response is not a KEM-encrypted payload")?;
         let response = self.decrypt_response(&ticket, &encrypted)?;
 
         let key: [u8; 32] = protocol::hex::decode(&response.shared_secret)
@@ -277,7 +291,8 @@ mod tests {
         rand::rng().fill_bytes(&mut randomness);
         let public_key = MlKem768PublicKey::from(public_key);
         let (ciphertext, shared_secret) = encapsulate(&public_key, randomness);
-        let (key, nonce) = derive_payload_material(shared_secret.as_ref(), ticket.as_bytes()).unwrap();
+        let (key, nonce) =
+            derive_payload_material(shared_secret.as_ref(), ticket.as_bytes()).unwrap();
         let cipher = Aes256Gcm::new((&key).into());
         let data = cipher
             .encrypt(
@@ -296,8 +311,12 @@ mod tests {
     }
 
     fn provider() -> PqProvider {
-        PqProvider::new("https://broker.example.com/uds/rest/actor/v3/ticket/connection", "tok", false)
-            .unwrap()
+        PqProvider::new(
+            "https://broker.example.com/uds/rest/actor/v3/ticket/connection",
+            "tok",
+            false,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -317,7 +336,11 @@ mod tests {
             "shared_secret": "ab".repeat(32),
             "enable_udp": true,
         });
-        let encrypted = encrypt_response(&provider.kem_public_key, &ticket, plaintext.to_string().as_bytes());
+        let encrypted = encrypt_response(
+            &provider.kem_public_key,
+            &ticket,
+            plaintext.to_string().as_bytes(),
+        );
         let response = provider.decrypt_response(&ticket, &encrypted).unwrap();
         assert_eq!(response.notify, "notify-ticket");
         assert_eq!(response.shared_secret, "ab".repeat(32));

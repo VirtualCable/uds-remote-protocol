@@ -39,7 +39,11 @@ pub trait InputInjector {
 /// Dispatches one decoded message to the matching injector call.
 pub fn dispatch(injector: &mut dyn InputInjector, msg: &InputMessage) {
     match *msg {
-        InputMessage::Key { down, scancode, extended } => {
+        InputMessage::Key {
+            down,
+            scancode,
+            extended,
+        } => {
             // LWin is rare enough to log at info: diagnoses Win+L delivery
             // (the agent log runs at info level by default).
             if scancode == 0x5B && extended {
@@ -54,7 +58,11 @@ pub fn dispatch(injector: &mut dyn InputInjector, msg: &InputMessage) {
             injector.pointer_button(button, down);
         }
         InputMessage::PointerWheel { delta, hdelta } => injector.pointer_wheel(delta, hdelta),
-        InputMessage::SyncModifiers { caps_lock, num_lock, scroll_lock } => {
+        InputMessage::SyncModifiers {
+            caps_lock,
+            num_lock,
+            scroll_lock,
+        } => {
             injector.sync_modifiers(caps_lock, num_lock, scroll_lock);
         }
     }
@@ -103,10 +111,10 @@ mod win {
     use super::{InputInjector, PointerButton};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-        KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
-        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-        MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
-        MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
+        KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSE_EVENT_FLAGS, MOUSEEVENTF_ABSOLUTE,
+        MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+        MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
         SendInput, VIRTUAL_KEY,
     };
 
@@ -133,7 +141,10 @@ mod win {
         fn send(inputs: &[INPUT]) {
             // SAFETY: `inputs` is a valid slice; SendInput copies from it.
             unsafe {
-                let _ = SendInput(inputs, i32::try_from(std::mem::size_of::<INPUT>()).unwrap_or(0));
+                let _ = SendInput(
+                    inputs,
+                    i32::try_from(std::mem::size_of::<INPUT>()).unwrap_or(0),
+                );
             }
         }
 
@@ -208,10 +219,20 @@ mod win {
         fn pointer_wheel(&mut self, delta: i16, hdelta: i16) {
             let mut batch = Vec::with_capacity(2);
             if delta != 0 {
-                batch.push(Self::mouse(MOUSEEVENTF_WHEEL, (i32::from(delta) * 120).cast_unsigned(), 0, 0));
+                batch.push(Self::mouse(
+                    MOUSEEVENTF_WHEEL,
+                    (i32::from(delta) * 120).cast_unsigned(),
+                    0,
+                    0,
+                ));
             }
             if hdelta != 0 {
-                batch.push(Self::mouse(MOUSEEVENTF_HWHEEL, (i32::from(hdelta) * 120).cast_unsigned(), 0, 0));
+                batch.push(Self::mouse(
+                    MOUSEEVENTF_HWHEEL,
+                    (i32::from(hdelta) * 120).cast_unsigned(),
+                    0,
+                    0,
+                ));
             }
             Self::send(&batch);
         }
@@ -219,7 +240,12 @@ mod win {
         fn sync_modifiers(&mut self, caps_lock: bool, num_lock: bool, scroll_lock: bool) {
             // Phase 3 PoC: logged only; toggling keys remotely would need a
             // press/release pair per mismatched LED (§10).
-            tracing::debug!(caps_lock, num_lock, scroll_lock, "modifier sync (not injected)");
+            tracing::debug!(
+                caps_lock,
+                num_lock,
+                scroll_lock,
+                "modifier sync (not injected)"
+            );
         }
     }
 }

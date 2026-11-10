@@ -131,7 +131,9 @@ fn control_message_variants_roundtrip() {
             kind: 1,
             version: 1,
         },
-        ControlMessage::ChannelOpenAck { id: channel::DISPLAY },
+        ControlMessage::ChannelOpenAck {
+            id: channel::DISPLAY,
+        },
         ControlMessage::UnsupportedChannel { id: 0x0100 },
         ControlMessage::UdpOffer {
             port: 19790,

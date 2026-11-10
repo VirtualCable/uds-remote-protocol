@@ -55,7 +55,11 @@ pub fn set_instance(h: HINSTANCE) {
 
 /// Returns the stored module instance.
 pub fn get_instance() -> HINSTANCE {
-    DLL_INSTANCE.get().copied().unwrap_or(SafeHInstance(HINSTANCE::default())).0
+    DLL_INSTANCE
+        .get()
+        .copied()
+        .unwrap_or(SafeHInstance(HINSTANCE::default()))
+        .0
 }
 
 /// Increments the global DLL reference count.

@@ -375,7 +375,11 @@ pub enum SmartcardMessage {
 // `SmartcardError` only covers local decode problems.
 
 fn encode_str(out: &mut Vec<u8>, s: &str) {
-    out.extend_from_slice(&u16::try_from(s.len()).unwrap_or(MAX_READER_NAME_LEN).to_be_bytes());
+    out.extend_from_slice(
+        &u16::try_from(s.len())
+            .unwrap_or(MAX_READER_NAME_LEN)
+            .to_be_bytes(),
+    );
     out.extend_from_slice(s.as_bytes());
 }
 
@@ -412,7 +416,11 @@ fn decode_bytes_u32(buf: &[u8], cap: u32) -> Result<Vec<u8>, SmartcardError> {
 }
 
 fn encode_atr(out: &mut Vec<u8>, atr: &[u8]) {
-    out.extend_from_slice(&u16::try_from(atr.len()).unwrap_or(MAX_ATR_LEN).to_be_bytes());
+    out.extend_from_slice(
+        &u16::try_from(atr.len())
+            .unwrap_or(MAX_ATR_LEN)
+            .to_be_bytes(),
+    );
     out.extend_from_slice(atr);
 }
 
@@ -458,7 +466,11 @@ fn decode_state(buf: &[u8]) -> Result<(ReaderState, usize), SmartcardError> {
 }
 
 fn encode_states(out: &mut Vec<u8>, states: &[ReaderState]) {
-    out.extend_from_slice(&u16::try_from(states.len()).unwrap_or(MAX_STATES).to_be_bytes());
+    out.extend_from_slice(
+        &u16::try_from(states.len())
+            .unwrap_or(MAX_STATES)
+            .to_be_bytes(),
+    );
     for s in states {
         encode_state(out, s);
     }
@@ -483,7 +495,11 @@ fn decode_states(buf: &[u8]) -> Result<Vec<ReaderState>, SmartcardError> {
 }
 
 fn encode_readers(out: &mut Vec<u8>, readers: &[String]) {
-    out.extend_from_slice(&u16::try_from(readers.len()).unwrap_or(MAX_READERS).to_be_bytes());
+    out.extend_from_slice(
+        &u16::try_from(readers.len())
+            .unwrap_or(MAX_READERS)
+            .to_be_bytes(),
+    );
     for r in readers {
         encode_str(out, r);
     }
@@ -601,21 +617,31 @@ impl SmartcardMessage {
     }
 
     /// Encodes the message, appending to `out` (allows batching).
-    #[expect(clippy::too_many_lines, reason = "flat per-variant encoder, like storage")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "flat per-variant encoder, like storage"
+    )]
     pub fn encode_into(&self, out: &mut Vec<u8>) {
-        let id = |out: &mut Vec<u8>, request_id: u32| out.extend_from_slice(&request_id.to_be_bytes());
+        let id =
+            |out: &mut Vec<u8>, request_id: u32| out.extend_from_slice(&request_id.to_be_bytes());
         match self {
             Self::EstablishContext { request_id, scope } => {
                 out.push(TAG_ESTABLISH_CONTEXT);
                 id(out, *request_id);
                 out.extend_from_slice(&scope.to_be_bytes());
             }
-            Self::ContextEstablished { request_id, context } => {
+            Self::ContextEstablished {
+                request_id,
+                context,
+            } => {
                 out.push(TAG_CONTEXT_ESTABLISHED);
                 id(out, *request_id);
                 out.extend_from_slice(&context.to_be_bytes());
             }
-            Self::ReleaseContext { request_id, context } => {
+            Self::ReleaseContext {
+                request_id,
+                context,
+            } => {
                 out.push(TAG_RELEASE_CONTEXT);
                 id(out, *request_id);
                 out.extend_from_slice(&context.to_be_bytes());
@@ -634,12 +660,18 @@ impl SmartcardMessage {
                 });
                 id(out, *request_id);
             }
-            Self::ListReaders { request_id, context } => {
+            Self::ListReaders {
+                request_id,
+                context,
+            } => {
                 out.push(TAG_LIST_READERS);
                 id(out, *request_id);
                 out.extend_from_slice(&context.to_be_bytes());
             }
-            Self::Readers { request_id, readers } => {
+            Self::Readers {
+                request_id,
+                readers,
+            } => {
                 out.push(TAG_READERS);
                 id(out, *request_id);
                 encode_readers(out, readers);
@@ -661,7 +693,10 @@ impl SmartcardMessage {
                 id(out, *request_id);
                 encode_states(out, states);
             }
-            Self::Cancel { request_id, context } => {
+            Self::Cancel {
+                request_id,
+                context,
+            } => {
                 out.push(TAG_CANCEL);
                 id(out, *request_id);
                 out.extend_from_slice(&context.to_be_bytes());

@@ -222,7 +222,11 @@ fn current_user_sid() -> Result<Vec<u8>> {
         let token_user = &*buf.as_ptr().cast::<TOKEN_USER>();
         let sid_len = windows::Win32::Security::GetLengthSid(token_user.User.Sid) as usize;
         let mut sid = vec![0u8; sid_len];
-        std::ptr::copy_nonoverlapping(token_user.User.Sid.0.cast::<u8>(), sid.as_mut_ptr(), sid_len);
+        std::ptr::copy_nonoverlapping(
+            token_user.User.Sid.0.cast::<u8>(),
+            sid.as_mut_ptr(),
+            sid_len,
+        );
         Ok(sid)
     }
 }
@@ -246,9 +250,13 @@ fn pipe_security() -> Result<PipeSecurity> {
         )
         .ok()
         .context("InitializeSecurityDescriptor failed")?;
-        InitializeAcl(acl.as_mut_ptr().cast::<ACL>(), acl.len() as u32, ACL_REVISION)
-            .ok()
-            .context("InitializeAcl failed")?;
+        InitializeAcl(
+            acl.as_mut_ptr().cast::<ACL>(),
+            acl.len() as u32,
+            ACL_REVISION,
+        )
+        .ok()
+        .context("InitializeAcl failed")?;
         let access = GENERIC_READ.0 | GENERIC_WRITE.0;
         AddAccessAllowedAce(
             acl.as_mut_ptr().cast::<ACL>(),
@@ -384,14 +392,7 @@ impl Pipe {
     fn send_request(&self, request: &Request) -> Result<()> {
         let frame = logic::encode_request(request)?;
         let mut overlapped = self.overlapped();
-        let result = unsafe {
-            WriteFile(
-                self.handle,
-                Some(&frame),
-                None,
-                Some(&mut overlapped),
-            )
-        };
+        let result = unsafe { WriteFile(self.handle, Some(&frame), None, Some(&mut overlapped)) };
         match result {
             Ok(()) => Ok(()),
             Err(e) if e.code() == windows::core::HRESULT::from_win32(ERROR_IO_PENDING.0) => {
@@ -415,9 +416,8 @@ impl Pipe {
                 return Ok(None);
             }
             let mut overlapped = self.overlapped();
-            let result = unsafe {
-                ReadFile(self.handle, Some(&mut buf), None, Some(&mut overlapped))
-            };
+            let result =
+                unsafe { ReadFile(self.handle, Some(&mut buf), None, Some(&mut overlapped)) };
             let read = match result {
                 Ok(()) => {
                     let mut transferred = 0u32;

@@ -152,7 +152,9 @@ impl Spool {
     pub fn pump(&mut self, max_chunks: usize) -> Vec<StorageMessage> {
         let mut out = Vec::new();
         for _ in 0..max_chunks {
-            let Some(dl) = self.downloads.front_mut() else { break };
+            let Some(dl) = self.downloads.front_mut() else {
+                break;
+            };
             if dl.offset >= dl.size {
                 let done = self.downloads.pop_front().expect("front checked");
                 info!(transfer_id = done.id, "download finished");
@@ -161,8 +163,9 @@ impl Spool {
                 });
                 continue;
             }
-            let want = usize::try_from((dl.size - dl.offset).min(protocol::STORAGE_CHUNK_SIZE as u64))
-                .unwrap_or(protocol::STORAGE_CHUNK_SIZE);
+            let want =
+                usize::try_from((dl.size - dl.offset).min(protocol::STORAGE_CHUNK_SIZE as u64))
+                    .unwrap_or(protocol::STORAGE_CHUNK_SIZE);
             let mut data = vec![0u8; want];
             match dl.file.read(&mut data) {
                 Ok(0) => {
@@ -472,7 +475,9 @@ mod tests {
         let mut expected = 0u64;
         for msg in chunks {
             match msg {
-                StorageMessage::GetChunk { offset, data: d, .. } => {
+                StorageMessage::GetChunk {
+                    offset, data: d, ..
+                } => {
                     assert_eq!(offset, expected);
                     expected += d.len() as u64;
                     data.extend_from_slice(&d);

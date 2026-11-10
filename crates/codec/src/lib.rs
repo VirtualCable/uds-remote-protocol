@@ -54,27 +54,27 @@ pub use audio::{
     build_audio_encoder,
 };
 pub use error::{CodecError, Result};
+#[cfg(feature = "codec-jpeg")]
+pub use jpeg_rects::{JpegRectsDecoder, JpegRectsEncoder};
 pub use ladder::{Ladder, LadderPolicy, Level, Switch};
 #[cfg(feature = "codec-ladder")]
 pub use ladder_encoder::LadderEncoder;
-#[cfg(feature = "codec-jpeg")]
-pub use jpeg_rects::{JpegRectsDecoder, JpegRectsEncoder};
-pub use preset::{CodecParams, CodecPreset, DEFAULT_BITRATE_KBPS, PRESETS, build_decoder};
-#[cfg(feature = "codec-h264")]
-pub use openh264::{OpenH264Decoder, h264_available};
 #[cfg(all(windows, feature = "codec-nvenc"))]
 pub use nvenc::{NvencEncoder, nvenc_available};
+#[cfg(feature = "codec-h264")]
+pub use openh264::{OpenH264Decoder, h264_available};
 #[cfg(feature = "codec-opus")]
 pub use opus::{OpusDecoder, OpusEncoder};
+pub use preset::{CodecParams, CodecPreset, DEFAULT_BITRATE_KBPS, PRESETS, build_decoder};
 pub use raw::{RawDecoder, RawEncoder};
 pub use video::{
     DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame,
     packet_is_keyframe,
 };
-#[cfg(feature = "codec-vp9")]
-pub use vpx::{Vp9Decoder, Vp9Encoder};
 #[cfg(feature = "codec-vp8")]
 pub use vpx::{Vp8Decoder, Vp8Encoder};
+#[cfg(feature = "codec-vp9")]
+pub use vpx::{Vp9Decoder, Vp9Encoder};
 
 /// True when this client can decode H.264: a hardware/OS decoder MFT on
 /// Windows, or the Cisco OpenH264 binary anywhere (§18.75.8). Drives the

@@ -104,8 +104,7 @@ impl Hello {
         out[10] = self.command as u8;
         out[11] = self.flags;
         out[12..12 + TICKET_LENGTH].copy_from_slice(&self.ticket);
-        out[12 + TICKET_LENGTH..14 + TICKET_LENGTH]
-            .copy_from_slice(&self.pref_width.to_be_bytes());
+        out[12 + TICKET_LENGTH..14 + TICKET_LENGTH].copy_from_slice(&self.pref_width.to_be_bytes());
         out[14 + TICKET_LENGTH..16 + TICKET_LENGTH]
             .copy_from_slice(&self.pref_height.to_be_bytes());
         out

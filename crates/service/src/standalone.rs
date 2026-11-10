@@ -123,7 +123,11 @@ fn load_pq(path: &std::path::Path, config: &server_config::ServerConfig) -> Opti
             return None;
         }
     };
-    let provider = match crate::broker::PqProvider::new(&broker_config.url, &broker_config.token, broker_config.verify_ssl) {
+    let provider = match crate::broker::PqProvider::new(
+        &broker_config.url,
+        &broker_config.token,
+        broker_config.verify_ssl,
+    ) {
         Ok(provider) => provider,
         Err(err) => {
             warn!(error = %format!("{err:#}"), path = %path.display(), "cannot build the broker provider; ignoring the config");
@@ -138,7 +142,10 @@ fn load_pq(path: &std::path::Path, config: &server_config::ServerConfig) -> Opti
 }
 
 /// Standalone (reference) mode from the `[standalone]` section.
-fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig) -> Option<StandaloneRuntime> {
+fn load_standalone(
+    path: &std::path::Path,
+    config: &server_config::ServerConfig,
+) -> Option<StandaloneRuntime> {
     let standalone = match &config.standalone {
         Some(standalone) if !standalone.ticket.is_empty() => standalone,
         _ => {
@@ -146,7 +153,8 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
             return None;
         }
     };
-    let key: [u8; protocol::service_ipc::KEY_LEN] = match protocol::hex::decode(&config.shared_key) {
+    let key: [u8; protocol::service_ipc::KEY_LEN] = match protocol::hex::decode(&config.shared_key)
+    {
         Ok(key) => key,
         Err(err) => {
             warn!(error = %format!("{err:#}"), path = %path.display(), "bad shared_key in the server config; ignoring it");
@@ -185,13 +193,10 @@ fn load_standalone(path: &std::path::Path, config: &server_config::ServerConfig)
         stats_csv: standalone.stats_csv.clone().unwrap_or_default(),
         cam_sink: standalone.cam_sink.clone().unwrap_or_default(),
         mic_sink: standalone.mic_sink.clone().unwrap_or_default(),
-        fixed_resolution: standalone
-            .resolution
-            .as_deref()
-            .and_then(|resolution| {
-                let (w, h) = resolution.split_once(['x', 'X'])?;
-                Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
-            }),
+        fixed_resolution: standalone.resolution.as_deref().and_then(|resolution| {
+            let (w, h) = resolution.split_once(['x', 'X'])?;
+            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        }),
         allow_lock: standalone.channels.lock,
         wallpaper_off: standalone.wallpaper_off,
         console_conflict: standalone.console_conflict,

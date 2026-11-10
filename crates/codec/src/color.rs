@@ -77,9 +77,14 @@ pub fn rgb24_to_bgra(rgb: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
 }
 
 /// Converts a BGRA frame (explicit stride, see [`VideoFrame`]) to I420.
-pub fn bgra_to_i420(frame: &VideoFrame<'_>) -> Result<I420Frame> {    let (width, height) = (frame.width as usize, frame.height as usize);
+pub fn bgra_to_i420(frame: &VideoFrame<'_>) -> Result<I420Frame> {
+    let (width, height) = (frame.width as usize, frame.height as usize);
     let row = width * 4;
-    if width == 0 || height == 0 || frame.stride < row || frame.data.len() < frame.stride * (height - 1) + row {
+    if width == 0
+        || height == 0
+        || frame.stride < row
+        || frame.data.len() < frame.stride * (height - 1) + row
+    {
         return Err(CodecError::BadDimensions {
             width: frame.width,
             height: frame.height,

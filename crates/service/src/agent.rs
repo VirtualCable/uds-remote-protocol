@@ -22,14 +22,15 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, HANDLE_FLAGS,
-    HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE,
+    HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation, WAIT_ABANDONED, WAIT_OBJECT_0,
+    WAIT_TIMEOUT,
 };
 use windows::Win32::Security::{
     ACL, ACL_REVISION, AddAccessAllowedAce, AdjustTokenPrivileges, CreateWellKnownSid,
     DuplicateTokenEx, InitializeAcl, InitializeSecurityDescriptor, LookupPrivilegeValueW,
-    PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SE_PRIVILEGE_ENABLED,
-    SE_TCB_NAME, SecurityImpersonation, SetSecurityDescriptorDacl, SetTokenInformation,
+    PSECURITY_DESCRIPTOR, PSID, SE_PRIVILEGE_ENABLED, SE_TCB_NAME, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SecurityImpersonation, SetSecurityDescriptorDacl, SetTokenInformation,
     TOKEN_ACCESS_MASK, TOKEN_ADJUST_PRIVILEGES, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY,
     TOKEN_DUPLICATE, TOKEN_PRIVILEGES, TOKEN_QUERY, TokenPrimary, TokenSessionId, WinWorldSid,
 };
@@ -37,18 +38,17 @@ use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_END, FILE_GENERIC_WRITE, FILE_SHARE_READ, OPEN_ALWAYS,
     SetFilePointerEx, WriteFile,
 };
-use windows::Win32::System::Pipes::CreatePipe;
+use windows::Win32::System::Diagnostics::ToolHelp::{
+    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
+};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
     SetInformationJobObject,
 };
+use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::RemoteDesktop::{
     ProcessIdToSessionId, WTSGetActiveConsoleSessionId, WTSQueryUserToken,
-};
-use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-    TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
     CREATE_NO_WINDOW, CreateEventW, CreateMutexW, CreateProcessAsUserW, EVENT_MODIFY_STATE,
@@ -123,13 +123,26 @@ impl Agent {
     /// the command line stays free of secrets, which any process in the
     /// session could otherwise read (M3). Credentials are also logged so the
     /// lab client can connect.
-    pub(crate) fn spawn_in_console_session(config: &protocol::service_ipc::AgentConfig) -> Result<Option<Self>> {
+    pub(crate) fn spawn_in_console_session(
+        config: &protocol::service_ipc::AgentConfig,
+    ) -> Result<Option<Self>> {
         let Some((agent, pipe_write)) = Self::spawn_process_in_console()? else {
             return Ok(None);
         };
-        write_all_and_close(&pipe_write, &protocol::service_ipc::encode_agent_config(config))?;
-        info!(session_id = agent.session_id, pid = agent.pid, "session agent spawned");
-        info!(key = protocol::hex::encode(&config.key), ticket = protocol::hex::encode(&config.ticket), "lab credentials (also piped to the agent)");
+        write_all_and_close(
+            &pipe_write,
+            &protocol::service_ipc::encode_agent_config(config),
+        )?;
+        info!(
+            session_id = agent.session_id,
+            pid = agent.pid,
+            "session agent spawned"
+        );
+        info!(
+            key = protocol::hex::encode(&config.key),
+            ticket = protocol::hex::encode(&config.ticket),
+            "lab credentials (also piped to the agent)"
+        );
         Ok(Some(agent))
     }
 
@@ -155,8 +168,10 @@ impl Agent {
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
-        let mut desktop: Vec<u16> =
-            "winsta0\\default".encode_utf16().chain(std::iter::once(0)).collect();
+        let mut desktop: Vec<u16> = "winsta0\\default"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         // Config pipe: the read end becomes the agent's stdin (inheritable);
         // we keep the write end and send the frame once the process exists.
         let (pipe_read, pipe_write) = create_inheritable_pipe()?;
@@ -243,8 +258,14 @@ impl Agent {
 
     /// Second half of the handoff spawn: sends the config frame (with the
     /// handoff block already filled in) down the agent's stdin pipe.
-    pub(crate) fn write_config(pipe_write: OwnedHandle, config: &protocol::service_ipc::AgentConfig) -> Result<()> {
-        write_all_and_close(&pipe_write, &protocol::service_ipc::encode_agent_config(config))
+    pub(crate) fn write_config(
+        pipe_write: OwnedHandle,
+        config: &protocol::service_ipc::AgentConfig,
+    ) -> Result<()> {
+        write_all_and_close(
+            &pipe_write,
+            &protocol::service_ipc::encode_agent_config(config),
+        )
     }
 
     /// Whether the agent process is still alive.
@@ -262,12 +283,16 @@ impl Agent {
             return true;
         }
         let name = HSTRING::from(SESSION_MUTEX);
-    // SAFETY: `name` is null-terminated and outlives the call. MODIFY_STATE
-    // is requested too because the wait below can ACQUIRE the mutex (when
-    // free or abandoned) and we then have to release it.
-    let handle = unsafe {
-        OpenMutexW(MUTEX_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE, false, &name)
-    };
+        // SAFETY: `name` is null-terminated and outlives the call. MODIFY_STATE
+        // is requested too because the wait below can ACQUIRE the mutex (when
+        // free or abandoned) and we then have to release it.
+        let handle = unsafe {
+            OpenMutexW(
+                MUTEX_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE,
+                false,
+                &name,
+            )
+        };
         let Ok(raw) = handle else {
             // No mutex at all past the grace period: the agent never got as
             // far as creating it — wedged.
@@ -404,7 +429,10 @@ pub(crate) fn spawn_probe_in_console() -> Result<Option<u32>> {
 /// the secure desktop can `SendInput` into it). The caller keeps the process
 /// handle for liveness/kill. Returns `Ok(None)` with no console session.
 pub(crate) fn spawn_secure_helper(session_id: u32) -> Result<Option<(u32, OwnedHandle)>> {
-    spawn_system_in_console(&format!("--secure-helper {session_id}"), "winsta0\\Winlogon")
+    spawn_system_in_console(
+        &format!("--secure-helper {session_id}"),
+        "winsta0\\Winlogon",
+    )
 }
 
 /// Shared SYSTEM-in-session spawn (§18.41): the token is a duplicate of the
@@ -454,7 +482,14 @@ fn spawn_system_in_console(args: &str, desktop: &str) -> Result<Option<(u32, Own
     // call. AdjustTokenPrivileges reports success even when a privilege was
     // not present in the token (ERROR_NOT_ALL_ASSIGNED) — check for it.
     unsafe {
-        AdjustTokenPrivileges(own_token.0, false, Some(&raw const privileges), 0, None, None)
+        AdjustTokenPrivileges(
+            own_token.0,
+            false,
+            Some(&raw const privileges),
+            0,
+            None,
+            None,
+        )
     }
     .context("AdjustTokenPrivileges(SeTcbPrivilege)")?;
     if unsafe { GetLastError() } == ERROR_NOT_ALL_ASSIGNED {
@@ -463,10 +498,7 @@ fn spawn_system_in_console(args: &str, desktop: &str) -> Result<Option<(u32, Own
 
     let mut dup_handle = HANDLE::default();
     let dup_access = TOKEN_ACCESS_MASK(
-        TOKEN_ASSIGN_PRIMARY.0
-            | TOKEN_DUPLICATE.0
-            | TOKEN_QUERY.0
-            | TOKEN_ADJUST_SESSIONID.0,
+        TOKEN_ASSIGN_PRIMARY.0 | TOKEN_DUPLICATE.0 | TOKEN_QUERY.0 | TOKEN_ADJUST_SESSIONID.0,
     );
     // SAFETY: `own_token` is open with DUPLICATE; the out pointer is valid.
     unsafe {
@@ -661,8 +693,12 @@ pub(crate) fn ensure_secure_event() -> Option<OwnedHandle> {
             windows::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION,
         )
         .is_ok()
-            && InitializeAcl(acl_buf.as_mut_ptr().cast::<ACL>(), acl_buf.len() as u32, ACL_REVISION)
-                .is_ok()
+            && InitializeAcl(
+                acl_buf.as_mut_ptr().cast::<ACL>(),
+                acl_buf.len() as u32,
+                ACL_REVISION,
+            )
+            .is_ok()
             && AddAccessAllowedAce(
                 acl_buf.as_mut_ptr().cast::<ACL>(),
                 ACL_REVISION,
@@ -687,7 +723,10 @@ pub(crate) fn ensure_secure_event() -> Option<OwnedHandle> {
         lpSecurityDescriptor: sec_desc.as_mut() as *mut _ as *mut core::ffi::c_void,
         bInheritHandle: BOOL(0),
     };
-    let name: Vec<u16> = SECURE_EVENT.encode_utf16().chain(std::iter::once(0)).collect();
+    let name: Vec<u16> = SECURE_EVENT
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // SAFETY: `attrs` points to a valid security descriptor; `name` is
     // null-terminated. Manual-reset, initially clear.
     match unsafe { CreateEventW(Some(&raw const attrs), true, false, PCWSTR(name.as_ptr())) } {
@@ -716,13 +755,19 @@ pub(crate) fn secure_event_set(event: &OwnedHandle) -> bool {
 /// both own the Winlogon secure desktop (§18.41).
 pub(crate) fn console_session_locked(session_id: u32) -> bool {
     use windows::Win32::System::RemoteDesktop::{
-        WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
+        WTSFreeMemory, WTSINFOEXW, WTSQuerySessionInformationW, WTSSessionInfoEx,
     };
     let mut buf = windows::core::PWSTR::null();
     let mut bytes = 0u32;
     // SAFETY: valid out-params; on success the buffer is freed below.
     let queried = unsafe {
-        WTSQuerySessionInformationW(None, session_id, WTSSessionInfoEx, &raw mut buf, &raw mut bytes)
+        WTSQuerySessionInformationW(
+            None,
+            session_id,
+            WTSSessionInfoEx,
+            &raw mut buf,
+            &raw mut bytes,
+        )
     };
     if queried.is_err() || buf.is_null() {
         return false;
@@ -757,7 +802,10 @@ pub(crate) fn maybe_arm_auto_unlock(
     }
     match std::fs::write(crate::credprov::ARM_PATH, "") {
         Ok(()) => {
-            info!(session_id, "console locked; credential provider re-armed for auto-unlock");
+            info!(
+                session_id,
+                "console locked; credential provider re-armed for auto-unlock"
+            );
         }
         Err(err) => warn!(error = %format!("{err:#}"), "cannot arm auto-unlock"),
     }
@@ -844,8 +892,12 @@ pub(crate) fn ensure_session_mutex() -> Option<OwnedHandle> {
             windows::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION,
         )
         .is_ok()
-            && InitializeAcl(acl_buf.as_mut_ptr().cast::<ACL>(), acl_buf.len() as u32, ACL_REVISION)
-                .is_ok()
+            && InitializeAcl(
+                acl_buf.as_mut_ptr().cast::<ACL>(),
+                acl_buf.len() as u32,
+                ACL_REVISION,
+            )
+            .is_ok()
             && AddAccessAllowedAce(
                 acl_buf.as_mut_ptr().cast::<ACL>(),
                 ACL_REVISION,
@@ -870,7 +922,10 @@ pub(crate) fn ensure_session_mutex() -> Option<OwnedHandle> {
         lpSecurityDescriptor: sec_desc.as_mut() as *mut _ as *mut core::ffi::c_void,
         bInheritHandle: BOOL(0),
     };
-    let mut name: Vec<u16> = SESSION_MUTEX.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut name: Vec<u16> = SESSION_MUTEX
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     // SAFETY: `attrs` points to a valid security descriptor; `name` is
     // null-terminated. Created unowned: the agent takes ownership.
     let handle = unsafe { CreateMutexW(Some(&raw const attrs), false, PWSTR(name.as_mut_ptr())) };

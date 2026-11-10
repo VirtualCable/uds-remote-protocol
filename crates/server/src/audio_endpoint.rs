@@ -24,6 +24,7 @@ use std::ffi::c_void;
 
 use anyhow::{Context as _, Result};
 use tracing::{info, warn};
+use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
     DEVICE_STATE_ACTIVE, ERole, IMMDevice, IMMDeviceCollection, IMMDeviceEnumerator,
     MMDeviceEnumerator, eCommunications, eConsole, eMultimedia, eRender,
@@ -34,16 +35,23 @@ use windows::Win32::System::Com::{
     CoUninitialize, STGM_READ,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
-use windows::Win32::Foundation::PROPERTYKEY;
 use windows::core::{GUID, HRESULT, IUnknown, Interface as _, PCWSTR, PWSTR};
 
 /// `CLSID_PolicyConfig` (undocumented): {870AF99C-171D-4F9E-AF0D-E63DF40C2BC9}.
-const CLSID_POLICY_CONFIG: GUID =
-    GUID::from_values(0x870a_f99c, 0x171d, 0x4f9e, [0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9]);
+const CLSID_POLICY_CONFIG: GUID = GUID::from_values(
+    0x870a_f99c,
+    0x171d,
+    0x4f9e,
+    [0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9],
+);
 
 /// `IID_IPolicyConfig` (undocumented): {F8679F50-850A-41CF-9C72-430F290290C8}.
-const IID_IPOLICY_CONFIG: GUID =
-    GUID::from_values(0xf867_9f50, 0x850a, 0x41cf, [0x9c, 0x72, 0x43, 0x0f, 0x29, 0x02, 0x90, 0xc8]);
+const IID_IPOLICY_CONFIG: GUID = GUID::from_values(
+    0xf867_9f50,
+    0x850a,
+    0x41cf,
+    [0x9c, 0x72, 0x43, 0x0f, 0x29, 0x02, 0x90, 0xc8],
+);
 
 /// `PKEY_Device_FriendlyName`: {A45C254E-DF1C-4EFD-8020-67D146A850E0}, pid 14.
 const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
@@ -82,19 +90,19 @@ struct IUnknownVtbl {
 /// real; the earlier slots keep the layout honest and are never called.
 #[repr(C)]
 struct IPolicyConfigVtbl {
-    query_interface: *const c_void,      // 0
-    add_ref: *const c_void,              // 1
-    release: *const c_void,              // 2
-    get_mix_format: *const c_void,       // 3
-    get_device_format: *const c_void,    // 4
-    reset_device_format: *const c_void,  // 5
-    set_device_format: *const c_void,    // 6
-    get_processing_period: *const c_void,// 7
-    set_processing_period: *const c_void,// 8
-    get_share_mode: *const c_void,       // 9
-    set_share_mode: *const c_void,       // 10
-    get_property_value: *const c_void,   // 11
-    set_property_value: *const c_void,   // 12
+    query_interface: *const c_void,       // 0
+    add_ref: *const c_void,               // 1
+    release: *const c_void,               // 2
+    get_mix_format: *const c_void,        // 3
+    get_device_format: *const c_void,     // 4
+    reset_device_format: *const c_void,   // 5
+    set_device_format: *const c_void,     // 6
+    get_processing_period: *const c_void, // 7
+    set_processing_period: *const c_void, // 8
+    get_share_mode: *const c_void,        // 9
+    set_share_mode: *const c_void,        // 10
+    get_property_value: *const c_void,    // 11
+    set_property_value: *const c_void,    // 12
     set_default_endpoint: unsafe extern "system" fn(*mut c_void, PCWSTR, ERole) -> HRESULT, // 13
 }
 
@@ -120,7 +128,10 @@ impl PolicyConfig {
             ((*vtbl).query_interface)(unknown.as_raw(), &IID_IPOLICY_CONFIG, &raw mut this)
         };
         hr.ok().context("QueryInterface(IPolicyConfig) failed")?;
-        anyhow::ensure!(!this.is_null(), "QueryInterface(IPolicyConfig) returned null");
+        anyhow::ensure!(
+            !this.is_null(),
+            "QueryInterface(IPolicyConfig) returned null"
+        );
         Ok(Self { this })
     }
 
@@ -221,10 +232,15 @@ fn switch_default_to_uds_impl() -> Result<Option<DefaultEndpointGuard>> {
         if let Ok(device) = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, role) } {
             match device_id(&device) {
                 Ok(id) => previous.push((role, id)),
-                Err(err) => warn!(error = %format!("{err:#}"), role = role.0, "cannot read the current default endpoint id"),
+                Err(err) => {
+                    warn!(error = %format!("{err:#}"), role = role.0, "cannot read the current default endpoint id")
+                }
             }
         } else {
-            info!(role = role.0, "no current default render endpoint for this role");
+            info!(
+                role = role.0,
+                "no current default render endpoint for this role"
+            );
         }
     }
 
@@ -247,8 +263,8 @@ fn find_uds_render_endpoint(enumerator: &IMMDeviceEnumerator) -> Result<Option<I
             .context("EnumAudioEndpoints failed")?;
     let count = unsafe { collection.GetCount() }.context("IMMDeviceCollection::GetCount failed")?;
     for index in 0..count {
-        let device = unsafe { collection.Item(index) }
-            .context("IMMDeviceCollection::Item failed")?;
+        let device =
+            unsafe { collection.Item(index) }.context("IMMDeviceCollection::Item failed")?;
         if let Some(name) = device_friendly_name(&device)
             && name.contains(UDS_SPEAKERS_NAME)
         {

@@ -147,4 +147,3 @@ pub trait SmartcardIntegration: Send + Sync + std::fmt::Debug {
     /// Whether the smartcard subsystem is available and ready to serve.
     fn is_available(&self) -> bool;
 }
-
