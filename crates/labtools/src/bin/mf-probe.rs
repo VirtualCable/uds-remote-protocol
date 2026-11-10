@@ -99,14 +99,22 @@ fn encode_test(frames: u32, gpu: bool, h264: bool) -> i32 {
     };
     // Lab probe: hardware only when GPU is requested; otherwise accept any
     // registered MFT (software included).
-    let mut enc =
-        match codec::mf::MfEncoder::new_mft(codec_sel, w, h, fps, kbps, gpu, device.clone()) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("MfEncoder init failed: {e}");
-                return 1;
-            }
-        };
+    let mut enc = match codec::mf::MfEncoder::new_mft(
+        codec_sel,
+        w,
+        h,
+        fps,
+        kbps,
+        gpu,
+        device.clone(),
+        codec::mf::MfRc::Cbr,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("MfEncoder init failed: {e}");
+            return 1;
+        }
+    };
     println!("encoder ready: {} (gpu={})", enc.mft_name(), gpu);
     let mut staging = None;
     let mut target = None;

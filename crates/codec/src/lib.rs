@@ -60,7 +60,7 @@ pub use ladder::{Ladder, LadderPolicy, Level, Switch};
 #[cfg(feature = "codec-ladder")]
 pub use ladder_encoder::LadderEncoder;
 #[cfg(all(windows, feature = "codec-nvenc"))]
-pub use nvenc::{NvencEncoder, nvenc_available};
+pub use nvenc::{NvencEncoder, NvencRc, nvenc_available};
 #[cfg(feature = "codec-h264")]
 pub use openh264::{OpenH264Decoder, h264_available};
 #[cfg(feature = "codec-opus")]

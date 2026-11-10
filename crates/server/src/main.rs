@@ -3774,17 +3774,19 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
         // openings bouncing rects-jpeg <-> h264 within seconds).
         #[cfg(all(windows, feature = "codec-nvenc"))]
         if matches!(args.encoder.as_str(), "" | "auto" | "nvenc") && client_h264 {
-            // §18.76: [quality] h264_rc = "quality" runs const-QP (fixed
-            // quality, floating bandwidth) instead of CBR.
-            let const_qp = match args.quality.h264_rc {
-                server::config::H264Rc::Quality => Some(args.quality.h264_qp),
-                server::config::H264Rc::Cbr => None,
+            // §18.76: [quality] h264_rc selects the rate control:
+            // "cbr" (hard ceiling), "vbr_hq" (mean = ceiling, peak = 2×)
+            // or "quality" (const-QP, fixed quality, floating bandwidth).
+            let rc = match args.quality.h264_rc {
+                server::config::H264Rc::Cbr => codec::NvencRc::Cbr,
+                server::config::H264Rc::VbrHq => codec::NvencRc::VbrHq,
+                server::config::H264Rc::Quality => codec::NvencRc::ConstQp(args.quality.h264_qp),
             };
-            match codec::NvencEncoder::with_rc(width, height, 30, kbps, const_qp) {
+            match codec::NvencEncoder::with_rc(width, height, 30, kbps, rc) {
                 Ok(encoder) => {
                     info!(
                         width,
-                        height, kbps, const_qp, "h264 via NVENC ready (no ladder: hardware leg)"
+                        height, kbps, rc = ?rc, "h264 via NVENC ready (no ladder: hardware leg)"
                     );
                     return Ok(ServerEncoder::Simple(Box::new(encoder)));
                 }

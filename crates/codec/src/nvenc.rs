@@ -65,6 +65,20 @@ const PIC_STRUCT_FRAME: u32 = 1;
 const RC_MODE_CBR: u32 = 2;
 /// Const-QP: quality fixed, bandwidth floats (§18.76).
 const RC_MODE_CONSTQP: u32 = 0;
+/// VBR low-delay HQ: average = target, hard peak at 2× (§18.76).
+const RC_MODE_VBR_LOWDELAY_HQ: u32 = 16;
+
+/// Rate-control selection for [`NvencEncoder::with_rc`] (§18.76).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NvencRc {
+    /// Constant bitrate at the requested kbps (default).
+    #[default]
+    Cbr,
+    /// Quality-constrained VBR: average = kbps, hard peak = 2× kbps.
+    VbrHq,
+    /// Const-QP: fixed QP (0-51, lower = better), bandwidth floats.
+    ConstQp(u32),
+}
 const PIC_FLAG_FORCEIDR: u32 = 2;
 const TUNING_ULTRA_LOW_LATENCY: u32 = 3;
 
@@ -476,20 +490,13 @@ impl NvencEncoder {
     /// `width`x`height` at `fps`, targeting `kbps` (CBR). Fails when no
     /// NVENC-capable GPU/driver is present — callers fall back to VP9.
     pub fn new(width: u32, height: u32, fps: u32, kbps: u32) -> Result<Self> {
-        Self::with_rc(width, height, fps, kbps, None)
+        Self::with_rc(width, height, fps, kbps, NvencRc::Cbr)
     }
 
-    /// [`Self::new`] with an optional rate-control override (§18.76):
-    /// `const_qp = Some(qp)` switches to const-QP (quality constant,
-    /// bandwidth floats with content; the bitrate fields stay as a hint but
-    /// the QP rules). `None` keeps the default CBR at `kbps`.
-    pub fn with_rc(
-        width: u32,
-        height: u32,
-        fps: u32,
-        kbps: u32,
-        const_qp: Option<u32>,
-    ) -> Result<Self> {
+    /// [`Self::new`] with an explicit rate-control mode (§18.76); see
+    /// [`NvencRc`]. In `ConstQp` the bitrate fields stay as a hint but the
+    /// QP rules; in `VbrHq` kbps is the average and 2× kbps the hard peak.
+    pub fn with_rc(width: u32, height: u32, fps: u32, kbps: u32, rc: NvencRc) -> Result<Self> {
         let api = NvencApi::get()
             .ok_or_else(|| CodecError::Backend("nvenc: API not available".into()))?;
         let device = create_device()?;
@@ -522,16 +529,23 @@ impl NvencEncoder {
             mv_precision: 0,
             rc_params: RcParams {
                 version: RC_PARAMS_VER,
-                // Const-QP (§18.76): quality is fixed by the QP and the
-                // bitrate floats with the content; otherwise CBR at kbps.
-                rate_control_mode: if const_qp.is_some() {
-                    RC_MODE_CONSTQP
-                } else {
-                    RC_MODE_CBR
+                // §18.76: CBR (kbps hard target), VBR-HQ (avg kbps, peak
+                // 2×), or const-QP (QP fixed, bandwidth floats).
+                rate_control_mode: match rc {
+                    NvencRc::Cbr => RC_MODE_CBR,
+                    NvencRc::VbrHq => RC_MODE_VBR_LOWDELAY_HQ,
+                    NvencRc::ConstQp(_) => RC_MODE_CONSTQP,
                 },
-                const_qp: const_qp.map_or([0; 3], |qp| [qp, qp, qp]),
+                const_qp: match rc {
+                    NvencRc::ConstQp(qp) => [qp, qp, qp],
+                    _ => [0; 3],
+                },
                 average_bit_rate: kbps.saturating_mul(1000),
-                max_bit_rate: kbps.saturating_mul(1000),
+                max_bit_rate: if matches!(rc, NvencRc::VbrHq) {
+                    kbps.saturating_mul(2000)
+                } else {
+                    kbps.saturating_mul(1000)
+                },
                 vbv_buffer_size: kbps.saturating_mul(1000),
                 vbv_initial_delay: 0,
                 pad: [0; 128 - 36],

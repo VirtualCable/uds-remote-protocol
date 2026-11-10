@@ -178,10 +178,18 @@ pub struct QualityConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum H264Rc {
-    /// Constant bitrate: the bitrate is a hard target (default).
+    /// Constant bitrate: the bitrate is a hard target (default). Bandwidth
+    /// is bounded; quality floats with the content.
     #[default]
     Cbr,
-    /// Constant quality: bandwidth floats to hold the quality knob.
+    /// Quality-constrained VBR with a hard ceiling: average bitrate = the
+    /// video ceiling, peak = 2× ceiling. Quality stays steadier than CBR
+    /// on complex scenes without ever blowing the bandwidth budget.
+    #[serde(rename = "vbr_hq")]
+    VbrHq,
+    /// Constant quality: bandwidth floats freely to hold the quality knob
+    /// (NVENC: const-QP `h264_qp`; MFT: quality VBR `h264_quality`).
+    /// No byte ceiling — for LANs/labs, not for billed egress.
     Quality,
 }
 
@@ -191,6 +199,7 @@ impl H264Rc {
     pub fn token(self) -> &'static str {
         match self {
             Self::Cbr => "cbr",
+            Self::VbrHq => "vbr_hq",
             Self::Quality => "quality",
         }
     }
@@ -426,8 +435,9 @@ impl QualityConfig {
                 "h264rc" => {
                     q.h264_rc = match value {
                         "cbr" => H264Rc::Cbr,
+                        "vbr_hq" => H264Rc::VbrHq,
                         "quality" => H264Rc::Quality,
-                        _ => anyhow::bail!("bad h264rc (cbr|quality): {value}"),
+                        _ => anyhow::bail!("bad h264rc (cbr|vbr_hq|quality): {value}"),
                     };
                 }
                 "h264qp" => q.h264_qp = value.parse().context("bad h264qp")?,
@@ -1232,6 +1242,12 @@ video_factor = 1.0
         assert_eq!(tuned.h264_qp, 20);
         assert_eq!(tuned.h264_quality, 90);
         assert_eq!(tuned.vp9_aq, 3);
+        assert_eq!(
+            QualityConfig::from_wire("h264rc=vbr_hq")
+                .expect("vbr_hq")
+                .h264_rc,
+            H264Rc::VbrHq
+        );
         assert!(QualityConfig::from_wire("h264rc=vbr").is_err());
         assert!(QualityConfig::from_wire("h264qp=52").is_err());
         assert!(QualityConfig::from_wire("vp9aq=4").is_err());
