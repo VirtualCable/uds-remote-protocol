@@ -37,6 +37,9 @@ pub enum CursorError {
     /// Pixel payload length does not match `width * height * 4`.
     #[error("cursor pixel length mismatch")]
     BadPixelLength,
+    /// XOR mask length is neither 0 nor `ceil(width * height / 8)`.
+    #[error("cursor xor-mask length mismatch")]
+    BadMaskLength,
 }
 
 /// One cursor state update.
@@ -57,8 +60,15 @@ pub enum CursorMessage {
         hot_x: u16,
         /// Hotspot Y offset inside the image.
         hot_y: u16,
-        /// RGBA pixels, `width * height * 4` bytes.
+        /// RGBA pixels, `width * height * 4` bytes. XOR pixels (see
+        /// `xor_mask`) carry their source RGB with alpha 255 so consumers
+        /// without XOR support still draw something sensible.
         pixels: Vec<u8>,
+        /// 1bpp mask over the pixels (MSB first, row-major,
+        /// `ceil(width*height/8)` bytes): a set bit marks the pixel as
+        /// XOR-with-background (DXGI masked-color semantics, §10). Empty
+        /// when no pixel XORs.
+        xor_mask: Vec<u8>,
     },
 }
 
@@ -76,6 +86,7 @@ impl CursorMessage {
                 hot_x,
                 hot_y,
                 pixels,
+                xor_mask,
             } => {
                 out.push(TAG_SHAPE);
                 out.extend_from_slice(&width.to_be_bytes());
@@ -88,6 +99,13 @@ impl CursorMessage {
                     &u32::try_from(pixels.len()).unwrap_or(u32::MAX).to_be_bytes(),
                 );
                 out.extend_from_slice(pixels);
+                // Trailing XOR mask (absent in pre-XOR encoders = no XOR
+                // pixels); one message per channel packet, so the tail is
+                // unambiguous.
+                out.extend_from_slice(
+                    &u32::try_from(xor_mask.len()).unwrap_or(u32::MAX).to_be_bytes(),
+                );
+                out.extend_from_slice(xor_mask);
             }
         }
     }
@@ -128,12 +146,26 @@ impl CursorMessage {
                     return Err(CursorError::BadPixelLength);
                 }
                 let pixels = rest.get(12..12 + len).ok_or(CursorError::Truncated)?.to_vec();
+                // Optional trailing XOR mask: absent means "no XOR pixels"
+                // (older encoders); present, it must cover the pixels 1bpp.
+                let tail = rest.get(12 + len..).unwrap_or(&[]);
+                let xor_mask = if tail.len() >= 4 {
+                    let mlen = u32::from_be_bytes([tail[0], tail[1], tail[2], tail[3]]) as usize;
+                    let expected = (usize::from(width) * usize::from(height)).div_ceil(8);
+                    if mlen != 0 && mlen != expected {
+                        return Err(CursorError::BadMaskLength);
+                    }
+                    tail.get(4..4 + mlen).ok_or(CursorError::Truncated)?.to_vec()
+                } else {
+                    Vec::new()
+                };
                 Ok(Self::Shape {
                     width,
                     height,
                     hot_x,
                     hot_y,
                     pixels,
+                    xor_mask,
                 })
             }
             other => Err(CursorError::UnknownTag(other)),
@@ -161,8 +193,55 @@ mod tests {
             hot_x: 1,
             hot_y: 0,
             pixels: (0..24u8).collect(),
+            xor_mask: Vec::new(),
         };
         assert_eq!(CursorMessage::decode(&msg.encode()), Ok(msg));
+    }
+
+    #[test]
+    fn shape_with_xor_mask_roundtrip() {
+        // 2x3 = 6 pixels -> 1 mask byte.
+        let msg = CursorMessage::Shape {
+            width: 2,
+            height: 3,
+            hot_x: 1,
+            hot_y: 0,
+            pixels: (0..24u8).collect(),
+            xor_mask: vec![0b1010_0000],
+        };
+        assert_eq!(CursorMessage::decode(&msg.encode()), Ok(msg));
+    }
+
+    #[test]
+    fn shape_without_mask_tail_decodes_with_empty_mask() {
+        // Pre-XOR encoders stop after the pixels.
+        let msg = CursorMessage::Shape {
+            width: 2,
+            height: 3,
+            hot_x: 1,
+            hot_y: 0,
+            pixels: (0..24u8).collect(),
+            xor_mask: Vec::new(),
+        };
+        let mut buf = msg.encode();
+        buf.truncate(buf.len() - 4); // drop the u32 mask length
+        assert_eq!(CursorMessage::decode(&buf), Ok(msg));
+    }
+
+    #[test]
+    fn bad_xor_mask_length_is_rejected() {
+        let msg = CursorMessage::Shape {
+            width: 2,
+            height: 3,
+            hot_x: 1,
+            hot_y: 0,
+            pixels: (0..24u8).collect(),
+            xor_mask: vec![0; 2], // 6 pixels need exactly 1 byte
+        };
+        assert_eq!(
+            CursorMessage::decode(&msg.encode()),
+            Err(CursorError::BadMaskLength)
+        );
     }
 
     #[test]
@@ -207,6 +286,22 @@ mod tests {
             hot_x: 0,
             hot_y: 0,
             pixels: vec![0; 64],
+            xor_mask: Vec::new(),
+        };
+        let buf = msg.encode();
+        // Cut inside the pixel payload (the 4-byte empty-mask tail comes last).
+        assert_eq!(
+            CursorMessage::decode(&buf[..buf.len() - 5]),
+            Err(CursorError::Truncated)
+        );
+        // A cut mask tail is rejected when the length word survives.
+        let msg = CursorMessage::Shape {
+            width: 4,
+            height: 4,
+            hot_x: 0,
+            hot_y: 0,
+            pixels: vec![0; 64],
+            xor_mask: vec![0xAB, 0xCD],
         };
         let buf = msg.encode();
         assert_eq!(CursorMessage::decode(&buf[..buf.len() - 1]), Err(CursorError::Truncated));
