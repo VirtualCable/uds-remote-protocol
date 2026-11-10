@@ -109,6 +109,11 @@ impl LadderPolicy {
 /// decays the dynamic dwell back down instead of growing it.
 const STABLE_FACTOR: u32 = 3;
 
+/// Cap for the dwell gate on DOWN switches, as a multiple of
+/// `policy.min_dwell`: the backoff-grown dwell protects against expensive
+/// up-flapping, but the way down must stay timely (§18.75.27).
+const DOWN_DWELL_CAP: u32 = 2;
+
 /// Codec ladder state machine. See module docs for the damping layers.
 #[derive(Debug)]
 pub struct Ladder {
@@ -176,8 +181,18 @@ impl Ladder {
 
         // Dwell gate: no metric-driven switch is allowed yet. The crossing
         // tracker is reset so the hold time only starts counting once the
-        // dwell has expired.
-        if now.duration_since(self.entered) < self.dwell {
+        // dwell has expired. The gate applies the full (possibly
+        // backoff-grown) dwell to UP switches — switching up is the
+        // expensive direction (keyframe + decoder rebuild at the peer) —
+        // but caps it at 2x the minimum for DOWN switches: staying in the
+        // video regime wastes real bandwidth, so a past oscillation must
+        // never delay the way down beyond ~2x min_dwell + hold_down
+        // (§18.75.27).
+        let gate = match self.level {
+            Level::Low => self.dwell,
+            Level::High => self.dwell.min(self.policy.min_dwell * DOWN_DWELL_CAP),
+        };
+        if now.duration_since(self.entered) < gate {
             self.crossing_since = None;
             return None;
         }
@@ -400,6 +415,32 @@ mod tests {
             }
         }
         assert_eq!(l.dwell(), Duration::from_millis(750));
+    }
+
+    #[test]
+    fn down_switch_dwell_is_capped_despite_backoff() {
+        let mut l = Ladder::new(test_policy(), t0());
+        // Inflate the dwell with quick oscillation: 500 -> 750 -> 1125.
+        let mut now = t0();
+        for target in [50.0, 1.0] {
+            loop {
+                now += Duration::from_millis(100);
+                if l.update(now, target).is_some() {
+                    break;
+                }
+            }
+        }
+        assert_eq!(l.dwell(), Duration::from_millis(1125));
+        // Back up to High with a forced switch (keeps the dwell).
+        l.force(now, Level::High);
+        // In High, the gate is capped at 2x min_dwell = 1000 ms: quiet
+        // samples right after that point must switch down even though the
+        // grown dwell (1125 ms) has not expired yet.
+        now += Duration::from_millis(1010);
+        assert!(l.update(now, 1.0).is_none(), "hold_down not complete yet");
+        now += Duration::from_millis(400);
+        let sw = l.update(now, 1.0);
+        assert_eq!(sw, Some(Switch { to: Level::Low, forced: false }));
     }
 
     #[test]
