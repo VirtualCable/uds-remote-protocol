@@ -3774,11 +3774,17 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
         // openings bouncing rects-jpeg <-> h264 within seconds).
         #[cfg(all(windows, feature = "codec-nvenc"))]
         if matches!(args.encoder.as_str(), "" | "auto" | "nvenc") && client_h264 {
-            match codec::NvencEncoder::new(width, height, 30, kbps) {
+            // §18.76: [quality] h264_rc = "quality" runs const-QP (fixed
+            // quality, floating bandwidth) instead of CBR.
+            let const_qp = match args.quality.h264_rc {
+                server::config::H264Rc::Quality => Some(args.quality.h264_qp),
+                server::config::H264Rc::Cbr => None,
+            };
+            match codec::NvencEncoder::with_rc(width, height, 30, kbps, const_qp) {
                 Ok(encoder) => {
                     info!(
                         width,
-                        height, kbps, "h264 via NVENC ready (no ladder: hardware leg)"
+                        height, kbps, const_qp, "h264 via NVENC ready (no ladder: hardware leg)"
                     );
                     return Ok(ServerEncoder::Simple(Box::new(encoder)));
                 }
@@ -3817,7 +3823,7 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
                 }
             }
         }
-        let encoder = match (knobs.vp9_cpu, knobs.threads) {
+        let mut encoder = match (knobs.vp9_cpu, knobs.threads) {
             (None, None) => codec::LadderEncoder::new(width, height, knobs.policy, kbps, 80)?,
             (cpu, threads) => codec::LadderEncoder::with_tuning(
                 width,
@@ -3829,6 +3835,11 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
                 threads.unwrap_or(4),
             )?,
         };
+        // §18.76: [quality] vp9_aq biases bits toward perceptually complex
+        // areas on the software leg (no-op on MF/NVENC legs).
+        if args.quality.vp9_aq > 0 {
+            encoder.set_vp9_aq(args.quality.vp9_aq);
+        }
         info!(width, height, kbps, overrides = %args.ladder, "codec ladder ready (rects-jpeg <-> vp9)");
         return Ok(ServerEncoder::Ladder(Box::new(encoder)));
     }

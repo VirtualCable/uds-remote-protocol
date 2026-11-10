@@ -63,6 +63,8 @@ const PIC_TYPE_UNKNOWN: u32 = 255;
 const PIC_TYPE_IDR: u32 = 3;
 const PIC_STRUCT_FRAME: u32 = 1;
 const RC_MODE_CBR: u32 = 2;
+/// Const-QP: quality fixed, bandwidth floats (§18.76).
+const RC_MODE_CONSTQP: u32 = 0;
 const PIC_FLAG_FORCEIDR: u32 = 2;
 const TUNING_ULTRA_LOW_LATENCY: u32 = 3;
 
@@ -474,6 +476,20 @@ impl NvencEncoder {
     /// `width`x`height` at `fps`, targeting `kbps` (CBR). Fails when no
     /// NVENC-capable GPU/driver is present — callers fall back to VP9.
     pub fn new(width: u32, height: u32, fps: u32, kbps: u32) -> Result<Self> {
+        Self::with_rc(width, height, fps, kbps, None)
+    }
+
+    /// [`Self::new`] with an optional rate-control override (§18.76):
+    /// `const_qp = Some(qp)` switches to const-QP (quality constant,
+    /// bandwidth floats with content; the bitrate fields stay as a hint but
+    /// the QP rules). `None` keeps the default CBR at `kbps`.
+    pub fn with_rc(
+        width: u32,
+        height: u32,
+        fps: u32,
+        kbps: u32,
+        const_qp: Option<u32>,
+    ) -> Result<Self> {
         let api = NvencApi::get()
             .ok_or_else(|| CodecError::Backend("nvenc: API not available".into()))?;
         let device = create_device()?;
@@ -506,8 +522,14 @@ impl NvencEncoder {
             mv_precision: 0,
             rc_params: RcParams {
                 version: RC_PARAMS_VER,
-                rate_control_mode: RC_MODE_CBR,
-                const_qp: [0; 3],
+                // Const-QP (§18.76): quality is fixed by the QP and the
+                // bitrate floats with the content; otherwise CBR at kbps.
+                rate_control_mode: if const_qp.is_some() {
+                    RC_MODE_CONSTQP
+                } else {
+                    RC_MODE_CBR
+                },
+                const_qp: const_qp.map_or([0; 3], |qp| [qp, qp, qp]),
                 average_bit_rate: kbps.saturating_mul(1000),
                 max_bit_rate: kbps.saturating_mul(1000),
                 vbv_buffer_size: kbps.saturating_mul(1000),

@@ -382,6 +382,17 @@ impl LadderEncoder {
         self.vp9.set_cpu_used(cpu_used)
     }
 
+    /// Sets the AQ mode (0 off .. 3 perceptual; §18.76) on the software VP9
+    /// leg. No-op on the MF/NVENC legs (their AQ story, if any, is
+    /// backend-specific and not wired yet).
+    pub fn set_vp9_aq(&mut self, mode: u32) {
+        if let Vp9Backend::Software(e) = &mut self.vp9 {
+            if let Err(err) = e.set_aq_mode(mode) {
+                warn!("VP9 AQ mode {mode} rejected: {err}");
+            }
+        }
+    }
+
     /// Changed-area EMA as a fraction (0..1) for the content quality axis;
     /// `None` until the first frame feeds the ladder.
     #[must_use]

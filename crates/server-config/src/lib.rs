@@ -156,8 +156,44 @@ pub struct QualityConfig {
     pub good_to_up: u32,
     /// Minimum seconds between two raises (both axes).
     pub raise_cooldown_secs: u64,
+    /// H264 hardware rate control (§18.76): `Cbr` keeps the bitrate as a
+    /// hard target (bandwidth bounded, quality floats with content);
+    /// `Quality` keeps quality constant and lets bandwidth float (NVENC:
+    /// const-QP with `h264_qp`; Media Foundation: quality VBR with
+    /// `h264_quality`).
+    pub h264_rc: H264Rc,
+    /// QP for the NVENC const-QP mode (0-51; lower = better). Default 23.
+    pub h264_qp: u32,
+    /// Quality value for the MFT quality mode (1-100; higher = better).
+    /// Default 75.
+    pub h264_quality: u32,
+    /// libvpx adaptive-quantization mode for the VP9 software leg (0 off,
+    /// 3 perceptual; §18.76). No effect on MF/NVENC legs.
+    pub vp9_aq: u32,
     /// The level table, N0 (full) first; validated monotonic on load.
     pub levels: Vec<QualityLevelConfig>,
+}
+
+/// H264 hardware rate-control mode (§18.76), `[quality] h264_rc`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum H264Rc {
+    /// Constant bitrate: the bitrate is a hard target (default).
+    #[default]
+    Cbr,
+    /// Constant quality: bandwidth floats to hold the quality knob.
+    Quality,
+}
+
+impl H264Rc {
+    /// Wire token (`h264rc=`).
+    #[must_use]
+    pub fn token(self) -> &'static str {
+        match self {
+            Self::Cbr => "cbr",
+            Self::Quality => "quality",
+        }
+    }
 }
 
 impl Default for QualityConfig {
@@ -184,6 +220,10 @@ impl Default for QualityConfig {
             bad_to_down: net.bad_to_down,
             good_to_up: net.good_to_up,
             raise_cooldown_secs: 10,
+            h264_rc: H264Rc::Cbr,
+            h264_qp: 23,
+            h264_quality: 75,
+            vp9_aq: 0,
             levels: protocol::default_levels()
                 .iter()
                 .map(|l| QualityLevelConfig {
@@ -281,6 +321,12 @@ impl QualityConfig {
         );
         anyhow::ensure!(self.bad_to_down >= 1, "quality.bad_to_down must be >= 1");
         anyhow::ensure!(self.good_to_up >= 1, "quality.good_to_up must be >= 1");
+        anyhow::ensure!(self.h264_qp <= 51, "quality.h264_qp must be in 0..=51");
+        anyhow::ensure!(
+            (1..=100).contains(&self.h264_quality),
+            "quality.h264_quality must be in 1..=100"
+        );
+        anyhow::ensure!(self.vp9_aq <= 3, "quality.vp9_aq must be in 0..=3");
         Ok(())
     }
 
@@ -307,7 +353,7 @@ impl QualityConfig {
             .budget_kbps
             .map_or_else(|| "off".to_string(), |v| v.to_string());
         format!(
-            "vkbps={vkbps},budget={budget},akbps={},vfloor={},afloor={},minfps={},wc={},wcpu={},wbw={},phi={},plo={},rttf={},rtts={},rttbf={},jit={},loss={},b2d={},g2u={},cd={},levels={levels}",
+            "vkbps={vkbps},budget={budget},akbps={},vfloor={},afloor={},minfps={},wc={},wcpu={},wbw={},phi={},plo={},rttf={},rtts={},rttbf={},jit={},loss={},b2d={},g2u={},cd={},h264rc={},h264qp={},h264q={},vp9aq={},levels={levels}",
             self.audio_kbps,
             self.video_floor_kbps,
             self.audio_floor_kbps,
@@ -325,6 +371,10 @@ impl QualityConfig {
             self.bad_to_down,
             self.good_to_up,
             self.raise_cooldown_secs,
+            self.h264_rc.token(),
+            self.h264_qp,
+            self.h264_quality,
+            self.vp9_aq,
         )
     }
 
@@ -373,6 +423,16 @@ impl QualityConfig {
                 "b2d" => q.bad_to_down = value.parse().context("bad b2d")?,
                 "g2u" => q.good_to_up = value.parse().context("bad g2u")?,
                 "cd" => q.raise_cooldown_secs = value.parse().context("bad cd")?,
+                "h264rc" => {
+                    q.h264_rc = match value {
+                        "cbr" => H264Rc::Cbr,
+                        "quality" => H264Rc::Quality,
+                        _ => anyhow::bail!("bad h264rc (cbr|quality): {value}"),
+                    };
+                }
+                "h264qp" => q.h264_qp = value.parse().context("bad h264qp")?,
+                "h264q" => q.h264_quality = value.parse().context("bad h264q")?,
+                "vp9aq" => q.vp9_aq = value.parse().context("bad vp9aq")?,
                 "levels" => {
                     let mut rows = Vec::new();
                     for row in value.split(';').map(str::trim).filter(|r| !r.is_empty()) {
@@ -1161,6 +1221,20 @@ video_factor = 1.0
         assert_eq!(back.levels[1].vp9_speed, 6);
         assert_eq!(back.levels[0].kf_secs, 30);
         assert_eq!(back.levels[1].kf_secs, 4);
+        // Encoder knobs (§18.76) round-trip; defaults stay out of the way.
+        assert_eq!(back.h264_rc, H264Rc::Cbr);
+        assert_eq!(back.h264_qp, 23);
+        assert_eq!(back.h264_quality, 75);
+        assert_eq!(back.vp9_aq, 0);
+        let tuned =
+            QualityConfig::from_wire("h264rc=quality,h264qp=20,h264q=90,vp9aq=3").expect("tuned");
+        assert_eq!(tuned.h264_rc, H264Rc::Quality);
+        assert_eq!(tuned.h264_qp, 20);
+        assert_eq!(tuned.h264_quality, 90);
+        assert_eq!(tuned.vp9_aq, 3);
+        assert!(QualityConfig::from_wire("h264rc=vbr").is_err());
+        assert!(QualityConfig::from_wire("h264qp=52").is_err());
+        assert!(QualityConfig::from_wire("vp9aq=4").is_err());
         // Pre-§18.74 5-field rows stay parseable, with the old 30 s default.
         let legacy =
             QualityConfig::from_wire("levels=1.0:30:1.0:70:8;0.3:12:0.5:55:6").expect("legacy");

@@ -253,6 +253,24 @@ impl VpxEncoder {
         Ok(())
     }
 
+    /// Sets the adaptive-quantization mode (0 off .. 3 perceptual; §18.76):
+    /// AQ biases bits toward perceptually complex areas, buying visible
+    /// quality at the same bitrate. Takes effect on the next encoded frame.
+    pub fn set_aq_mode(&mut self, mode: u32) -> Result<()> {
+        // SAFETY: ctx is live; VP9E_SET_AQ_MODE takes an int in 0..=3.
+        unsafe {
+            let e = sys::vpx_codec_control_(
+                &mut self.ctx,
+                sys::vp8e_enc_control_id_VP9E_SET_AQ_MODE as i32,
+                mode as i32,
+            );
+            if e != sys::vpx_codec_err_t_VPX_CODEC_OK {
+                return Err(ctx_err(&self.ctx, "vpx_codec_control(AQ_MODE)"));
+            }
+        }
+        Ok(())
+    }
+
     /// Packs the I420 planes contiguously and wraps them in a
     /// `vpx_image_t` valid for the duration of the call.
     fn wrap_image(&mut self, i420: &I420Frame) -> sys::vpx_image_t {
@@ -551,6 +569,12 @@ impl Vp9Encoder {
     #[cfg_attr(not(feature = "codec-ladder"), allow(dead_code))] // only the ladder calls it
     pub fn set_cpu_used(&mut self, cpu_used: i32) -> Result<()> {
         self.0.set_cpu_used(cpu_used)
+    }
+
+    /// Sets the AQ mode (0 off .. 3 perceptual; §18.76) on the inner
+    /// encoder; takes effect on the next frame.
+    pub fn set_aq_mode(&mut self, mode: u32) -> Result<()> {
+        self.0.set_aq_mode(mode)
     }
 }
 

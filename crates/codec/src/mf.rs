@@ -39,10 +39,11 @@ use windows::Win32::Graphics::Dxgi::Common::{
 };
 use windows::Win32::Graphics::Dxgi::IDXGISurface;
 use windows::Win32::Media::MediaFoundation::{
-    CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
-    CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncVideoForceKeyFrame,
-    CODECAPI_AVLowLatencyMode, ICodecAPI, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
-    MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High,
+    CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonQuality,
+    CODECAPI_AVEncCommonRateControlMode, CODECAPI_AVEncMPVDefaultBPictureCount,
+    CODECAPI_AVEncVideoForceKeyFrame, CODECAPI_AVLowLatencyMode, ICodecAPI, MF_E_NOTACCEPTING,
+    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_MPEG2_PROFILE,
+    eAVEncH264VProfile_High,
 };
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFMediaType,
@@ -467,6 +468,9 @@ impl MfEncoder {
     /// handshake with the MFT fails the whole constructor — the caller
     /// retries without the device or falls back to libvpx. Returns
     /// `CodecError::Unsupported` when no matching MFT exists at all.
+    /// `rc_quality` (§18.76): `Some(q)` (1-100) switches the rate control to
+    /// quality mode — constant quality, bandwidth floats, the mean bitrate
+    /// acts as a ceiling hint; `None` keeps the default CBR.
     #[allow(clippy::too_many_lines)] // MFT negotiation is one long COM sequence; splitting hurts readability.
     pub fn new_mft(
         codec: MftCodec,
@@ -476,6 +480,7 @@ impl MfEncoder {
         kbps: u32,
         hw_only: bool,
         gpu_device: Option<ID3D11Device>,
+        rc_quality: Option<u32>,
     ) -> Result<Self> {
         let guard = MfGuard::acquire()?;
         let activates = enumerate_activates(codec.subtype(), hw_only)?;
@@ -650,9 +655,22 @@ impl MfEncoder {
                 if let Err(e) = r {
                     tracing::warn!("encoder rejected AVLowLatencyMode: {e}");
                 }
-                // CBR rate control; some hardware MFTs reject streams
-                // without an explicit rate-control mode.
-                let _ = codec_api.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(0));
+                // Rate control: quality mode (§18.76) keeps quality constant
+                // and lets bandwidth float (the mean bitrate stays as a
+                // ceiling hint); otherwise CBR — some hardware MFTs reject
+                // streams without an explicit rate-control mode.
+                if let Some(q) = rc_quality {
+                    // eAVEncCommonRateControlMode_Quality = 3.
+                    let _ =
+                        codec_api.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(3));
+                    let r = codec_api.SetValue(&CODECAPI_AVEncCommonQuality, &variant_u32(q));
+                    if let Err(e) = r {
+                        tracing::warn!("encoder rejected AVEncCommonQuality: {e}");
+                    }
+                } else {
+                    let _ =
+                        codec_api.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(0));
+                }
                 if matches!(codec, MftCodec::H264) {
                     // No B-frames: interactive desktop needs decode order
                     // == presentation order.
@@ -715,7 +733,7 @@ impl MfEncoder {
     /// # Errors
     /// Same as [`MfEncoder::new_mft`].
     pub fn new_vp9(width: u32, height: u32, fps: u32, kbps: u32, hw_only: bool) -> Result<Self> {
-        Self::new_mft(MftCodec::Vp9, width, height, fps, kbps, hw_only, None)
+        Self::new_mft(MftCodec::Vp9, width, height, fps, kbps, hw_only, None, None)
     }
 
     /// True when this encoder was primed for zero-copy GPU input.
