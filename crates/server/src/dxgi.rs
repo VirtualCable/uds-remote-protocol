@@ -506,11 +506,20 @@ impl DxgiSource {
                     shape.width, shape.height
                 ));
                 let _ = std::fs::write(base.with_extension("rgba"), &shape.rgba);
+                // Raw DXGI buffer as delivered (color + optional 1bpp mask),
+                // to see whether the driver actually appends the mask.
+                let _ = std::fs::write(base.with_extension("bin"), &self.shape_buf);
                 let _ = std::fs::write(
                     base.with_extension("txt"),
                     format!(
-                        "kind={kind:?} w={} h={} hot={}x{} pitch={}\n",
-                        shape.width, shape.height, shape.hot_x, shape.hot_y, shape_info.Pitch
+                        "kind={kind:?} w={} h={} hot={}x{} pitch={} buf_len={} needed={}\n",
+                        shape.width,
+                        shape.height,
+                        shape.hot_x,
+                        shape.hot_y,
+                        shape_info.Pitch,
+                        self.shape_buf.len(),
+                        needed
                     ),
                 );
             }
