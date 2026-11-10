@@ -192,8 +192,13 @@ pub fn mask_shape_to_rgba(
                         MaskShapeKind::MaskedColor => match pixel[3] {
                             // RGB replaces the screen pixel.
                             0x00 => 255,
-                            // RGB XORs the screen pixel: ship the RGB opaque
-                            // and mark the bit; the client inverts.
+                            // RGB XORs the screen pixel. A BLACK XOR is a
+                            // no-op (x ^ 0 == x): emit it as transparent, NOT
+                            // as an XOR pixel — the client approximates XOR
+                            // with a reverse-subtract blend, and 0 - dst
+                            // would clamp to black instead of keeping dst.
+                            // Any other XOR color ships opaque + XOR bit.
+                            0xFF if red == 0 && green == 0 && blue == 0 => 0,
                             0xFF => {
                                 set_bit(&mut xor_mask, row_i * w_px + col);
                                 255
