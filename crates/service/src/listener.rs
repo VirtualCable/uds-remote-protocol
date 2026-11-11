@@ -314,6 +314,9 @@ pub(crate) async fn complete_session(
             fixed_resolution: standalone.fixed_resolution.unwrap_or((0, 0)),
             allow_lock: standalone.allow_lock,
             wallpaper_off: standalone.wallpaper_off,
+            spool_quota_mb: standalone.limits.spool_quota_mb,
+            clipboard_max_kb: standalone.limits.clipboard_max_kb,
+            input_events_per_sec: standalone.limits.input_events_per_sec,
             handoff: Some(protocol::service_ipc::HandoffInfo {
                 send_seq: seqs.send,
                 recv_seq: seqs.recv,
@@ -359,6 +362,9 @@ pub(crate) async fn complete_session(
                 // whether the client may lock the remote console.
                 allow_lock: grant.as_ref().is_some_and(|grant| grant.channels.lock),
                 wallpaper_off: grant.as_ref().is_some_and(|grant| grant.wallpaper_off),
+                spool_quota_mb: pq.limits.spool_quota_mb,
+                clipboard_max_kb: pq.limits.clipboard_max_kb,
+                input_events_per_sec: pq.limits.input_events_per_sec,
                 handoff: Some(protocol::service_ipc::HandoffInfo {
                     send_seq: seqs.send,
                     recv_seq: seqs.recv,

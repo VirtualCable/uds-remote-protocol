@@ -72,6 +72,8 @@ pub struct StandaloneRuntime {
     pub quality: String,
     /// VP9 encoder backend selector for the agent (""/"auto"/"mf"/"software").
     pub encoder: String,
+    /// Hardening caps for the agent (`[limits]`, §18.78).
+    pub limits: server_config::LimitsConfig,
 }
 
 /// Active connection mode for the service.
@@ -88,6 +90,8 @@ pub struct PqRuntime {
     pub provider: Arc<crate::broker::PqProvider>,
     /// Listen address for the validating listener.
     pub bind: String,
+    /// Hardening caps for the agent (`[limits]`, §18.78).
+    pub limits: server_config::LimitsConfig,
 }
 
 /// Loads the configured connection mode. Returns `None` when there is no
@@ -138,6 +142,7 @@ fn load_pq(path: &std::path::Path, config: &server_config::ServerConfig) -> Opti
     Some(PqRuntime {
         provider: Arc::new(provider),
         bind: config.bind.to_string(),
+        limits: config.limits,
     })
 }
 
@@ -205,5 +210,6 @@ fn load_standalone(
         console_takeover: standalone.console_takeover,
         quality: config.quality.to_wire(),
         encoder: standalone.encoder.clone(),
+        limits: config.limits,
     })
 }

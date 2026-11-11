@@ -145,12 +145,72 @@ impl TicketPayload {
 
     /// Parses a payload from an already-decoded JSON value (the
     /// `remotes[0].extra` field of the broker response).
+    ///
+    /// Strict by contract (§18.78): every field has a default, so a key must
+    /// either be absent (default applies) or carry a valid value — an
+    /// explicit `null`, an out-of-range number or an overlong string is an
+    /// error, never a silent fallback.
     pub fn from_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        fn reject_nulls(value: &serde_json::Value, path: &str) -> anyhow::Result<()> {
+            if let serde_json::Value::Object(map) = value {
+                for (key, val) in map {
+                    anyhow::ensure!(
+                        !val.is_null(),
+                        "ticket payload field {path}{key:?} is explicitly null (omit it instead)"
+                    );
+                    reject_nulls(val, &format!("{path}{key}."))?;
+                }
+            }
+            Ok(())
+        }
+        reject_nulls(&value, "")?;
         let payload: Self = serde_json::from_value(value)?;
         anyhow::ensure!(
             payload.version == PAYLOAD_VERSION,
             "unsupported ticket payload version {} (expected {PAYLOAD_VERSION})",
             payload.version
+        );
+        if let Some(display) = &payload.display {
+            anyhow::ensure!(
+                (200..=7680).contains(&display.width)
+                    && (200..=7680).contains(&display.height),
+                "ticket display policy {}x{} out of range (200..=7680 per axis)",
+                display.width,
+                display.height
+            );
+            anyhow::ensure!(
+                (1..=60).contains(&display.fps),
+                "ticket display fps {} out of range (1..=60)",
+                display.fps
+            );
+        }
+        if let Some(creds) = &payload.credentials {
+            for (what, s) in [
+                ("user", &creds.user),
+                ("domain", &creds.domain),
+                ("password", &creds.password),
+            ] {
+                anyhow::ensure!(
+                    s.len() <= 1024,
+                    "ticket credentials {what} exceeds 1024 bytes"
+                );
+            }
+        }
+        if let Some(video) = &payload.video {
+            for (what, s) in [
+                ("preset", &video.preset),
+                ("ladder", &video.ladder),
+                ("adaptive_fps", &video.adaptive_fps),
+            ] {
+                if let Some(s) = s {
+                    anyhow::ensure!(s.len() <= 2048, "ticket video {what} exceeds 2048 bytes");
+                }
+            }
+        }
+        anyhow::ensure!(
+            payload.console_conflict_timeout_secs <= 3600,
+            "ticket console_conflict_timeout_secs {} out of range (<= 3600)",
+            payload.console_conflict_timeout_secs
         );
         Ok(payload)
     }
@@ -233,5 +293,37 @@ mod tests {
         assert!(payload.credentials.is_none());
         assert!(payload.channels.audio);
         assert!(!payload.channels.smartcard);
+    }
+
+    #[test]
+    fn payload_rejects_explicit_nulls() {
+        // §18.78: a field is absent (default applies) or valid; explicit
+        // null is an error, at any nesting level.
+        assert!(TicketPayload::from_json(r#"{"version": 1, "display": null}"#).is_err());
+        assert!(
+            TicketPayload::from_json(r#"{"version": 1, "video": {"preset": null}}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn payload_rejects_out_of_range_display() {
+        assert!(
+            TicketPayload::from_json(
+                r#"{"version": 1, "display": {"width": 99999, "height": 1080, "fps": 30}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            TicketPayload::from_json(
+                r#"{"version": 1, "display": {"width": 1920, "height": 1080, "fps": 0}}"#
+            )
+            .is_err()
+        );
+        assert!(
+            TicketPayload::from_json(
+                r#"{"version": 1, "display": {"width": 1920, "height": 1080, "fps": 30}}"#
+            )
+            .is_ok()
+        );
     }
 }

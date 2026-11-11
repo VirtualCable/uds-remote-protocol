@@ -76,6 +76,8 @@ pub const ERR_TOO_LARGE: u32 = 4;
 pub const ERR_BAD_OFFSET: u32 = 5;
 /// Unknown transfer id (no such active transfer).
 pub const ERR_BAD_TRANSFER: u32 = 6;
+/// The spool quota (§18.78) would be exceeded by the transfer.
+pub const ERR_QUOTA_EXCEEDED: u32 = 7;
 
 /// Validates a spool file name: a plain leaf name — no path separators,
 /// no parent references, no control characters, no leading dot.

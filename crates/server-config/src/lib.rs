@@ -61,6 +61,10 @@ pub struct ServerConfig {
     /// pressure weights and the level table. Defaults reproduce the fixed
     /// §12.5 ladder.
     pub quality: QualityConfig,
+    /// Hardening caps against untrusted clients (`[limits]` table, §18.78).
+    /// Absent keys keep the defaults; an explicit invalid value is a config
+    /// error, never a silent fallback.
+    pub limits: LimitsConfig,
 }
 
 impl Default for ServerConfig {
@@ -72,7 +76,54 @@ impl Default for ServerConfig {
             standalone: None,
             broker: None,
             quality: QualityConfig::default(),
+            limits: LimitsConfig::default(),
         }
+    }
+}
+
+/// The `[limits]` section (§18.78): hardening caps against untrusted
+/// clients. Absent keys keep the defaults, so a config without the section
+/// behaves exactly as before.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
+pub struct LimitsConfig {
+    /// Storage spool quota in MiB (a client cannot fill the server's disk
+    /// with uploads past this).
+    pub spool_quota_mb: u32,
+    /// Clipboard text payload cap in KiB (the wire ceiling stays 8 MiB for
+    /// future richer formats; this caps what the bridge accepts as text).
+    pub clipboard_max_kb: u32,
+    /// Maximum injected input events per second (token bucket; releases
+    /// always pass so a flood cannot leave keys stuck).
+    pub input_events_per_sec: u32,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            spool_quota_mb: 32,
+            clipboard_max_kb: 1024,
+            input_events_per_sec: 2000,
+        }
+    }
+}
+
+impl LimitsConfig {
+    /// Validates ranges; call after loading the file.
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            (1..=65536).contains(&self.spool_quota_mb),
+            "limits.spool_quota_mb must be in 1..=65536"
+        );
+        anyhow::ensure!(
+            (16..=8192).contains(&self.clipboard_max_kb),
+            "limits.clipboard_max_kb must be in 16..=8192"
+        );
+        anyhow::ensure!(
+            (100..=100_000).contains(&self.input_events_per_sec),
+            "limits.input_events_per_sec must be in 100..=100000"
+        );
+        Ok(())
     }
 }
 
@@ -1009,6 +1060,10 @@ pub fn load(path: &Path) -> Result<ServerConfig> {
         .quality
         .validate()
         .with_context(|| format!("validating [quality] of {}", path.display()))?;
+    config
+        .limits
+        .validate()
+        .with_context(|| format!("validating [limits] of {}", path.display()))?;
     if let Some(standalone) = &config.standalone {
         anyhow::ensure!(
             matches!(standalone.encoder.as_str(), "" | "auto" | "mf" | "software"),

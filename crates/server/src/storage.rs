@@ -67,16 +67,35 @@ pub struct Spool {
     root: PathBuf,
     uploads: HashMap<u32, Upload>,
     downloads: VecDeque<Download>,
+    /// Quota in bytes (§18.78): committed files plus in-progress declared
+    /// sizes may never exceed it, so a client cannot fill the disk.
+    quota_bytes: u64,
+    /// Bytes committed in the spool right now.
+    used: u64,
+    /// Bytes reserved by in-progress uploads (their declared sizes).
+    pending: u64,
 }
 
 impl Spool {
-    /// Opens (creating if needed) the spool directory.
-    pub fn open(root: PathBuf) -> std::io::Result<Self> {
+    /// Opens (creating if needed) the spool directory with a quota in MiB
+    /// (§18.78); existing files count against it from the start.
+    pub fn open(root: PathBuf, quota_mb: u32) -> std::io::Result<Self> {
         fs::create_dir_all(&root)?;
+        let used = fs::read_dir(&root)?
+            .flatten()
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok()?;
+                let name = entry.file_name();
+                (meta.is_file() && validate_name(name.to_str()?).is_ok()).then_some(meta.len())
+            })
+            .sum();
         Ok(Self {
             root,
             uploads: HashMap::new(),
             downloads: VecDeque::new(),
+            quota_bytes: u64::from(quota_mb) * 1024 * 1024,
+            used,
+            pending: 0,
         })
     }
 
@@ -126,7 +145,7 @@ impl Spool {
             } => self.put_chunk(*transfer_id, *offset, data),
             StorageMessage::PutDone { transfer_id } => self.put_done(*transfer_id),
             StorageMessage::PutAbort { transfer_id } => {
-                self.uploads.remove(transfer_id); // Drop cleans the .part file.
+                self.drop_upload(*transfer_id);
                 Vec::new()
             }
             StorageMessage::GetStart {
@@ -232,10 +251,21 @@ impl Spool {
                 message: "transfer id already in use".into(),
             }];
         }
+        // Quota (§18.78): committed bytes plus every in-progress declared
+        // size must leave room for this upload; the reservation is released
+        // if the transfer aborts or errors out.
+        if self.used + self.pending + size > self.quota_bytes {
+            return vec![StorageMessage::Error {
+                transfer_id,
+                code: protocol::ERR_QUOTA_EXCEEDED,
+                message: "spool quota exceeded".into(),
+            }];
+        }
         let final_path = self.root.join(name);
         let tmp_path = self.root.join(format!(".{name}.{transfer_id}.part"));
         match File::create(&tmp_path) {
             Ok(file) => {
+                self.pending += size;
                 self.uploads.insert(
                     transfer_id,
                     Upload {
@@ -253,6 +283,14 @@ impl Spool {
         }
     }
 
+    /// Removes an upload and releases its quota reservation (Drop on the
+    /// `Upload` cleans the `.part` file).
+    fn drop_upload(&mut self, transfer_id: u32) {
+        if let Some(up) = self.uploads.remove(&transfer_id) {
+            self.pending = self.pending.saturating_sub(up.size);
+        }
+    }
+
     /// `PutChunk`: appends one chunk; offsets must be sequential.
     fn put_chunk(&mut self, transfer_id: u32, offset: u64, data: &[u8]) -> Vec<StorageMessage> {
         let Some(up) = self.uploads.get_mut(&transfer_id) else {
@@ -264,7 +302,7 @@ impl Spool {
         };
         if offset != up.received {
             let got = up.received;
-            self.uploads.remove(&transfer_id); // Drop cleans the .part file.
+            self.drop_upload(transfer_id);
             return vec![StorageMessage::Error {
                 transfer_id,
                 code: protocol::ERR_BAD_OFFSET,
@@ -272,7 +310,7 @@ impl Spool {
             }];
         }
         if up.received + data.len() as u64 > up.size {
-            self.uploads.remove(&transfer_id);
+            self.drop_upload(transfer_id);
             return vec![StorageMessage::Error {
                 transfer_id,
                 code: protocol::ERR_TOO_LARGE,
@@ -286,7 +324,7 @@ impl Spool {
             }
             Err(e) => {
                 let msg = e.to_string();
-                self.uploads.remove(&transfer_id); // Drop cleans the .part file.
+                self.drop_upload(transfer_id);
                 vec![StorageMessage::Error {
                     transfer_id,
                     code: protocol::ERR_IO,
@@ -305,6 +343,7 @@ impl Spool {
                 message: "no active upload with this id".into(),
             }];
         };
+        self.pending = self.pending.saturating_sub(up.size);
         if up.received != up.size {
             return vec![StorageMessage::Error {
                 transfer_id,
@@ -316,6 +355,7 @@ impl Spool {
         let final_path = up.final_path.clone();
         match fs::rename(&up.tmp_path, &up.final_path) {
             Ok(()) => {
+                self.used += up.size;
                 drop(up); // tmp no longer exists: Drop has nothing to clean.
                 info!(transfer_id, path = %final_path.display(), "upload committed");
                 vec![StorageMessage::PutAck { transfer_id }]
@@ -372,7 +412,7 @@ mod tests {
 
     fn spool() -> (tempfile::TempDir, Spool) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let s = Spool::open(dir.path().to_path_buf()).expect("spool");
+        let s = Spool::open(dir.path().to_path_buf(), 32).expect("spool");
         (dir, s)
     }
 
@@ -554,5 +594,38 @@ mod tests {
         let msgs = s.handle(&StorageMessage::PutAbort { transfer_id: 1 });
         assert_eq!(msgs, Vec::new());
         assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
+    }
+
+    #[test]
+    fn quota_blocks_oversized_uploads() {
+        // 1 MiB quota; existing files count against it from open.
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("old.bin"), vec![0u8; 500 * 1024]).expect("seed");
+        let mut s = Spool::open(dir.path().to_path_buf(), 1).expect("spool");
+        // 400 KiB fits (500 + 400 < 1024).
+        let msgs = s.handle(&StorageMessage::PutStart {
+            transfer_id: 1,
+            name: "ok.bin".into(),
+            size: 400 * 1024,
+        });
+        assert_eq!(msgs, Vec::new());
+        // A second one reserving past the quota is rejected.
+        let msgs = s.handle(&StorageMessage::PutStart {
+            transfer_id: 2,
+            name: "big.bin".into(),
+            size: 400 * 1024,
+        });
+        assert!(matches!(
+            msgs.as_slice(),
+            [StorageMessage::Error { code, .. }] if *code == protocol::ERR_QUOTA_EXCEEDED
+        ));
+        // Aborting the first releases the reservation; the retry fits.
+        let _ = s.handle(&StorageMessage::PutAbort { transfer_id: 1 });
+        let msgs = s.handle(&StorageMessage::PutStart {
+            transfer_id: 2,
+            name: "big.bin".into(),
+            size: 400 * 1024,
+        });
+        assert_eq!(msgs, Vec::new());
     }
 }

@@ -31,6 +31,9 @@
 //!          u32   fixed resolution height
 //!          u8    flags (bit0 = allow_lock: client may lock the console,
 //!                bit1 = wallpaper_off: blank the desktop wallpaper)
+//!          u32   spool quota in MiB (0 = default 32; §18.78)
+//!          u32   clipboard text cap in KiB (0 = default 1024; §18.78)
+//!          u32   input events per second (0 = default 2000; §18.78)
 //!          u8    handoff flag (0 = none, 1 = handoff block follows)
 //!          [u64  send_seq | u64 recv_seq |
 //!           u16 hello_len + Hello bytes |
@@ -41,7 +44,7 @@
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 13;
+pub const AGENT_CONFIG_VERSION: u8 = 14;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -57,8 +60,9 @@ pub const MAX_STRING_LEN: usize = 2048;
 pub const MAX_SOCKET_INFO_LEN: usize = 4096;
 
 /// Minimum frame size: version + key + ticket + the u16 string lengths
-/// (all strings empty) + fixed resolution + flags + the handoff flag.
-const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 9 * 2 + 8 + 1 + 1;
+/// (all strings empty) + fixed resolution + flags + limits + the handoff
+/// flag.
+const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 9 * 2 + 8 + 1 + 12 + 1;
 
 /// Offset where the length-prefixed string fields start.
 const STRINGS_OFF: usize = 1 + KEY_LEN + TICKET_LEN;
@@ -128,6 +132,15 @@ pub struct AgentConfig {
     /// shell-animation reduction itself is unconditional, this is the only
     /// opt-in because it is visually invasive). Restored on session end.
     pub wallpaper_off: bool,
+    /// Storage spool quota in MiB (§18.78); 0 = the agent default (32).
+    pub spool_quota_mb: u32,
+    /// Clipboard text payload cap in KiB (§18.78); 0 = the agent default
+    /// (1024).
+    pub clipboard_max_kb: u32,
+    /// Maximum injected input events per second (§18.78); 0 = the agent
+    /// default (2000). Releases (key/button up) always pass so a flood can
+    /// never leave keys stuck.
+    pub input_events_per_sec: u32,
     /// Validated-connection handoff: when present, the agent must not bind
     /// its own listener; it rebuilds the connected socket and continues the
     /// stream from these seqs.
@@ -200,6 +213,9 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
     out.extend_from_slice(&config.fixed_resolution.1.to_le_bytes());
     let flags = u8::from(config.allow_lock) | (u8::from(config.wallpaper_off) << 1);
     out.push(flags);
+    out.extend_from_slice(&config.spool_quota_mb.to_le_bytes());
+    out.extend_from_slice(&config.clipboard_max_kb.to_le_bytes());
+    out.extend_from_slice(&config.input_events_per_sec.to_le_bytes());
     match &config.handoff {
         None => out.push(0),
         Some(h) => {
@@ -244,7 +260,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         *slot = core::str::from_utf8(&rest[..len]).map_err(|_| DecodeError::BadUtf8)?;
         rest = &rest[len..];
     }
-    if rest.len() < 10 {
+    if rest.len() < 22 {
         return Err(DecodeError::Truncated);
     }
     let fixed_resolution = (
@@ -253,7 +269,10 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     );
     let allow_lock = rest[8] & 1 != 0;
     let wallpaper_off = rest[8] & 2 != 0;
-    rest = &rest[9..];
+    let spool_quota_mb = u32::from_le_bytes(rest[9..13].try_into().expect("4-byte slice"));
+    let clipboard_max_kb = u32::from_le_bytes(rest[13..17].try_into().expect("4-byte slice"));
+    let input_events_per_sec = u32::from_le_bytes(rest[17..21].try_into().expect("4-byte slice"));
+    rest = &rest[21..];
     let handoff = match rest[0] {
         0 => {
             if rest.len() != 1 {
@@ -323,6 +342,9 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         fixed_resolution,
         allow_lock,
         wallpaper_off,
+        spool_quota_mb,
+        clipboard_max_kb,
+        input_events_per_sec,
         handoff,
     })
 }
@@ -348,6 +370,9 @@ mod tests {
             fixed_resolution: (1280, 720),
             allow_lock: true,
             wallpaper_off: false,
+            spool_quota_mb: 0,
+            clipboard_max_kb: 0,
+            input_events_per_sec: 0,
             handoff: None,
         }
     }

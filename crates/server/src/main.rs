@@ -126,6 +126,8 @@ struct Args {
     /// attempt) or "software" (force libvpx). Explicit choices fall back to
     /// the chain with a warning. Only meaningful with `--preset ladder`.
     encoder: String,
+    /// Hardening caps against untrusted clients (`[limits]`, §18.78).
+    limits: server::config::LimitsConfig,
 }
 
 #[allow(clippy::too_many_lines)] // config file + CLI + agent-config frame seeding
@@ -158,6 +160,7 @@ fn parse_args() -> Result<Args> {
         handoff: None,
         quality: server::config::QualityConfig::default(),
         encoder: String::new(),
+        limits: server::config::LimitsConfig::default(),
     };
     let mut key_seen = false;
     // A config file (reference/standalone mode) seeds the defaults first;
@@ -235,6 +238,16 @@ fn parse_args() -> Result<Args> {
             }
             args.allow_lock = config.allow_lock;
             args.wallpaper_off = config.wallpaper_off;
+            // [limits] via the service (§18.78); 0 keeps the defaults.
+            if config.spool_quota_mb > 0 {
+                args.limits.spool_quota_mb = config.spool_quota_mb;
+            }
+            if config.clipboard_max_kb > 0 {
+                args.limits.clipboard_max_kb = config.clipboard_max_kb;
+            }
+            if config.input_events_per_sec > 0 {
+                args.limits.input_events_per_sec = config.input_events_per_sec;
+            }
             args.handoff = config.handoff;
             if !config.quality.is_empty() {
                 match server::config::QualityConfig::from_wire(&config.quality) {
@@ -286,6 +299,15 @@ fn parse_args() -> Result<Args> {
             "--ladder" => args.ladder = value,
             "--fps-adapt" => args.fps_adapt = value,
             "--bitrate" => args.bitrate = Some(value.parse().context("bad --bitrate")?),
+            "--spool-quota-mb" => {
+                args.limits.spool_quota_mb = value.parse().context("bad --spool-quota-mb")?;
+            }
+            "--clipboard-max-kb" => {
+                args.limits.clipboard_max_kb = value.parse().context("bad --clipboard-max-kb")?;
+            }
+            "--input-rate" => {
+                args.limits.input_events_per_sec = value.parse().context("bad --input-rate")?;
+            }
             "--width" => args.width = value.parse().context("bad --width")?,
             "--height" => args.height = value.parse().context("bad --height")?,
             "--resolution" => {
@@ -339,6 +361,8 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
     // [quality] is server policy (§18.69): top-level, independent of the
     // connection method; validated at load time.
     args.quality = config.quality;
+    // [limits] (§18.78): same top-level policy status as [quality].
+    args.limits = config.limits;
     if config.connection_method == server::config::ConnectionMethod::Standalone {
         let standalone = config
             .standalone
@@ -2485,6 +2509,8 @@ async fn serve_stream<T: ReliableTransport>(
         info!("clipboard bridge active");
     }
     let mut clip_session = protocol::ClipboardSession::new();
+    // §18.78: clipboard text cap from [limits] (default 1 MiB).
+    let clip_text_cap = args.limits.clipboard_max_kb as usize * 1024;
 
     // Storage (M8, model B): spool directory for explicit file transfers.
     // Best-effort like the clipboard: when the directory cannot be created
@@ -2493,6 +2519,7 @@ async fn serve_stream<T: ReliableTransport>(
         args.spool
             .clone()
             .unwrap_or_else(server::storage::Spool::default_root),
+        args.limits.spool_quota_mb,
     ) {
         Ok(s) => {
             info!("storage spool active");
@@ -2575,6 +2602,10 @@ async fn serve_stream<T: ReliableTransport>(
         },
         last_metrics: None,
         resize_request: None,
+        input_tokens: f64::from(args.limits.input_events_per_sec) * 2.0,
+        input_refilled: Instant::now(),
+        input_rate: f64::from(args.limits.input_events_per_sec),
+        input_dropped: 0,
         secure_input: if starts_secure {
             secure_pipes
                 .as_ref()
@@ -2813,7 +2844,7 @@ async fn serve_stream<T: ReliableTransport>(
                 } else if ch == channel::AUDIO_IN {
                     forward_mic(&mut mic_tx, &ctrl_buf[..n]);
                 } else if ch == channel::CLIPBOARD {
-                    handle_clipboard_packet(&mut legs, &mut clip_session, clipboard.as_ref(), &ctrl_buf[..n]).await;
+                    handle_clipboard_packet(&mut legs, &mut clip_session, clipboard.as_ref(), &ctrl_buf[..n], clip_text_cap).await;
                 } else if ch == channel::STORAGE {
                     handle_storage_packet(&mut legs, &mut spool, &ctrl_buf[..n]).await;
                 } else if ch == channel::SMARTCARD {
@@ -3089,6 +3120,7 @@ async fn handle_clipboard_packet<T: ReliableTransport>(
     session: &mut protocol::ClipboardSession,
     bridge: Option<&server::clipboard::ClipboardBridge>,
     buf: &[u8],
+    max_text_bytes: usize,
 ) {
     use protocol::ClipboardMessage as M;
     match M::decode(buf) {
@@ -3110,8 +3142,17 @@ async fn handle_clipboard_packet<T: ReliableTransport>(
             format,
             payload,
         }) => {
+            // §18.78: the session state consumes the generation either way,
+            // but the OS bridge only accepts text within the configured cap
+            // (the wire ceiling stays 8 MiB for future richer formats).
             if let Some(bytes) = session.peer_data(seq, format, &payload) {
-                if let Ok(text) = String::from_utf8(bytes) {
+                if bytes.len() > max_text_bytes {
+                    warn!(
+                        bytes = bytes.len(),
+                        cap = max_text_bytes,
+                        "clipboard data over the text cap; not bridged"
+                    );
+                } else if let Ok(text) = String::from_utf8(bytes) {
                     if let Some(b) = bridge {
                         b.send_command(server::clipboard::ClipboardCommand::SetText(text));
                     }
@@ -3252,6 +3293,16 @@ struct ControlState {
     /// Pending mid-session desktop resize requested by the client
     /// (`DesktopResize`, §18.37); applied by the liveness tick.
     resize_request: Option<(u32, u32)>,
+    /// Input flood guard (§18.78): token bucket over injected events;
+    /// `input_rate` events/s sustained, burst of 2 s. Releases (key/button
+    /// up) never consume tokens so a flood cannot leave keys stuck.
+    input_tokens: f64,
+    /// Last token-bucket refill instant.
+    input_refilled: Instant,
+    /// Configured input rate limit (events per second, `[limits]`).
+    input_rate: f64,
+    /// Dropped input events since the last info log (drop spam guard).
+    input_dropped: u64,
     /// Secure-desktop helper input pipe (§18.41): while `Some`, input is
     /// forwarded to the helper on the Winlogon desktop instead of the local
     /// injector (the inner `Option` is `None` until the helper connects).
@@ -3349,9 +3400,33 @@ fn handle_stream_packet(ctl: &mut ControlState, enc: &EncoderHandle, ch: u16, bu
             }
         }
         // Input channel (§10): fixed wire format, injected via SendInput on
-        // Windows (logged elsewhere).
+        // Windows (logged elsewhere). Flood-guarded (§18.78): a token bucket
+        // drops presses/moves/wheels over the configured rate; releases
+        // always pass so a flood can never leave keys stuck.
         match protocol::InputMessage::decode(buf) {
-            Ok(msg) => server::input::dispatch(&mut *ctl.injector, &msg),
+            Ok(msg) => {
+                let is_release = matches!(
+                    msg,
+                    protocol::InputMessage::Key { down: false, .. }
+                        | protocol::InputMessage::PointerButton { down: false, .. }
+                );
+                let now = Instant::now();
+                let burst = ctl.input_rate * 2.0;
+                ctl.input_tokens = (ctl.input_tokens
+                    + ctl.input_rate * now.duration_since(ctl.input_refilled).as_secs_f64())
+                .min(burst);
+                ctl.input_refilled = now;
+                if is_release || ctl.input_tokens >= 1.0 {
+                    ctl.input_tokens -= f64::from(!is_release);
+                    server::input::dispatch(&mut *ctl.injector, &msg);
+                } else {
+                    ctl.input_dropped += 1;
+                    if ctl.input_dropped >= 1000 {
+                        warn!("input flood: 1000 events dropped (rate limit)");
+                        ctl.input_dropped = 0;
+                    }
+                }
+            }
             Err(e) => warn!("bad input message: {e}"),
         }
         return;
