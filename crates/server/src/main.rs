@@ -193,8 +193,36 @@ fn parse_args() -> Result<Args> {
             args.encoder = config.encoder;
             args.ladder = config.ladder;
             args.fps_adapt = config.fps_adapt;
+            // Broker-originated tuning is untrusted input (§18.78): the
+            // broker is the source of truth but may be buggy, and a bad
+            // string must not kill the session. Anything invalid falls
+            // back to the defaults with a warning.
+            if args.preset != "ladder" && codec::CodecPreset::by_name(&args.preset).is_none() {
+                warn!(preset = %args.preset, "unknown preset in the agent config; using ladder");
+                args.preset = "ladder".to_string();
+            }
+            #[cfg(feature = "ladder")]
+            if let Err(e) = ladder_knobs(&args.ladder) {
+                warn!(error = %e, "bad ladder overrides in the agent config; using defaults");
+                args.ladder = String::new();
+            }
+            if !args.fps_adapt.is_empty()
+                && let Err(e) = server::fps::FpsPolicy::from_wire(&args.fps_adapt)
+            {
+                warn!(error = %e, "bad adaptive-fps overrides in the agent config; disabled");
+                args.fps_adapt = String::new();
+            }
             if config.fixed_resolution.0 > 0 && config.fixed_resolution.1 > 0 {
-                args.fixed_resolution = Some(config.fixed_resolution);
+                // Clamp the broker display policy to a sane desktop range.
+                let w = config
+                    .fixed_resolution
+                    .0
+                    .clamp(MIN_DESKTOP_DIMENSION, MAX_DESKTOP_DIMENSION);
+                let h = config
+                    .fixed_resolution
+                    .1
+                    .clamp(MIN_DESKTOP_DIMENSION, MAX_DESKTOP_DIMENSION);
+                args.fixed_resolution = Some((w, h));
             }
             if !config.stats_csv.is_empty() {
                 args.stats_csv = Some(config.stats_csv.into());
@@ -209,8 +237,12 @@ fn parse_args() -> Result<Args> {
             args.wallpaper_off = config.wallpaper_off;
             args.handoff = config.handoff;
             if !config.quality.is_empty() {
-                args.quality = server::config::QualityConfig::from_wire(&config.quality)
-                    .context("bad quality policy in the agent config frame")?;
+                match server::config::QualityConfig::from_wire(&config.quality) {
+                    Ok(q) => args.quality = q,
+                    // Untrusted broker input (§18.78): bad quality policy
+                    // falls back to the §12.5 defaults, never kills the agent.
+                    Err(e) => warn!(error = %e, "bad quality policy in the agent config; using defaults"),
+                }
             }
             args.source = "dxgi".to_string();
             key_seen = true;
