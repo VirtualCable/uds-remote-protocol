@@ -33,7 +33,7 @@ tokio.workspace = true
 [target.'cfg(windows)'.dependencies]
 transport.workspace = true
 flume.workspace = true
-tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "net", "time", "macros", "sync"] }
 udscredprov = { path = "../udscredprov" }
 widestring = "1.2"
 windows = { workspace = true, features = [

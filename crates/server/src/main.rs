@@ -2300,13 +2300,23 @@ async fn start_webcam<T: ReliableTransport>(
     }
 }
 
+/// Handshake deadline for direct mode (§18.78): the accept loop serves one
+/// session at a time, so an idle pre-auth peer must not stall it forever —
+/// same budget the service listener applies.
+const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 async fn serve<T: ReliableTransport>(
     raw: T,
     ticket: &[u8; protocol::TICKET_LENGTH],
     key: &[u8; consts::KEY_LENGTH],
     args: &Args,
 ) -> Result<()> {
-    let stream = EncryptedStream::server_handshake(raw, key, None).await?;
+    let stream = tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        EncryptedStream::server_handshake(raw, key, None),
+    )
+    .await
+    .context("handshake timed out")??;
     info!("handshake done");
     serve_stream(stream, ticket, key, args).await
 }

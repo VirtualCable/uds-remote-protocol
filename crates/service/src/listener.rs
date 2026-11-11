@@ -149,6 +149,10 @@ async fn accept_loop(
         }
     };
     info!(%bind, "service listener up (validating; handoff to session agent)");
+    // §18.78: each connection runs in its own task so one stalled pre-auth
+    // peer cannot starve the accept loop; the semaphore bounds concurrent
+    // in-flight handshakes so a flood cannot exhaust task slots either.
+    let handshake_slots = Arc::new(tokio::sync::Semaphore::new(MAX_IN_FLIGHT_HANDSHAKES));
     while !stop.load(Ordering::Relaxed) {
         let accepted = tokio::select! {
             _ = wait_for_stop(stop) => break,
@@ -162,14 +166,31 @@ async fn accept_loop(
             }
         };
         info!(%peer, "connection accepted by the service");
-        if let Err(err) =
-            handle_connection(socket, peer, &runtime, &slot, &creds_slot, &events).await
-        {
-            warn!(%peer, error = %format!("{err:#}"), "connection rejected before handoff");
-        }
+        let Ok(permit) = handshake_slots.clone().try_acquire_owned() else {
+            warn!(%peer, "too many in-flight handshakes; dropping connection");
+            continue;
+        };
+        let (runtime, slot, creds_slot, events) = (
+            Arc::clone(&runtime),
+            Arc::clone(&slot),
+            Arc::clone(&creds_slot),
+            events.clone(),
+        );
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(err) =
+                handle_connection(socket, peer, &runtime, &slot, &creds_slot, &events).await
+            {
+                warn!(%peer, error = %format!("{err:#}"), "connection rejected before handoff");
+            }
+        });
     }
     info!("service listener stopped");
 }
+
+/// Concurrent pre-auth handshakes the service tolerates before dropping
+/// new connections (§18.78). Legit use is one session at a time.
+const MAX_IN_FLIGHT_HANDSHAKES: usize = 8;
 
 async fn wait_for_stop(stop: &AtomicBool) {
     while !stop.load(Ordering::Relaxed) {
