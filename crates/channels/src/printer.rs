@@ -57,17 +57,41 @@ pub struct PdfToDirSink {
     open: HashMap<u32, OpenJob>,
     /// Finished jobs as (final path, bytes), drained by the session.
     done: Vec<(PathBuf, u64)>,
+    /// Aggregate bytes committed this session (§18.78 disk quota).
+    committed_bytes: u64,
 }
 
+/// Concurrent open jobs the sink tolerates (§18.78): matches the honest
+/// server's own queue cap (`server::printer::MAX_QUEUED_JOBS`).
+const MAX_OPEN_JOBS: usize = 16;
+
+/// Aggregate committed bytes per session (§18.78): a rogue server must not
+/// fill the client disk with an endless stream of print jobs.
+const MAX_DIR_BYTES: u64 = 1 << 30;
+
 impl PdfToDirSink {
-    /// Creates the sink, ensuring the destination directory exists.
+    /// Creates the sink, ensuring the destination directory exists and
+    /// removing stale `.part` files from previous sessions.
     pub fn new(dir: PathBuf, max_job_bytes: u64) -> std::io::Result<Self> {
         fs::create_dir_all(&dir)?;
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("uds-print-")
+                    && name.ends_with(".part")
+                    && let Err(e) = fs::remove_file(entry.path())
+                {
+                    warn!(path = %entry.path().display(), "cannot remove stale print job: {e}");
+                }
+            }
+        }
         Ok(Self {
             dir,
             max_job_bytes,
             open: HashMap::new(),
             done: Vec::new(),
+            committed_bytes: 0,
         })
     }
 }
@@ -79,6 +103,11 @@ impl PrinterSink for PdfToDirSink {
         printer_name: &str,
         document_name: &str,
     ) -> Result<(), u32> {
+        // §18.78: bound concurrent open jobs (fds and .part files).
+        if self.open.len() >= MAX_OPEN_JOBS {
+            warn!(job_id, "too many open print jobs; rejecting");
+            return Err(STATUS_FAILED);
+        }
         // A reused job id means the previous one never closed: discard it.
         self.open.remove(&job_id);
         let tmp_path = self.dir.join(format!("uds-print-{job_id}.part"));
@@ -144,11 +173,21 @@ impl PrinterSink for PdfToDirSink {
         // Close the handle before the rename (Windows forbids renaming an
         // open file).
         drop(job.file.take());
+        // §18.78: aggregate disk quota across committed jobs.
+        if self.committed_bytes + job.received > MAX_DIR_BYTES {
+            warn!(
+                job_id,
+                committed = self.committed_bytes,
+                "print directory quota exceeded; dropping job"
+            );
+            return Err(STATUS_FAILED);
+        }
         let final_path = unique_path(&self.dir, &sanitize_name(&job.document_name));
         let bytes = job.received;
         match fs::rename(&job.tmp_path, &final_path) {
             Ok(()) => {
                 job.committed = true; // Drop must keep the file.
+                self.committed_bytes += bytes;
                 info!(job_id, path = %final_path.display(), bytes, "print job done");
                 self.done.push((final_path, bytes));
                 Ok(())
@@ -247,6 +286,20 @@ mod tests {
         sink.write_data(9, &[1, 2, 3]).unwrap();
         sink.abort_job(9);
         assert!(fs::read_dir(&dir).expect("dir").next().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_jobs_are_capped() {
+        let dir = std::env::temp_dir().join(format!("uds-print-test-jobs-{}", std::process::id()));
+        let mut sink = PdfToDirSink::new(dir.clone(), 1 << 20).expect("dir");
+        for id in 0..MAX_OPEN_JOBS as u32 {
+            sink.create_job(id, "UDS Printer", "j").unwrap();
+        }
+        assert!(
+            sink.create_job(100, "UDS Printer", "j").is_err(),
+            "the {MAX_OPEN_JOBS}-plus-one job must be rejected"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

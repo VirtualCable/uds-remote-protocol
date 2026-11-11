@@ -54,6 +54,10 @@ pub struct CamSpec {
 #[cfg(feature = "vp9")]
 const CAM_QUEUE_DGRAMS: usize = 2048;
 
+/// Absolute webcam bitrate ceiling (§18.78): far above any sane webcam
+/// stream; a rogue server must not turn the encoder into a CPU sink.
+const MAX_CAM_BITRATE_KBPS: u32 = 20_000;
+
 /// Client webcam endpoint: owns the capture+encode thread while streaming.
 pub struct CamClient {
     /// The capture source; `None` while streaming (moved into the thread)
@@ -110,6 +114,11 @@ impl CamClient {
 
     /// Applies the server's webcam configuration (§18.57). The stream does
     /// not start until [`CamClient::start`] (the server's `WebcamStart`).
+    ///
+    /// §18.78: the honest server clamps its choice to the announced
+    /// `WebcamCaps`, but a rogue one could request a giant geometry whose
+    /// encoder init allocates gigabytes — re-clamp at the trust boundary
+    /// against the source's real limits.
     pub fn configure(&mut self, spec: CamSpec) {
         if spec.codec != VideoCodecType::Vp9.wire_id() {
             warn!(
@@ -118,6 +127,30 @@ impl CamClient {
             );
             return;
         }
+        let spec = if let Some(source) = &self.source {
+            let (max_width, max_height) = source.max_dimensions();
+            let max_fps =
+                u8::try_from(source.max_fps().min(u32::from(u8::MAX))).unwrap_or(u8::MAX);
+            let clamped = CamSpec {
+                width: spec.width.clamp(16, max_width.max(16)),
+                height: spec.height.clamp(16, max_height.max(16)),
+                fps: spec.fps.clamp(1, max_fps.max(1)),
+                bitrate_kbps: spec.bitrate_kbps.clamp(16, MAX_CAM_BITRATE_KBPS),
+                ..spec
+            };
+            if (clamped.width, clamped.height, clamped.fps, clamped.bitrate_kbps)
+                != (spec.width, spec.height, spec.fps, spec.bitrate_kbps)
+            {
+                warn!(
+                    requested = ?(spec.width, spec.height, spec.fps, spec.bitrate_kbps),
+                    applied = ?(clamped.width, clamped.height, clamped.fps, clamped.bitrate_kbps),
+                    "server webcam config exceeded the announced caps; clamped"
+                );
+            }
+            clamped
+        } else {
+            spec
+        };
         self.spec = Some(spec);
     }
 

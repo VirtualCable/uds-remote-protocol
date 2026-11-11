@@ -398,6 +398,20 @@ impl StorageClient {
             return Vec::new();
         }
         let dl = self.download.as_mut().expect("checked");
+        // §18.78: a rogue server must not stream past its own declared
+        // listing size nor past the protocol file cap.
+        let cap = dl
+            .total
+            .unwrap_or(protocol::MAX_FILE_SIZE)
+            .min(protocol::MAX_FILE_SIZE);
+        if dl.received + data.len() as u64 > cap {
+            self.download = None; // Drop removes the .part file.
+            self.out.push(StorageMessage::GetAbort { transfer_id });
+            return vec![Self::err_event(
+                transfer_id,
+                "download exceeds its declared size; aborted",
+            )];
+        }
         let file = dl.file.as_mut().expect("closed only at commit");
         match file.write_all(data) {
             Ok(()) => {
@@ -565,6 +579,43 @@ mod tests {
             events.as_slice(),
             [ClientEvent::StorageList { entries }] if entries.len() == 1
         ));
+    }
+
+    #[test]
+    fn download_past_declared_size_aborts() {
+        // §18.78: a rogue server streaming past its own declared listing
+        // size must be cut off (and the .part removed).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dest = dir.path().join("big.bin");
+        let mut c = StorageClient::new();
+        c.list();
+        let _ = c.handle(&StorageMessage::ListEntry {
+            name: "big.bin".into(),
+            size: 4,
+        });
+        let _ = c.handle(&StorageMessage::ListDone);
+        let _ = c.start_download("big.bin", &dest);
+        let id = c.download.as_ref().expect("active").id;
+        let _ = c.handle(&StorageMessage::GetChunk {
+            transfer_id: id,
+            offset: 0,
+            data: b"1234".to_vec(),
+        });
+        let events = c.handle(&StorageMessage::GetChunk {
+            transfer_id: id,
+            offset: 4,
+            data: b"5".to_vec(),
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [ClientEvent::TransferError { .. }]
+        ));
+        assert!(c.download.is_none());
+        assert!(matches!(
+            c.out.last(),
+            Some(StorageMessage::GetAbort { .. })
+        ));
+        assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 0);
     }
 
     #[test]
