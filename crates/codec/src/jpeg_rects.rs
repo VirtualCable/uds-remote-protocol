@@ -264,7 +264,7 @@ fn u32_at(buf: &mut &[u8]) -> Result<u32> {
 /// Upper bound for the geometry a packet header may declare: anything
 /// bigger is a mis-parse (or an attack), not a real display. 8192² RGBA is
 /// 256 MiB — already far beyond any realistic remote desktop.
-const MAX_FRAME_DIM: u32 = 8192;
+const MAX_FRAME_DIM: u32 = crate::video::MAX_DECODE_DIM;
 
 impl VideoDecoder for JpegRectsDecoder {
     fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {

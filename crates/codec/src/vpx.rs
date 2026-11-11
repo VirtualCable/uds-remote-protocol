@@ -437,13 +437,21 @@ impl VpxDecoder {
             VideoCodecType::Vp8 => Iface::Vp8Dec,
             _ => return Err(CodecError::Unsupported("not a libvpx decoder")),
         };
-        // SAFETY: zeroed ctx is valid; null cfg uses decoder defaults.
+        // §18.78: cap the decoder's frame pool at MAX_DECODE_DIM so a
+        // stream with crafted header dimensions is rejected before libvpx
+        // sizes its internal buffers from them. SAFETY: zeroed ctx is
+        // valid; cfg lives for the call.
         unsafe {
             let mut ctx: sys::vpx_codec_ctx_t = std::mem::zeroed();
+            let cfg = sys::vpx_codec_dec_cfg {
+                threads: 1,
+                w: crate::video::MAX_DECODE_DIM,
+                h: crate::video::MAX_DECODE_DIM,
+            };
             let e = sys::vpx_codec_dec_init_ver(
                 &mut ctx,
                 iface.ptr(),
-                std::ptr::null(),
+                &raw const cfg,
                 0,
                 sys::VPX_DECODER_ABI_VERSION as i32,
             );
@@ -487,6 +495,14 @@ impl VideoDecoder for VpxDecoder {
             }
             let img = &*img;
             let (w, h) = (img.d_w, img.d_h);
+            // §18.78: belt-and-braces re-check of the decoded geometry
+            // before any plane is materialized (the init-time cfg cap is
+            // the primary defense, but a backend quirk must never turn
+            // attacker-declared dimensions into host allocations).
+            if w == 0 || h == 0 || w > crate::video::MAX_DECODE_DIM || h > crate::video::MAX_DECODE_DIM
+            {
+                return Err(CodecError::Malformed);
+            }
             let y_stride = usize::try_from(img.stride[0]).map_err(|_| CodecError::Malformed)?;
             let uv_stride = usize::try_from(img.stride[1]).map_err(|_| CodecError::Malformed)?;
             let uv_h = (h as usize).div_ceil(2);

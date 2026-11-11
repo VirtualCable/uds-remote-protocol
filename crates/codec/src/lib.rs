@@ -68,8 +68,8 @@ pub use opus::{OpusDecoder, OpusEncoder};
 pub use preset::{CodecParams, CodecPreset, DEFAULT_BITRATE_KBPS, PRESETS, build_decoder};
 pub use raw::{RawDecoder, RawEncoder};
 pub use video::{
-    DecodedFrame, EncodedPacket, VideoCodecType, VideoDecoder, VideoEncoder, VideoFrame,
-    packet_is_keyframe,
+    DecodedFrame, EncodedPacket, MAX_DECODE_DIM, VideoCodecType, VideoDecoder, VideoEncoder,
+    VideoFrame, packet_is_keyframe,
 };
 #[cfg(feature = "codec-vp8")]
 pub use vpx::{Vp8Decoder, Vp8Encoder};

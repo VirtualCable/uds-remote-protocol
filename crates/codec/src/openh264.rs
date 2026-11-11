@@ -315,6 +315,12 @@ impl VideoDecoder for OpenH264Decoder {
         if buf.iWidth <= 0 || buf.iHeight <= 0 {
             return Err(CodecError::Malformed);
         }
+        // §18.78: hard ceiling on decoded geometry before any plane copy.
+        if buf.iWidth as u32 > crate::video::MAX_DECODE_DIM
+            || buf.iHeight as u32 > crate::video::MAX_DECODE_DIM
+        {
+            return Err(CodecError::Malformed);
+        }
         let w = usize::try_from(buf.iWidth).map_err(|_| CodecError::Malformed)?;
         let h = usize::try_from(buf.iHeight).map_err(|_| CodecError::Malformed)?;
         let y_stride = usize::try_from(buf.iStride[0]).map_err(|_| CodecError::Malformed)?;

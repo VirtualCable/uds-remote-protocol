@@ -176,6 +176,13 @@ pub trait VideoEncoder: Send {
     }
 }
 
+/// Hard ceiling for any decoded frame dimension (§18.78): every decoder
+/// rejects frames wider/taller than this before materializing planes, so a
+/// crafted stream cannot turn attacker-declared geometry into unbounded
+/// host allocations. 8K UHD (7680×4320) fits; nothing we negotiate exceeds
+/// it (`MAX_DESKTOP_DIMENSION` server-side is the same order).
+pub const MAX_DECODE_DIM: u32 = 8192;
+
 /// Video decoder: bitstream packet in → BGRA frame out.
 ///
 /// `Send` (like the audio traits): the client session owns its decoders and

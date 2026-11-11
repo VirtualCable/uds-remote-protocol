@@ -96,7 +96,12 @@ impl VideoDecoder for RawDecoder {
             .checked_mul(height as usize)
             .ok_or(CodecError::Malformed)?;
         let data = &packet.data[8..];
-        if width == 0 || height == 0 || data.len() != expected {
+        if width == 0
+            || height == 0
+            || width > crate::video::MAX_DECODE_DIM
+            || height > crate::video::MAX_DECODE_DIM
+            || data.len() != expected
+        {
             return Err(CodecError::Malformed);
         }
         Ok(Some(DecodedFrame {

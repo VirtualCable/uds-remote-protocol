@@ -1318,6 +1318,12 @@ impl MfDecoder {
             .map_err(|e| CodecError::Backend(format!("decoder output frame size: {e}")))?;
         let width = (packed >> 32) as u32;
         let alloc_h = u32::try_from(packed & 0xFFFF_FFFF).expect("low 32 bits fit");
+        // §18.78: hard ceiling on decoded geometry before any output buffer
+        // is sized from it.
+        if width == 0 || alloc_h == 0 || width > crate::video::MAX_DECODE_DIM || alloc_h > crate::video::MAX_DECODE_DIM
+        {
+            return Err(CodecError::Malformed);
+        }
         // Negative strides (bottom-up) are legal MF; none of our decoders
         // produce them and the layout math below assumes top-down.
         let raw = unsafe { ty.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.unwrap_or(width);

@@ -126,3 +126,50 @@ fn vp9_decoder_rejects_garbage() {
     };
     assert!(dec.decode(&bad).is_err());
 }
+
+/// §18.78 regression: a tiny keyframe whose uncompressed-header
+/// width/height-minus-1 fields declare 16383x16383 must be rejected by the
+/// decoder dimension cap (init-time cfg cap in libvpx + post-decode
+/// re-check), not honored with a multi-hundred-MiB allocation.
+#[test]
+fn vp9_decoder_rejects_crafted_dimensions() {
+    let (w, h) = (64, 64);
+    let data = gradient_frame(w, h);
+    let frame = VideoFrame {
+        width: w,
+        height: h,
+        stride: (w * 4) as usize,
+        data: &data,
+    };
+    let mut enc = Vp9Encoder::new(w, h, 500).expect("encoder init");
+    let packet = enc.encode(&frame).expect("encode");
+    assert!(packet.keyframe);
+    // Keyframe layout: marker(2b) profile(2b) show_existing(1b)
+    // frame_type(1b) show_frame(1b) error_resilient(1b) sync(24b) at
+    // bytes 1-3, then w-1 (16b MSB-first) and h-1 (16b MSB-first).
+    let mut crafted = packet.data.clone();
+    assert_eq!(&crafted[1..4], &[0x49, 0x83, 0x42], "VP9 sync code");
+    let set_bits = |buf: &mut [u8], bit_off: usize, value: u32, nbits: usize| {
+        for i in 0..nbits {
+            let bit = (value >> (nbits - 1 - i)) & 1;
+            let pos = bit_off + i;
+            let mask = 1 << (7 - (pos % 8));
+            if bit == 1 {
+                buf[pos / 8] |= mask;
+            } else {
+                buf[pos / 8] &= !mask;
+            }
+        }
+    };
+    set_bits(&mut crafted, 36, 16383, 16);
+    set_bits(&mut crafted, 52, 16383, 16);
+    let mut dec = Vp9Decoder::new().expect("decoder init");
+    let crafted = codec::EncodedPacket {
+        data: crafted,
+        keyframe: true,
+    };
+    assert!(
+        dec.decode(&crafted).is_err(),
+        "crafted 16383x16383 dimensions must be rejected by the cap"
+    );
+}
