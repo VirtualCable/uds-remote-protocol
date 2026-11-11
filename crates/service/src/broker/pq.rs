@@ -100,6 +100,10 @@ impl PqProvider {
         let client = reqwest::Client::builder()
             .user_agent(concat!("uds-rp/", env!("CARGO_PKG_VERSION")))
             .danger_accept_invalid_certs(!verify_ssl)
+            // The broker may be buggy or wedged (§18.78): an unbounded wait
+            // would stall the session handshake forever, so bound it.
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5))
             .build()
             .context("building the broker HTTP client")?;
         let (kem_private_key, kem_public_key) = kem_keypair();
