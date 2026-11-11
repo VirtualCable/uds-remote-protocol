@@ -6,7 +6,7 @@
 # Builds the Windows binaries of the workspace inside the uds-rp-builder
 # container. Run from building/windows/:
 #
-#   .\build.ps1                    # default: the standalone client
+#   .\build.ps1                    # default: the lab client package
 #   .\build.ps1 -Package server    # any workspace package
 #
 # The image mounts the repo at c:\crate and writes build outputs to
@@ -15,7 +15,7 @@
 # under target-windows/release/.
 
 param(
-    [string]$Package = "uds-rp-client",
+    [string]$Package = "labclient",
     [string]$Image = "uds-rp-builder"
 )
 
