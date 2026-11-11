@@ -43,6 +43,6 @@ smartcard = false
 # [limits] — hardening caps against untrusted clients (top-level, like
 # [quality]). Absent keys keep the defaults shown here.
 # [limits]
-# spool_quota_mb = 32        # storage spool quota; uploads past it are rejected
+# spool_quota_mb = 256       # storage spool quota; uploads past it are rejected
 # clipboard_max_kb = 1024    # clipboard text cap (wire ceiling stays 8 MiB)
 # input_events_per_sec = 2000 # input injection rate limit (releases always pass)

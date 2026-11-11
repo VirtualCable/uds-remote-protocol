@@ -31,7 +31,7 @@
 //!          u32   fixed resolution height
 //!          u8    flags (bit0 = allow_lock: client may lock the console,
 //!                bit1 = wallpaper_off: blank the desktop wallpaper)
-//!          u32   spool quota in MiB (0 = default 32; §18.78)
+//!          u32   spool quota in MiB (0 = default 256; §18.78)
 //!          u32   clipboard text cap in KiB (0 = default 1024; §18.78)
 //!          u32   input events per second (0 = default 2000; §18.78)
 //!          u8    handoff flag (0 = none, 1 = handoff block follows)
@@ -132,7 +132,7 @@ pub struct AgentConfig {
     /// shell-animation reduction itself is unconditional, this is the only
     /// opt-in because it is visually invasive). Restored on session end.
     pub wallpaper_off: bool,
-    /// Storage spool quota in MiB (§18.78); 0 = the agent default (32).
+    /// Storage spool quota in MiB (§18.78); 0 = the agent default (256).
     pub spool_quota_mb: u32,
     /// Clipboard text payload cap in KiB (§18.78); 0 = the agent default
     /// (1024).

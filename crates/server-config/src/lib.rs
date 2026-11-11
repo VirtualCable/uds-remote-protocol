@@ -101,7 +101,7 @@ pub struct LimitsConfig {
 impl Default for LimitsConfig {
     fn default() -> Self {
         Self {
-            spool_quota_mb: 32,
+            spool_quota_mb: 256,
             clipboard_max_kb: 1024,
             input_events_per_sec: 2000,
         }
