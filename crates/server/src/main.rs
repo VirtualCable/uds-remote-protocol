@@ -1291,6 +1291,22 @@ const AUDIO_CEILING_KBPS: u32 = 64;
 /// keyframe is forced instead of growing latency.
 const DISPLAY_QUEUE_DGRAMS: usize = 2048;
 
+/// Client-input hardening clamps (§18.78): the client is untrusted, so
+/// anything it advertises or requests is bounded here before use.
+/// Minimum accepted desktop dimension for `DesktopResize`.
+const MIN_DESKTOP_DIMENSION: u32 = 200;
+/// Maximum accepted desktop dimension for `DesktopResize` (8K UHD).
+const MAX_DESKTOP_DIMENSION: u32 = 7680;
+/// Cap for client-reported RTT/jitter (microseconds); beyond 60 s the
+/// network baseline would be poisoned by nonsense.
+const MAX_METRIC_MICROS: u64 = 60_000_000;
+/// Maximum advertised webcam dimension (`WebcamCaps`).
+const MAX_WEBCAM_DIMENSION: u32 = 7680;
+/// Maximum advertised webcam frame rate (`WebcamCaps`).
+const MAX_WEBCAM_FPS: u8 = 60;
+/// Maximum advertised webcam codec list length (`WebcamCaps`).
+const MAX_WEBCAM_CODECS: usize = 8;
+
 /// Feeds one link-quality report into the quality controller. FEC reacts to
 /// the loss signal on every report (hysteresis, §12.5); when the level
 /// changes, the new targets are applied: video encoder bitrate, capture fps,
@@ -1302,6 +1318,11 @@ fn handle_metrics(
     jitter_micros: u64,
     loss_permille: u16,
 ) {
+    // The client is untrusted (§18.78): a bogus report must not poison the
+    // network baseline, so clamp every field to a physically sane range.
+    let rtt_micros = rtt_micros.min(MAX_METRIC_MICROS);
+    let jitter_micros = jitter_micros.min(MAX_METRIC_MICROS);
+    let loss_permille = loss_permille.min(1000);
     let loss = f64::from(loss_permille) / 1000.0;
     ctl.last_metrics = Some((rtt_micros, jitter_micros, loss_permille));
     // FEC is loss-driven, not level-driven: evaluate it on every report.
@@ -3310,6 +3331,11 @@ fn handle_stream_packet(ctl: &mut ControlState, enc: &EncoderHandle, ch: u16, bu
             }
         }
         Ok(ControlMessage::DesktopResize { width, height }) => {
+            // The client is untrusted: clamp the requested geometry to a
+            // sane desktop range before it reaches the resize machinery
+            // (§18.78); an absurd request is clamped, never fatal.
+            let width = width.clamp(MIN_DESKTOP_DIMENSION, MAX_DESKTOP_DIMENSION);
+            let height = height.clamp(MIN_DESKTOP_DIMENSION, MAX_DESKTOP_DIMENSION);
             info!(width, height, "desktop resize requested by client (§18.37)");
             ctl.resize_request = Some((width, height));
         }
@@ -3338,18 +3364,42 @@ fn handle_stream_packet(ctl: &mut ControlState, enc: &EncoderHandle, ch: u16, bu
             max_fps,
             codecs,
         }) => {
+            let caps = sanitize_webcam_caps(max_width, max_height, max_fps, codecs);
             info!(
-                max_width,
-                max_height,
-                max_fps,
-                ?codecs,
+                max_width = caps.0,
+                max_height = caps.1,
+                max_fps = caps.2,
+                codecs = ?caps.3,
                 "client webcam capabilities"
             );
-            ctl.cam_caps = Some((max_width, max_height, max_fps, codecs));
+            ctl.cam_caps = Some(caps);
         }
         Ok(_) => {} // other control messages: not handled here yet
         Err(e) => warn!("undecodable control message: {e}"),
     }
+}
+
+/// Sanitizes client-advertised webcam capabilities (§18.78): the client is
+/// untrusted, so geometry/fps are clamped and only known codec wire ids are
+/// kept (deduped, capped) before the caps steer format selection.
+fn sanitize_webcam_caps(
+    max_width: u32,
+    max_height: u32,
+    max_fps: u8,
+    codecs: Vec<u16>,
+) -> (u32, u32, u8, Vec<u16>) {
+    let mut codecs: Vec<u16> = codecs
+        .into_iter()
+        .filter(|id| codec::VideoCodecType::from_wire_id(*id).is_some())
+        .collect();
+    codecs.dedup();
+    codecs.truncate(MAX_WEBCAM_CODECS);
+    (
+        max_width.min(MAX_WEBCAM_DIMENSION),
+        max_height.min(MAX_WEBCAM_DIMENSION),
+        max_fps.clamp(1, MAX_WEBCAM_FPS),
+        codecs,
+    )
 }
 
 /// Locks the console session on a client `LockRequest` (§18.50): the OS
