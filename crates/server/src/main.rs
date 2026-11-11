@@ -1986,7 +1986,7 @@ async fn setup_audio<T: ReliableTransport>(
 /// sender that incoming `AUDIO_IN` payloads are forwarded to. Returns
 /// `None` — no announce, incoming packets dropped — when the sink is
 /// `null`, unknown, or the decoder cannot be built.
-fn setup_mic(args: &Args) -> Option<std::sync::mpsc::Sender<Vec<u8>>> {
+fn setup_mic(args: &Args) -> Option<std::sync::mpsc::SyncSender<Vec<u8>>> {
     if args.mic_sink == "null" {
         return None;
     }
@@ -2037,14 +2037,21 @@ async fn announce_mic<T: ReliableTransport>(legs: &mut Legs<T>) -> Result<()> {
     Ok(())
 }
 
-/// Forwards one `AUDIO_IN` payload to the mic thread. A send failure means
-/// the thread ended; disable forwarding for the rest of the session instead
-/// of failing the connection.
-fn forward_mic(tx: &mut Option<std::sync::mpsc::Sender<Vec<u8>>>, payload: &[u8]) {
+/// Forwards one `AUDIO_IN` payload to the mic thread. A full queue drops the
+/// payload (bounded channel, §18.78: audio is lossy by nature and a flooding
+/// client must not grow memory); a send failure means the thread ended and
+/// disables forwarding for the rest of the session.
+fn forward_mic(tx: &mut Option<std::sync::mpsc::SyncSender<Vec<u8>>>, payload: &[u8]) {
     let Some(t) = tx else { return };
-    if t.send(payload.to_vec()).is_err() {
-        warn!("mic thread ended; audio-in disabled for this session");
-        *tx = None;
+    match t.try_send(payload.to_vec()) {
+        Ok(()) => {}
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            debug!("mic queue full; audio-in payload dropped");
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+            warn!("mic thread ended; audio-in disabled for this session");
+            *tx = None;
+        }
     }
 }
 
@@ -2052,7 +2059,7 @@ fn forward_mic(tx: &mut Option<std::sync::mpsc::Sender<Vec<u8>>>, payload: &[u8]
 /// incoming `WEBCAM` fragments are forwarded to, plus the signals the cam
 /// thread raises (keyframe-needed on fragment loss, frame counters).
 struct CamEndpoint {
-    tx: std::sync::mpsc::Sender<Vec<u8>>,
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     signals: std::sync::Arc<server::cam::CamSignals>,
 }
 
@@ -2100,9 +2107,17 @@ fn setup_cam(args: &Args) -> Option<CamEndpoint> {
 /// [`forward_mic`]).
 fn forward_cam(cam: &mut Option<CamEndpoint>, payload: &[u8]) {
     let Some(c) = cam else { return };
-    if c.tx.send(payload.to_vec()).is_err() {
-        warn!("cam thread ended; webcam redirection disabled for this session");
-        *cam = None;
+    match c.tx.try_send(payload.to_vec()) {
+        Ok(()) => {}
+        // Bounded queue (§18.78): a full queue drops the fragment; the loss
+        // follows the usual dropped-frame → keyframe-request recovery.
+        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+            debug!("cam queue full; webcam fragment dropped");
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+            warn!("cam thread ended; webcam redirection disabled for this session");
+            *cam = None;
+        }
     }
 }
 

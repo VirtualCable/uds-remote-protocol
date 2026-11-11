@@ -26,7 +26,7 @@
 //! 32 kbps is cheap); sender-side silence suppression is a future refinement.
 
 use std::io::{Seek as _, SeekFrom, Write as _};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
@@ -285,15 +285,21 @@ fn run(rx: &Receiver<Vec<u8>>, mut pump: MicPump, frame_time: Duration) {
     }
 }
 
+/// Bounded queue depth between the session loop and the mic thread
+/// (§18.78): 100 payloads ≈ 2 s of 20 ms frames. An untrusted client
+/// flooding `AUDIO_IN` drops packets here instead of growing memory
+/// without bound.
+const MIC_QUEUE_PAYLOADS: usize = 100;
+
 /// Starts the mic receive pipeline for one session (§9.2): a thread owning
 /// jitter buffer + Opus decoder + `sink`, fed raw `AUDIO_IN` payloads
-/// through the returned channel (unbounded and non-blocking on the send
-/// side, like the client's audio channel; a dead thread surfaces as a send
-/// error at the forwarding point).
+/// through the returned bounded channel ([`MIC_QUEUE_PAYLOADS`]); a full
+/// queue drops the payload at the forwarding point (audio is lossy by
+/// nature) and a dead thread surfaces as a send error.
 ///
 /// Returns `None` (audio-in disabled with a warning) when the Opus decoder
 /// is not compiled in.
-pub fn spawn_mic(sink: Box<dyn MicSink>) -> Option<Sender<Vec<u8>>> {
+pub fn spawn_mic(sink: Box<dyn MicSink>) -> Option<SyncSender<Vec<u8>>> {
     let preset = audio_in_preset();
     let pump = match MicPump::new(sink) {
         Ok(p) => p,
@@ -302,7 +308,7 @@ pub fn spawn_mic(sink: Box<dyn MicSink>) -> Option<Sender<Vec<u8>>> {
             return None;
         }
     };
-    let (tx, rx) = channel();
+    let (tx, rx) = sync_channel(MIC_QUEUE_PAYLOADS);
     let frame_time = Duration::from_millis(u64::from(preset.frame_ms));
     std::thread::Builder::new()
         .name("mic-receive".to_string())

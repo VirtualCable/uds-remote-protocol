@@ -26,7 +26,7 @@
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -39,6 +39,13 @@ use tracing::{debug, info, warn};
 /// count). Webcam fps is ≥ 5 in any sane configuration, so 500 ms covers
 /// several frames of network slack.
 const STALE_FRAME_AGE: Duration = Duration::from_millis(500);
+
+/// Bounded queue depth between the session loop and the cam thread
+/// (§18.78): 256 fragments cover several worst-case frames. An untrusted
+/// client flooding `WEBCAM` drops fragments here instead of growing memory
+/// without bound (the loss surfaces as a dropped frame and the usual
+/// keyframe recovery).
+const CAM_QUEUE_PAYLOADS: usize = 256;
 
 /// File magic of the [`RawSink`] format.
 const RAW_MAGIC: &[u8; 8] = b"URPCAM01";
@@ -273,12 +280,12 @@ fn run(rx: &Receiver<Vec<u8>>, mut pump: CamPump) {
 
 /// Starts the webcam receive pipeline for one session (§18.57): a thread
 /// owning reassembler + VP9 decoder + `sink`, fed raw `WEBCAM` fragments
-/// through the returned channel (unbounded and non-blocking on the send
-/// side, like the mic pipeline).
+/// through the returned bounded channel ([`CAM_QUEUE_PAYLOADS`], same
+/// bounded-drop policy as the mic pipeline, §18.78).
 ///
 /// Returns `None` (webcam redirection disabled with a warning) when the VP9
 /// decoder is not compiled in.
-pub fn spawn_cam(sink: Box<dyn CamSink>) -> Option<(Sender<Vec<u8>>, Arc<CamSignals>)> {
+pub fn spawn_cam(sink: Box<dyn CamSink>) -> Option<(SyncSender<Vec<u8>>, Arc<CamSignals>)> {
     let signals = Arc::new(CamSignals {
         keyframe_needed: AtomicBool::new(false),
         frames_decoded: AtomicU64::new(0),
@@ -291,7 +298,7 @@ pub fn spawn_cam(sink: Box<dyn CamSink>) -> Option<(Sender<Vec<u8>>, Arc<CamSign
             return None;
         }
     };
-    let (tx, rx) = channel();
+    let (tx, rx) = sync_channel(CAM_QUEUE_PAYLOADS);
     std::thread::Builder::new()
         .name("cam-receive".to_string())
         .spawn(move || run(&rx, pump))
