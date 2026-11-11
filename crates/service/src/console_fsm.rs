@@ -231,6 +231,7 @@ fn legacy_config() -> protocol::service_ipc::AgentConfig {
         spool_quota_mb: 0,
         clipboard_max_kb: 0,
         input_events_per_sec: 0,
+        channels: protocol::service_ipc::CHANNELS_DEFAULT,
         handoff: None,
     }
 }

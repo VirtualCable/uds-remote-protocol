@@ -34,6 +34,7 @@
 //!          u32   spool quota in MiB (0 = default 256; §18.78)
 //!          u32   clipboard text cap in KiB (0 = default 1024; §18.78)
 //!          u32   input events per second (0 = default 2000; §18.78)
+//!          u8    channel-switch bitmask (CHANNEL_*; 0 = CHANNELS_DEFAULT)
 //!          u8    handoff flag (0 = none, 1 = handoff block follows)
 //!          [u64  send_seq | u64 recv_seq |
 //!           u16 hello_len + Hello bytes |
@@ -44,7 +45,23 @@
 
 /// Current frame version. Bump on any layout change; the agent rejects
 /// mismatches (the service and agent ship together, so there is no compat).
-pub const AGENT_CONFIG_VERSION: u8 = 14;
+pub const AGENT_CONFIG_VERSION: u8 = 15;
+
+/// Channel-switch bitmask carried in [`AgentConfig::channels`]: which
+/// optional channels the session offers (§18.78). Server-side policy is
+/// mandatory — the client cannot enable what this disables.
+pub const CHANNEL_AUDIO: u8 = 1 << 0;
+/// Clipboard bridge switch.
+pub const CHANNEL_CLIPBOARD: u8 = 1 << 1;
+/// File-transfer spool switch.
+pub const CHANNEL_STORAGE: u8 = 1 << 2;
+/// Smart-card bridge switch.
+pub const CHANNEL_SMARTCARD: u8 = 1 << 3;
+/// Printer redirection switch.
+pub const CHANNEL_PRINTER: u8 = 1 << 4;
+/// Conservative default: audio + clipboard only (mirrors the broker
+/// payload's `ChannelPolicy::default`).
+pub const CHANNELS_DEFAULT: u8 = CHANNEL_AUDIO | CHANNEL_CLIPBOARD;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
@@ -62,7 +79,7 @@ pub const MAX_SOCKET_INFO_LEN: usize = 4096;
 /// Minimum frame size: version + key + ticket + the u16 string lengths
 /// (all strings empty) + fixed resolution + flags + limits + the handoff
 /// flag.
-const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 9 * 2 + 8 + 1 + 12 + 1;
+const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 9 * 2 + 8 + 1 + 12 + 1 + 1;
 
 /// Offset where the length-prefixed string fields start.
 const STRINGS_OFF: usize = 1 + KEY_LEN + TICKET_LEN;
@@ -141,6 +158,11 @@ pub struct AgentConfig {
     /// default (2000). Releases (key/button up) always pass so a flood can
     /// never leave keys stuck.
     pub input_events_per_sec: u32,
+    /// Channel-switch bitmask (`CHANNEL_*`): which optional channels the
+    /// session offers. 0 selects [`CHANNELS_DEFAULT`]. The broker ticket
+    /// payload (pq mode) or `[standalone.channels]` decides; the client
+    /// cannot override a disabled channel.
+    pub channels: u8,
     /// Validated-connection handoff: when present, the agent must not bind
     /// its own listener; it rebuilds the connected socket and continues the
     /// stream from these seqs.
@@ -216,6 +238,7 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
     out.extend_from_slice(&config.spool_quota_mb.to_le_bytes());
     out.extend_from_slice(&config.clipboard_max_kb.to_le_bytes());
     out.extend_from_slice(&config.input_events_per_sec.to_le_bytes());
+    out.push(config.channels);
     match &config.handoff {
         None => out.push(0),
         Some(h) => {
@@ -260,7 +283,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         *slot = core::str::from_utf8(&rest[..len]).map_err(|_| DecodeError::BadUtf8)?;
         rest = &rest[len..];
     }
-    if rest.len() < 22 {
+    if rest.len() < 23 {
         return Err(DecodeError::Truncated);
     }
     let fixed_resolution = (
@@ -272,7 +295,8 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     let spool_quota_mb = u32::from_le_bytes(rest[9..13].try_into().expect("4-byte slice"));
     let clipboard_max_kb = u32::from_le_bytes(rest[13..17].try_into().expect("4-byte slice"));
     let input_events_per_sec = u32::from_le_bytes(rest[17..21].try_into().expect("4-byte slice"));
-    rest = &rest[21..];
+    let channels = rest[21];
+    rest = &rest[22..];
     let handoff = match rest[0] {
         0 => {
             if rest.len() != 1 {
@@ -345,6 +369,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         spool_quota_mb,
         clipboard_max_kb,
         input_events_per_sec,
+        channels,
         handoff,
     })
 }
@@ -373,6 +398,7 @@ mod tests {
             spool_quota_mb: 0,
             clipboard_max_kb: 0,
             input_events_per_sec: 0,
+            channels: CHANNEL_AUDIO | CHANNEL_STORAGE,
             handoff: None,
         }
     }

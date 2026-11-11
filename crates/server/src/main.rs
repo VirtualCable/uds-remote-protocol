@@ -93,6 +93,13 @@ struct Args {
     fps: u32,
     max_frames: Option<u32>,
     audio: bool,
+    /// Clipboard bridge switch (§18.78 channel policy: service frame,
+    /// `[standalone.channels]` or `--no-clipboard`).
+    clipboard: bool,
+    /// File-transfer spool switch (same policy chain).
+    storage: bool,
+    /// Smart-card bridge switch (same policy chain).
+    smartcard: bool,
     audio_preset: String,
     audio_source: String,
     mic_sink: String,
@@ -148,6 +155,9 @@ fn parse_args() -> Result<Args> {
         fps: 30,
         max_frames: None,
         audio: true,
+        clipboard: true,
+        storage: true,
+        smartcard: true,
         audio_preset: "opus-music".to_string(),
         audio_source: "auto".to_string(),
         mic_sink: "null".to_string(),
@@ -238,6 +248,20 @@ fn parse_args() -> Result<Args> {
             }
             args.allow_lock = config.allow_lock;
             args.wallpaper_off = config.wallpaper_off;
+            // Channel policy from the service (§18.78): mandatory switches —
+            // a disabled channel never starts, whatever the client offers.
+            let channels = if config.channels == 0 {
+                protocol::service_ipc::CHANNELS_DEFAULT
+            } else {
+                config.channels
+            };
+            args.audio = channels & protocol::service_ipc::CHANNEL_AUDIO != 0;
+            args.clipboard = channels & protocol::service_ipc::CHANNEL_CLIPBOARD != 0;
+            args.storage = channels & protocol::service_ipc::CHANNEL_STORAGE != 0;
+            args.smartcard = channels & protocol::service_ipc::CHANNEL_SMARTCARD != 0;
+            if channels & protocol::service_ipc::CHANNEL_PRINTER == 0 {
+                args.printer_spool = None;
+            }
             // [limits] via the service (§18.78); 0 keeps the defaults.
             if config.spool_quota_mb > 0 {
                 args.limits.spool_quota_mb = config.spool_quota_mb;
@@ -263,6 +287,18 @@ fn parse_args() -> Result<Args> {
         }
         if arg == "--no-audio" {
             args.audio = false;
+            continue;
+        }
+        if arg == "--no-clipboard" {
+            args.clipboard = false;
+            continue;
+        }
+        if arg == "--no-storage" {
+            args.storage = false;
+            continue;
+        }
+        if arg == "--no-smartcard" {
+            args.smartcard = false;
             continue;
         }
         if arg == "--allow-lock" {
@@ -396,6 +432,12 @@ fn apply_config_file(args: &mut Args, raw_args: &[String]) -> Result<bool> {
             args.mic_sink.clone_from(mic_sink);
         }
         args.audio = standalone.channels.audio;
+        args.clipboard = standalone.channels.clipboard;
+        args.storage = standalone.channels.storage;
+        args.smartcard = standalone.channels.smartcard;
+        if !standalone.channels.printer {
+            args.printer_spool = None;
+        }
         args.allow_lock = standalone.channels.lock;
         args.wallpaper_off = standalone.wallpaper_off;
         info!("standalone mode: fixed ticket active (reference implementation)");
@@ -2502,9 +2544,14 @@ async fn serve_stream<T: ReliableTransport>(
     // and ignored, so the client never streams into the void.
     let mut cam = setup_cam(args);
 
-    // Clipboard (M8): OS bridge + wire session state. Best-effort — when the
-    // platform has no backend the channel simply stays silent.
-    let mut clipboard = server::clipboard::spawn();
+    // Clipboard (M8): OS bridge + wire session state. Policy-gated (§18.78);
+    // best-effort — when the platform has no backend the channel simply
+    // stays silent.
+    let mut clipboard = if args.clipboard {
+        server::clipboard::spawn()
+    } else {
+        None
+    };
     if clipboard.is_some() {
         info!("clipboard bridge active");
     }
@@ -2513,21 +2560,26 @@ async fn serve_stream<T: ReliableTransport>(
     let clip_text_cap = args.limits.clipboard_max_kb as usize * 1024;
 
     // Storage (M8, model B): spool directory for explicit file transfers.
-    // Best-effort like the clipboard: when the directory cannot be created
-    // the channel answers errors but the session goes on.
-    let mut spool = match server::storage::Spool::open(
-        args.spool
-            .clone()
-            .unwrap_or_else(server::storage::Spool::default_root),
-        args.limits.spool_quota_mb,
-    ) {
-        Ok(s) => {
-            info!("storage spool active");
-            Some(s)
-        }
-        Err(e) => {
-            warn!("storage spool unavailable: {e}");
-            None
+    // Policy-gated (§18.78); best-effort like the clipboard: when the
+    // directory cannot be created the channel answers errors but the
+    // session goes on.
+    let mut spool = if !args.storage {
+        None
+    } else {
+        match server::storage::Spool::open(
+            args.spool
+                .clone()
+                .unwrap_or_else(server::storage::Spool::default_root),
+            args.limits.spool_quota_mb,
+        ) {
+            Ok(s) => {
+                info!("storage spool active");
+                Some(s)
+            }
+            Err(e) => {
+                warn!("storage spool unavailable: {e}");
+                None
+            }
         }
     };
     // Download chunk pump: 4 x 64 KiB per millisecond tick ≈ 256 MiB/s of
@@ -2561,16 +2613,21 @@ async fn serve_stream<T: ReliableTransport>(
 
     // Smartcard (§17): requests originate at the virtual smart card reader
     // driver (UMDF) through the pipe origin; the router resolves replies by
-    // request_id. When the pipes cannot be hosted (non-Windows, or another
+    // request_id. Policy-gated (§18.78): a disabled channel never opens the
+    // pipes. When the pipes cannot be hosted (non-Windows, or another
     // session owns them) the channel stays inert, as with the pre-driver
     // NullSmartcardRelay.
     let (scard_tx, mut scard_rx) = mpsc::unbounded_channel::<protocol::SmartcardMessage>();
     let scard_router = Arc::new(server::smartcard::SmartcardRouter::new(scard_tx));
     #[cfg(all(windows, feature = "windows-capture"))]
-    let _scard_origin = server::smartcard_pipe::PipeOrigin::spawn(
-        server::smartcard::RouterRelay::new(Arc::clone(&scard_router)),
-        tokio::runtime::Handle::current(),
-    );
+    let _scard_origin = if args.smartcard {
+        server::smartcard_pipe::PipeOrigin::spawn(
+            server::smartcard::RouterRelay::new(Arc::clone(&scard_router)),
+            tokio::runtime::Handle::current(),
+        )
+    } else {
+        None
+    };
 
     // Link-quality state (§12): created on the first MetricsReport, with the
     // first reported RTT as the baseline.

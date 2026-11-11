@@ -317,6 +317,7 @@ pub(crate) async fn complete_session(
             spool_quota_mb: standalone.limits.spool_quota_mb,
             clipboard_max_kb: standalone.limits.clipboard_max_kb,
             input_events_per_sec: standalone.limits.input_events_per_sec,
+            channels: standalone.channels,
             handoff: Some(protocol::service_ipc::HandoffInfo {
                 send_seq: seqs.send,
                 recv_seq: seqs.recv,
@@ -365,6 +366,14 @@ pub(crate) async fn complete_session(
                 spool_quota_mb: pq.limits.spool_quota_mb,
                 clipboard_max_kb: pq.limits.clipboard_max_kb,
                 input_events_per_sec: pq.limits.input_events_per_sec,
+                // Broker channel policy (§18.78): the ticket payload decides
+                // which optional channels the agent offers; the client
+                // cannot override a disabled channel.
+                channels: grant
+                    .as_ref()
+                    .expect("pq mode grants a session")
+                    .channels
+                    .to_mask(),
                 handoff: Some(protocol::service_ipc::HandoffInfo {
                     send_seq: seqs.send,
                     recv_seq: seqs.recv,

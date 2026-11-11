@@ -57,6 +57,9 @@ pub struct StandaloneRuntime {
     /// The client may ask to lock the remote console (`[standalone.channels]
     /// lock`); off by default, server-side mandatory.
     pub allow_lock: bool,
+    /// Channel-switch bitmask for the agent (`protocol::service_ipc`
+    /// `CHANNEL_*`), resolved from `[standalone.channels]`.
+    pub channels: u8,
     /// Blank the desktop wallpaper during sessions (§18.54).
     pub wallpaper_off: bool,
     /// Console-conflict policy (§18.53).
@@ -212,6 +215,16 @@ fn load_standalone(
             Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
         }),
         allow_lock: standalone.channels.lock,
+        channels: crate::broker::ChannelPolicy {
+            audio: standalone.channels.audio,
+            clipboard: standalone.channels.clipboard,
+            storage: standalone.channels.storage,
+            smartcard: standalone.channels.smartcard,
+            webcam: false,
+            printer: standalone.channels.printer,
+            lock: standalone.channels.lock,
+        }
+        .to_mask(),
         wallpaper_off: standalone.wallpaper_off,
         console_conflict: standalone.console_conflict,
         console_conflict_reveal_user: standalone.console_conflict_reveal_user,

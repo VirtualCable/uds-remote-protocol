@@ -137,6 +137,23 @@ impl Default for ChannelPolicy {
     }
 }
 
+impl ChannelPolicy {
+    /// Packs the switches into the service→agent wire bitmask
+    /// (`protocol::service_ipc::CHANNEL_*`). Webcam and lock travel their
+    /// own ways (`cam_sink`, `allow_lock`), so they are not in the mask.
+    #[must_use]
+    pub fn to_mask(self) -> u8 {
+        use protocol::service_ipc as ipc;
+        let mut mask = 0u8;
+        mask |= if self.audio { ipc::CHANNEL_AUDIO } else { 0 };
+        mask |= if self.clipboard { ipc::CHANNEL_CLIPBOARD } else { 0 };
+        mask |= if self.storage { ipc::CHANNEL_STORAGE } else { 0 };
+        mask |= if self.smartcard { ipc::CHANNEL_SMARTCARD } else { 0 };
+        mask |= if self.printer { ipc::CHANNEL_PRINTER } else { 0 };
+        mask
+    }
+}
+
 impl TicketPayload {
     /// Parses a payload from its JSON form, rejecting unknown versions.
     pub fn from_json(text: &str) -> anyhow::Result<Self> {
@@ -280,6 +297,29 @@ mod tests {
         let grant = SessionGrant::from_payload(payload, [0x73; 32], Some("stop-ticket".into()));
         assert_eq!(grant.key[0], 0x73);
         assert_eq!(grant.notify.as_deref(), Some("stop-ticket"));
+    }
+
+    #[test]
+    fn channel_policy_mask_matches_wire_bits() {
+        use protocol::service_ipc as ipc;
+        let policy = ChannelPolicy {
+            audio: true,
+            clipboard: false,
+            storage: true,
+            smartcard: false,
+            webcam: false,
+            printer: true,
+            lock: true, // lock travels as allow_lock, not in the mask
+            ..ChannelPolicy::default()
+        };
+        assert_eq!(
+            policy.to_mask(),
+            ipc::CHANNEL_AUDIO | ipc::CHANNEL_STORAGE | ipc::CHANNEL_PRINTER
+        );
+        assert_eq!(
+            ChannelPolicy::default().to_mask(),
+            ipc::CHANNELS_DEFAULT
+        );
     }
 
     #[test]

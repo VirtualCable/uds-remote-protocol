@@ -44,7 +44,7 @@ impl StandaloneProvider {
             storage: standalone.channels.storage,
             smartcard: standalone.channels.smartcard,
             webcam: false,
-            printer: false,
+            printer: standalone.channels.printer,
             lock: standalone.channels.lock,
         };
         let grant = SessionGrant {
