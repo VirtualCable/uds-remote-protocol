@@ -227,6 +227,10 @@ fn legacy_config() -> protocol::service_ipc::AgentConfig {
         fixed_resolution: (0, 0),
         allow_lock: false,
         wallpaper_off: false,
+        // 0 = the agent's §18.78 defaults; legacy mode has no config file.
+        spool_quota_mb: 0,
+        clipboard_max_kb: 0,
+        input_events_per_sec: 0,
         handoff: None,
     }
 }

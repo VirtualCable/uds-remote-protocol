@@ -92,6 +92,10 @@ pub struct PqRuntime {
     pub bind: String,
     /// Hardening caps for the agent (`[limits]`, §18.78).
     pub limits: server_config::LimitsConfig,
+    /// Per-session telemetry CSV path (empty = disabled). Read from the
+    /// optional `[standalone]` section even in pq mode: telemetry is an
+    /// operator concern, independent of how tickets are validated.
+    pub stats_csv: String,
 }
 
 /// Loads the configured connection mode. Returns `None` when there is no
@@ -143,6 +147,11 @@ fn load_pq(path: &std::path::Path, config: &server_config::ServerConfig) -> Opti
         provider: Arc::new(provider),
         bind: config.bind.to_string(),
         limits: config.limits,
+        stats_csv: config
+            .standalone
+            .as_ref()
+            .and_then(|standalone| standalone.stats_csv.clone())
+            .unwrap_or_default(),
     })
 }
 

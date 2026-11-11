@@ -342,7 +342,7 @@ pub(crate) async fn complete_session(
                 fps_adapt: video
                     .and_then(|video| video.adaptive_fps)
                     .unwrap_or_default(),
-                stats_csv: String::new(),
+                stats_csv: pq.stats_csv.clone(),
                 // §18.57: the broker payload has no webcam policy yet; off.
                 cam_sink: String::new(),
                 mic_sink: String::new(),
