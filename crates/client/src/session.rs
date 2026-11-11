@@ -53,6 +53,12 @@ const SERVER_LIVENESS_TIMEOUT: Duration = Duration::from_secs(7);
 /// even heavy reordering; the sweep runs on the presentation tick.
 const REASM_STALE_AGE: Duration = Duration::from_millis(250);
 
+/// Sliding window for the RTT min filter (§12.2): raw probe samples older
+/// than this are forgotten. At 5 probes/s it holds ~15 samples, so a
+/// decode/present burst polluting a whole 1 s report period no longer
+/// poisons the reported RTT.
+const RTT_SAMPLE_WINDOW: Duration = Duration::from_secs(3);
+
 /// Pre-session gate budget (§18.53): covers the worst-case server-side
 /// conflict ask (~30 s) plus console eviction and autologon (~60 s) before
 /// the `SessionReady`/`UdpOffer` arrives. The normal path answers in one
@@ -483,18 +489,23 @@ impl Session {
         let mut buf = vec![0u8; 65_536];
         let mut sbuf = vec![0u8; 65_536];
 
-        // 5 probes/s: the report period (1 s) gets several samples, so the
-        // period-min filter has something to work with (§12.2).
+        // 5 probes/s: the sliding min window (RTT_SAMPLE_WINDOW) gets enough
+        // samples to discard self-inflicted pollution (§12.2).
         let mut probe_tick = tokio::time::interval(Duration::from_millis(200));
         let mut report_tick = tokio::time::interval(Duration::from_secs(1));
         let mut rtt_ewma: Option<f64> = None;
         let mut jitter_ewma = 0.0_f64;
-        // Minimum RTT seen in the current report period (§12.2): acks share
-        // the client's recv loop with display decode, so under load a sample
-        // measures our own queueing delay, not the network's. The period min
-        // discards that self-inflicted pollution (the max inflates, the min
-        // stays the true path RTT); the server's baseline windows it again.
-        let mut rtt_period_min: Option<f64> = None;
+        // Sliding window of raw RTT samples (§12.2): acks share the client's
+        // recv loop with display decode/present, so under load a sample
+        // measures our own queueing delay, not the network's (the max
+        // inflates, the min stays the true path RTT). The per-second min over
+        // 5 samples still got poisoned whenever a decode burst spanned a whole
+        // report period; the min over a 3 s sliding window (~15 samples)
+        // survives any short self-inflicted burst. Genuine congestion persists
+        // longer than the window, so it still registers — with up to ~3 s of
+        // extra detection latency, acceptable next to the server's 2-sample
+        // stepping cadence.
+        let mut rtt_window: VecDeque<(Instant, f64)> = VecDeque::new();
         // Warm-up: the server's session bring-up (capture thread, encoder
         // init, first keyframe) delays every probe ack for well over a
         // second, so discarding just the first ack is not enough — the
@@ -524,10 +535,15 @@ impl Session {
                         let rtt = protocol::compute_rtt(ack.t1, ack.t2, ack.t3, clock());
                         #[allow(clippy::cast_precision_loss)] // micros fit in f64
                         let rtt = rtt as f64;
-                        if Instant::now() < warmup_until {
+                        let now = Instant::now();
+                        if now < warmup_until {
                             continue;
                         }
-                        rtt_period_min = Some(rtt_period_min.map_or(rtt, |m: f64| m.min(rtt)));
+                        rtt_window.push_back((now, rtt));
+                        let cutoff = now.checked_sub(RTT_SAMPLE_WINDOW).unwrap_or(now);
+                        while rtt_window.front().is_some_and(|(t, _)| *t < cutoff) {
+                            rtt_window.pop_front();
+                        }
                         continue;
                     }
                     if !core.handle_packet(ch, &buf[..n])? {
@@ -559,12 +575,21 @@ impl Session {
                 _ = report_tick.tick() => {
                     // Jitter over min-filtered samples: the raw per-ack
                     // spread is our own scheduling noise, not the link's.
-                    if let Some(min) = rtt_period_min {
+                    // Evict stale samples too (acks may have stopped while
+                    // the window still holds pre-silence entries).
+                    let cutoff = Instant::now()
+                        .checked_sub(RTT_SAMPLE_WINDOW)
+                        .unwrap_or_else(Instant::now);
+                    while rtt_window.front().is_some_and(|(t, _)| *t < cutoff) {
+                        rtt_window.pop_front();
+                    }
+                    let window_min = rtt_window.iter().map(|(_, r)| *r).reduce(f64::min);
+                    if let Some(min) = window_min {
                         let prev = rtt_ewma.unwrap_or(min);
                         jitter_ewma += 0.25 * ((min - prev).abs() - jitter_ewma);
                         rtt_ewma = Some(prev + 0.25 * (min - prev));
                     }
-                    let Some(rtt) = rtt_period_min.take().or(rtt_ewma) else { continue };
+                    let Some(rtt) = window_min.or(rtt_ewma) else { continue };
                     let lost = leg.dgram.lost_estimate();
                     let received = leg.dgram.received();
                     let dlost = lost - prev_lost;
