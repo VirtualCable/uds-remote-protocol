@@ -122,10 +122,19 @@ pub struct Reassembler {
     max_seen: HashMap<u8, u32>,
     /// Frames evicted incomplete (their remaining fragments never came).
     dropped: u64,
+    /// Sum of every tracked partial's reserved buffer (§18.78 aggregate cap).
+    tracked_bytes: usize,
 }
 
 /// How far behind the newest frame a partial may lag before eviction.
 const TRACK_WINDOW: u32 = 64;
+
+/// Aggregate byte cap across all tracked partials (§18.78): a partial
+/// eagerly reserves its full declared frame size, so without an aggregate
+/// bound a few hundred tiny single-fragment datagrams could reserve GiBs.
+/// 32 MiB fits ~3 worst-case frames; legit traffic never keeps more than a
+/// couple of frames in flight.
+const MAX_TRACKED_BYTES: usize = 32 * 1024 * 1024;
 
 impl Default for Reassembler {
     fn default() -> Self {
@@ -141,6 +150,7 @@ impl Reassembler {
             partials: HashMap::new(),
             max_seen: HashMap::new(),
             dropped: 0,
+            tracked_bytes: 0,
         }
     }
 
@@ -161,11 +171,16 @@ impl Reassembler {
     /// on a timer so loss detection never depends on future traffic.
     pub fn evict_stale(&mut self, max_age: Duration) -> u64 {
         let mut dropped_now = 0u64;
+        let mut freed = 0usize;
         self.partials.retain(|_, p| {
             let keep = p.touched.elapsed() < max_age;
-            dropped_now += u64::from(!keep);
+            if !keep {
+                dropped_now += 1;
+                freed += p.buf.len();
+            }
             keep
         });
+        self.tracked_bytes -= freed;
         self.dropped += dropped_now;
         dropped_now
     }
@@ -212,16 +227,41 @@ impl Reassembler {
         }
         let horizon = newest.saturating_sub(TRACK_WINDOW);
         let mut dropped_now = 0u64;
+        let mut freed = 0usize;
         self.partials.retain(|&(d, f), p| {
             let keep = d != display_id || f >= horizon;
-            if !keep && p.received < p.count {
-                dropped_now += 1;
+            if !keep {
+                freed += p.buf.len();
+                if p.received < p.count {
+                    dropped_now += 1;
+                }
             }
             keep
         });
+        self.tracked_bytes -= freed;
         self.dropped += dropped_now;
 
         let key = (display_id, frame_id);
+        if !self.partials.contains_key(&key) {
+            // §18.78 aggregate cap: before reserving a new partial's full
+            // declared frame size, evict the oldest partials (by last
+            // touch) until the reservation fits; each eviction counts as
+            // dropped so the receiver asks for a keyframe.
+            let reservation = fragment_payload_max() * count as usize;
+            while self.tracked_bytes + reservation > MAX_TRACKED_BYTES {
+                let Some((&oldest, _)) =
+                    self.partials.iter().min_by_key(|(_, p)| p.touched)
+                else {
+                    break;
+                };
+                let evicted = self.partials.remove(&oldest).expect("key from iter");
+                self.tracked_bytes -= evicted.buf.len();
+                if evicted.received < evicted.count {
+                    self.dropped += 1;
+                }
+            }
+            self.tracked_bytes += reservation;
+        }
         let entry = self.partials.entry(key).or_insert_with(|| Partial {
             count,
             received: 0,
@@ -233,7 +273,8 @@ impl Reassembler {
         });
         if entry.count != count || entry.capture_ts_ms != capture_ts_ms {
             // Inconsistent restatement of the same frame: drop it.
-            self.partials.remove(&key);
+            let removed = self.partials.remove(&key).expect("present above");
+            self.tracked_bytes -= removed.buf.len();
             return Err(ProtocolError::Truncated);
         }
         if entry.present[idx as usize] {
@@ -249,6 +290,7 @@ impl Reassembler {
 
         if entry.received == entry.count {
             let p = self.partials.remove(&key).expect("present above");
+            self.tracked_bytes -= p.buf.len();
             let mut data = p.buf;
             data.truncate(p.total_len);
             return Ok(Some(ReassembledFrame {

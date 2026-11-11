@@ -193,6 +193,39 @@ fn frame_ids_are_u24() {
     assert_eq!(frame.frame_id, 0x00FF_FFFF);
 }
 
+/// Builds a single crafted fragment for `frame_id` declaring `count`
+/// fragments but carrying only one 1-byte chunk: the receiver eagerly
+/// reserves the full declared frame size, so this pins ~`count * 1168`
+/// bytes with a 13-byte datagram (§18.78 aggregate-cap regression).
+fn crafted_partial(frame_id: u32, count: u16) -> Vec<u8> {
+    let mut f = Vec::with_capacity(HEADER_SIZE + 1);
+    f.push(0u8); // display_id
+    f.extend_from_slice(&frame_id.to_be_bytes()[1..]);
+    f.extend_from_slice(&0u16.to_be_bytes()); // frag_idx
+    f.extend_from_slice(&count.to_be_bytes());
+    f.extend_from_slice(&0u32.to_be_bytes()); // capture_ts
+    f.push(0xAB);
+    f
+}
+
+#[test]
+fn aggregate_byte_cap_evicts_oldest_partials() {
+    // Each crafted partial reserves 8192 * 1168 ≈ 9.57 MiB; the 32 MiB
+    // aggregate cap fits only 3, so pushing 10 must evict the 7 oldest
+    // and count them as dropped.
+    let mut rx = Reassembler::new();
+    for id in 1..=10u32 {
+        rx.push(&crafted_partial(id, 8192)).unwrap();
+    }
+    assert_eq!(rx.dropped_frames(), 7);
+    for id in 8..=10u32 {
+        assert!(rx.tracks_frame(id), "newest partial {id} must survive");
+    }
+    for id in 1..=7u32 {
+        assert!(!rx.tracks_frame(id), "oldest partial {id} must be evicted");
+    }
+}
+
 #[test]
 fn channel_display_exists() {
     // Sanity: fragments are meant for the lossy display channel.
