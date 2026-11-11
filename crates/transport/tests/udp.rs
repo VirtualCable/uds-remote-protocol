@@ -24,9 +24,12 @@ async fn connected_pair() -> (
     let client_raw = UdpTransport::connect("127.0.0.1:0", server_addr)
         .await
         .unwrap();
-    // Trigger the server's peer discovery with a first (probe) datagram.
-    client_raw.send_raw(b"hello-server").await.unwrap();
-    let (server_raw, _first) = server.wait_first().await.unwrap();
+    // Trigger the server's peer discovery with a first (probe) datagram:
+    // it must carry the session token to win the peer lock (§18.78).
+    let mut hello = TOKEN.to_vec();
+    hello.extend_from_slice(b"hello-server");
+    client_raw.send_raw(&hello).await.unwrap();
+    let (server_raw, _first) = server.wait_first(&TOKEN).await.unwrap();
 
     let client = EncryptedDatagram::new(client_raw, &KEY_C2S, &KEY_S2C, &TOKEN);
     let server = EncryptedDatagram::new(server_raw, &KEY_S2C, &KEY_C2S, &TOKEN);

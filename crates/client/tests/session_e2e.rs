@@ -81,7 +81,8 @@ async fn serve_udp(listener: DirectListener, got_input: flume::Sender<()>) -> Re
     let mut stream = EncryptedStream::server_handshake(raw, &KEY, None).await?;
     let (pending, token) = udp_offer(&mut stream, "127.0.0.1:0", &TICKET, &KEY).await?;
     let clock_start = Instant::now();
-    let (udp, first) = tokio::time::timeout(Duration::from_secs(3), pending.wait_first()).await??;
+    let (udp, first) =
+        tokio::time::timeout(Duration::from_secs(3), pending.wait_first(&token)).await??;
     let keys = protocol::crypt::derive_datagram_keys(&TICKET, &KEY)?;
     let mut dgram = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
 

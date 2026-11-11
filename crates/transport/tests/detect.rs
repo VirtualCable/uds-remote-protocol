@@ -54,7 +54,7 @@ async fn server_side(addr_tx: tokio::sync::oneshot::Sender<SocketAddr>, answer_p
         return;
     }
 
-    let (udp, first) = pending.wait_first().await.unwrap();
+    let (udp, first) = pending.wait_first(&token).await.unwrap();
     let keys = derive_datagram_keys(&ticket(), &secret()).unwrap();
     let mut leg = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
 
@@ -118,6 +118,34 @@ async fn udp_detection_succeeds_end_to_end() {
     assert_eq!(&buf[..n], b"ping");
 
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn wait_first_ignores_tokenless_datagrams() {
+    // §18.78: an unsolicited datagram must not lock the UDP peer before
+    // authentication; only a datagram carrying the session token may.
+    use transport::UdpTransport;
+    let pending = UdpTransport::accept_first("127.0.0.1:0").unwrap();
+    let port = pending.local_addr().unwrap().port();
+    let token = [0x5Au8; consts::TOKEN_LENGTH];
+
+    let attacker = UdpTransport::connect("127.0.0.1:0", format!("127.0.0.1:{port}").parse().unwrap())
+        .await
+        .unwrap();
+    attacker.send_raw(b"unauthenticated junk").await.unwrap();
+
+    let legit = UdpTransport::connect("127.0.0.1:0", format!("127.0.0.1:{port}").parse().unwrap())
+        .await
+        .unwrap();
+    let mut probe = token.to_vec();
+    probe.extend_from_slice(b"probe");
+    legit.send_raw(&probe).await.unwrap();
+
+    let (_udp, first) = tokio::time::timeout(Duration::from_secs(2), pending.wait_first(&token))
+        .await
+        .expect("the legit datagram must win the lock")
+        .unwrap();
+    assert_eq!(first, probe, "tokenless junk must be ignored");
 }
 
 #[tokio::test]

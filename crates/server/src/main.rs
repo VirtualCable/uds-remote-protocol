@@ -1588,12 +1588,15 @@ fn apply_codec_force(ctl: &mut ControlState, enc: &EncoderHandle, force: bool) {
 }
 
 /// Answers UDP detection probes (§12.1): the client probes up to N times,
-/// so keep replying until probes stop arriving.
+/// so keep replying until probes stop arriving. Returns whether at least
+/// one valid probe was answered — with zero valid probes the leg must not
+/// be committed to UDP (§18.78).
 async fn answer_probes(
     dgram: &mut EncryptedDatagram<UdpTransport>,
     first: &[u8],
     clock_start: Instant,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut answered = false;
     let mut pending = Some(first.to_vec());
     let mut buf = vec![0u8; 2048];
     loop {
@@ -1605,7 +1608,7 @@ async fn answer_probes(
                 {
                     Ok(Ok((channel::CONTROL, n))) => buf[..n].to_vec(),
                     // No more probes (or display traffic already flowing).
-                    Ok(_) | Err(_) => return Ok(()),
+                    Ok(_) | Err(_) => return Ok(answered),
                 }
             }
         };
@@ -1620,6 +1623,7 @@ async fn answer_probes(
                 t3: now,
             };
             dgram.send(channel::CONTROL, &ack.encode()).await?;
+            answered = true;
             info!("answered UDP probe");
         }
     }
@@ -2388,13 +2392,20 @@ async fn serve_stream<T: ReliableTransport>(
     let (pending, token) = udp_offer(&mut stream, &udp_bind.to_string(), ticket, key).await?;
 
     let clock_start = Instant::now();
-    let udp = match tokio::time::timeout(Duration::from_secs(3), pending.wait_first()).await {
+    let udp = match tokio::time::timeout(Duration::from_secs(3), pending.wait_first(&token)).await
+    {
         Ok(Ok((udp, first))) => {
             let keys = protocol::crypt::derive_datagram_keys(ticket, key)?;
             let mut dgram = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
-            answer_probes(&mut dgram, &first, clock_start).await?;
-            info!("display leg: UDP");
-            Some(dgram)
+            if answer_probes(&mut dgram, &first, clock_start).await? {
+                info!("display leg: UDP");
+                Some(dgram)
+            } else {
+                // §18.78: zero valid probes answered — the leg is unusable
+                // even though some datagram carried the token.
+                info!("no valid UDP probe answered; display leg: TCP fallback");
+                None
+            }
         }
         other => {
             if let Ok(Err(e)) = other {

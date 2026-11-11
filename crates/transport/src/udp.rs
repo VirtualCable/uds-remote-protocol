@@ -110,19 +110,33 @@ impl PendingUdpTransport {
         Ok(self.socket.local_addr()?)
     }
 
-    /// Waits for the first datagram, connects the socket to its sender and
-    /// returns the ready transport plus the bytes received.
-    pub async fn wait_first(self) -> Result<(UdpTransport, Vec<u8>)> {
+    /// Waits for the first datagram carrying the session token, connects
+    /// the socket to its sender and returns the ready transport plus the
+    /// bytes received (§18.78: the token travels cleartext at offset 0, so
+    /// the peer lock must require it — otherwise any unsolicited datagram
+    /// would hijack the leg before authentication).
+    pub async fn wait_first(
+        self,
+        expected_token: &[u8; protocol::crypt::consts::TOKEN_LENGTH],
+    ) -> Result<(UdpTransport, Vec<u8>)> {
         let mut buf = vec![0u8; 2048];
-        let (n, peer) = self.socket.recv_from(&mut buf).await?;
-        self.socket.connect(peer).await?;
-        debug!(%peer, "UDP peer learned from first datagram");
-        buf.truncate(n);
-        Ok((
-            UdpTransport {
-                socket: self.socket,
-            },
-            buf,
-        ))
+        loop {
+            let (n, peer) = self.socket.recv_from(&mut buf).await?;
+            if n < protocol::crypt::consts::TOKEN_LENGTH
+                || buf[..protocol::crypt::consts::TOKEN_LENGTH] != *expected_token
+            {
+                debug!(%peer, "ignoring tokenless datagram before the UDP peer lock");
+                continue;
+            }
+            self.socket.connect(peer).await?;
+            debug!(%peer, "UDP peer learned from the first session datagram");
+            buf.truncate(n);
+            return Ok((
+                UdpTransport {
+                    socket: self.socket,
+                },
+                buf,
+            ));
+        }
     }
 }
