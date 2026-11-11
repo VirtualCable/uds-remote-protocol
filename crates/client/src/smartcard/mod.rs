@@ -205,6 +205,12 @@ impl Drop for SmartcardService {
     }
 }
 
+/// §18.78 caps for `GetStatusChange` watchers: one OS thread per request
+/// with a server-chosen lifetime is a flood vector, so bound both the
+/// concurrent watcher count and the per-watch timeout.
+const MAX_WATCHERS: usize = 8;
+const MAX_WATCH_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// State owned by the dispatcher thread.
 struct Dispatcher {
     backend: Option<Arc<dyn SmartcardIntegration>>,
@@ -580,7 +586,21 @@ impl Dispatcher {
                 current_state: s.current_state,
             })
             .collect();
-        let timeout = Duration::from_millis(u64::from(timeout_ms));
+        // §18.78: one OS thread per watch with a server-chosen lifetime is
+        // a flood vector — cap concurrent watchers and clamp the timeout.
+        {
+            let mut watchers = self.watchers.lock().expect("watchers poisoned");
+            watchers.retain(|h| !h.is_finished());
+            if watchers.len() >= MAX_WATCHERS {
+                warn!(request_id, "too many concurrent smartcard watchers");
+                let _ = self.sink.send(SmartcardMessage::Error {
+                    request_id,
+                    code: SCARD_F_INTERNAL_ERROR,
+                });
+                return;
+            }
+        }
+        let timeout = Duration::from_millis(u64::from(timeout_ms)).min(MAX_WATCH_TIMEOUT);
         let sink = self.sink.clone();
         let spawned = std::thread::Builder::new()
             .name("scard-watch".into())
