@@ -2684,6 +2684,8 @@ async fn serve_stream<T: ReliableTransport>(
         input_refilled: Instant::now(),
         input_rate: f64::from(args.limits.input_events_per_sec),
         input_dropped: 0,
+        bad_input_msgs: 0,
+        bad_control_msgs: 0,
         secure_input: if starts_secure {
             secure_pipes
                 .as_ref()
@@ -3381,6 +3383,11 @@ struct ControlState {
     input_rate: f64,
     /// Dropped input events since the last info log (drop spam guard).
     input_dropped: u64,
+    /// Malformed wire messages since the last aggregated warn (§18.78 log
+    /// cap): one counter for input records, one for control records.
+    bad_input_msgs: u64,
+    /// See `bad_input_msgs`.
+    bad_control_msgs: u64,
     /// Secure-desktop helper input pipe (§18.41): while `Some`, input is
     /// forwarded to the helper on the Winlogon desktop instead of the local
     /// injector (the inner `Option` is `None` until the helper connects).
@@ -3505,7 +3512,14 @@ fn handle_stream_packet(ctl: &mut ControlState, enc: &EncoderHandle, ch: u16, bu
                     }
                 }
             }
-            Err(e) => warn!("bad input message: {e}"),
+            Err(e) => {
+                // §18.78 log cap: malformed wire records arrive at wire
+                // rate, so aggregate instead of logging each one.
+                ctl.bad_input_msgs += 1;
+                if ctl.bad_input_msgs == 1 || ctl.bad_input_msgs % 1000 == 0 {
+                    warn!(count = ctl.bad_input_msgs, "bad input message: {e}");
+                }
+            }
         }
         return;
     }
@@ -3575,7 +3589,13 @@ fn handle_stream_packet(ctl: &mut ControlState, enc: &EncoderHandle, ch: u16, bu
             ctl.cam_caps = Some(caps);
         }
         Ok(_) => {} // other control messages: not handled here yet
-        Err(e) => warn!("undecodable control message: {e}"),
+        Err(e) => {
+            // §18.78 log cap: same aggregation as malformed input records.
+            ctl.bad_control_msgs += 1;
+            if ctl.bad_control_msgs == 1 || ctl.bad_control_msgs % 1000 == 0 {
+                warn!(count = ctl.bad_control_msgs, "undecodable control message: {e}");
+            }
+        }
     }
 }
 

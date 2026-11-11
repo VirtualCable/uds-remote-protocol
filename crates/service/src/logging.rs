@@ -6,7 +6,9 @@
 //! File logging for the service: `C:\ProgramData\UdsRp\service.log`.
 //!
 //! Services have no console; a plain append-only file behind a mutex is the
-//! simplest reliable sink. Log rotation is out of scope for the spike.
+//! simplest reliable sink. The file is size-capped with rotation (§18.78):
+//! unauthenticated peers can force log lines (connect + reject), so the
+//! sink must never grow without bound.
 
 use std::fs::{self, OpenOptions};
 use std::io;
@@ -16,8 +18,14 @@ use std::sync::Mutex;
 /// Directory for service state (log, future config cache).
 pub const STATE_DIR: &str = r"C:\ProgramData\UdsRp";
 
+/// Per-file size cap; past it the log rotates (§18.78).
+const MAX_LOG_BYTES: u64 = 8 << 20;
+/// Rotated backups kept (`service.log.1`, `service.log.2`).
+const LOG_BACKUPS: u32 = 2;
+
 struct LogFile {
-    writer: Mutex<Option<fs::File>>,
+    /// Open file plus its current size in bytes.
+    writer: Mutex<Option<(fs::File, u64)>>,
 }
 
 impl LogFile {
@@ -37,10 +45,22 @@ impl io::Write for &LogFile {
         if guard.is_none() {
             *guard = open_log().ok().flatten();
         }
-        let file = guard
+        let (file, size) = guard
             .as_mut()
             .ok_or_else(|| io::Error::other("cannot open service log"))?;
-        file.write(buf)
+        if *size + buf.len() as u64 > MAX_LOG_BYTES {
+            rotate_log();
+            *guard = open_log().ok().flatten();
+            let (file, size) = guard
+                .as_mut()
+                .ok_or_else(|| io::Error::other("cannot reopen service log"))?;
+            let written = file.write(buf)?;
+            *size += written as u64;
+            return Ok(written);
+        }
+        let written = file.write(buf)?;
+        *size += written as u64;
+        Ok(written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -48,21 +68,39 @@ impl io::Write for &LogFile {
             .writer
             .lock()
             .map_err(|_| io::Error::other("log lock"))?;
-        if let Some(file) = guard.as_mut() {
+        if let Some((file, _)) = guard.as_mut() {
             file.flush()?;
         }
         Ok(())
     }
 }
 
-fn open_log() -> io::Result<Option<fs::File>> {
+fn log_path() -> PathBuf {
+    PathBuf::from(STATE_DIR).join("service.log")
+}
+
+fn open_log() -> io::Result<Option<(fs::File, u64)>> {
     fs::create_dir_all(STATE_DIR)?;
-    let path = PathBuf::from(STATE_DIR).join("service.log");
-    OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map(Some)
+    let path = log_path();
+    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    Ok(Some((file, size)))
+}
+
+/// Rotates `service.log` -> `service.log.1` -> ... keeping [`LOG_BACKUPS`]
+/// backups. Best-effort: logging must never fail the service.
+fn rotate_log() {
+    let base = log_path();
+    for idx in (1..=LOG_BACKUPS).rev() {
+        let from = base.with_extension(format!("log.{idx}"));
+        let to = base.with_extension(format!("log.{}", idx + 1));
+        if idx == LOG_BACKUPS {
+            let _ = fs::remove_file(&from);
+        } else if from.exists() {
+            let _ = fs::rename(&from, &to);
+        }
+    }
+    let _ = fs::rename(&base, base.with_extension("log.1"));
 }
 
 /// Install the global tracing subscriber writing to the service log file.
