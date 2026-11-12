@@ -42,15 +42,19 @@
 param(
     [string]$Profile = "release",
     [string]$CertDir = "c:\labcert",
-    [Parameter(Mandatory=$true)][string]$CertPassword
+    # Optional: pinned lab cert. When empty, cargo-wdk test-signs with its
+    # auto-generated WDRLocalTestCert (open-source builds, no pinned cert).
+    [string]$CertPassword = ""
 )
 
 $ErrorActionPreference = 'Stop'
 
 $pfx = "$CertDir\udsrp-labtest.pfx"
 $cer = "$CertDir\udsrp-labtest.cer"
-if (-not (Test-Path $pfx)) { throw "lab signing cert not found: $pfx" }
-if (-not (Test-Path $cer)) { throw "lab signing public cert not found: $cer" }
+if ($CertPassword -ne "") {
+    if (-not (Test-Path $pfx)) { throw "lab signing cert not found: $pfx" }
+    if (-not (Test-Path $cer)) { throw "lab signing public cert not found: $cer" }
+}
 
 # The cargo profile name maps to the target subdir (dev -> debug).
 $profileDir = if ($Profile -eq 'dev') { 'debug' } else { $Profile }
@@ -78,8 +82,12 @@ foreach ($drv in @('c:\drv\drivers', 'c:\drv\drivers\udsscard')) {
     Push-Location $drv
     try {
         Write-Host "== cargo wdk build ($drv, profile $Profile)"
-        & cargo wdk build --profile $Profile `
-            --signtool-args "/fd SHA256 /f $pfx /p $CertPassword"
+        if ($CertPassword -ne "") {
+            & cargo wdk build --profile $Profile `
+                --signtool-args "/fd SHA256 /f $pfx /p $CertPassword"
+        } else {
+            & cargo wdk build --profile $Profile
+        }
         if ($LASTEXITCODE -ne 0) { throw "cargo wdk build failed in $drv (exit $LASTEXITCODE)" }
     } finally { Pop-Location }
 }
@@ -94,7 +102,7 @@ foreach ($name in @('udsaudio', 'udsscard')) {
     $dst = "c:\crate\target-windows\drivers\$name"
     New-Item -ItemType Directory -Force $dst | Out-Null
     Copy-Item "$($pkg.FullName)\*" $dst -Recurse -Force
-    Copy-Item $cer $dst -Force
+    if ($CertPassword -ne "") { Copy-Item $cer $dst -Force }
     Write-Host "== staged $name package -> $dst"
     Get-ChildItem $dst | Select-Object -ExpandProperty Name
 }
