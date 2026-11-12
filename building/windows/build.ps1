@@ -41,6 +41,10 @@ param(
     [string]$CertPassword = "",
     [int]$Jobs = 2,
     [string]$TargetVolume = "udsrp-target",
+    # Driver signing inside the container: "test" (WDRLocalTestCert) for local
+    # open-source builds; "off" when the caller signs afterwards (enterprise
+    # builder EV-signs the staged drivers itself).
+    [string]$DriverSignMode = "test",
     [switch]$SkipDrivers
 )
 
@@ -107,7 +111,7 @@ if ($SkipDrivers) { exit 0 }
 # udsrp-drivers keeps driver rebuilds incremental. Staging lands directly in
 # the repo mount's target-windows\drivers\. With no -CertPassword it uses
 # cargo-wdk's default test signing (WDRLocalTestCert).
-$drvArgs = @("-Profile", $Profile)
+$drvArgs = @("-Profile", $Profile, "-SignMode", $DriverSignMode)
 if ($CertPassword -ne "") { $drvArgs += @("-CertPassword", $CertPassword) }
 
 docker run --rm `

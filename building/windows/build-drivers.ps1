@@ -42,9 +42,11 @@
 param(
     [string]$Profile = "release",
     [string]$CertDir = "c:\labcert",
-    # Optional: pinned lab cert. When empty, cargo-wdk test-signs with its
-    # auto-generated WDRLocalTestCert (open-source builds, no pinned cert).
-    [string]$CertPassword = ""
+    # Optional: pinned lab cert. When empty, cargo-wdk signs per -SignMode
+    # ("test" = auto-generated WDRLocalTestCert; "off" = no signing, e.g. the
+    # enterprise builder, which EV-signs afterwards itself).
+    [string]$CertPassword = "",
+    [string]$SignMode = "test"
 )
 
 $ErrorActionPreference = 'Stop'
@@ -86,7 +88,7 @@ foreach ($drv in @('c:\drv\drivers', 'c:\drv\drivers\udsscard')) {
             & cargo wdk build --profile $Profile `
                 --signtool-args "/fd SHA256 /f $pfx /p $CertPassword"
         } else {
-            & cargo wdk build --profile $Profile
+            & cargo wdk build --profile $Profile --sign-mode $SignMode
         }
         if ($LASTEXITCODE -ne 0) { throw "cargo wdk build failed in $drv (exit $LASTEXITCODE)" }
     } finally { Pop-Location }
