@@ -30,21 +30,24 @@ mod service_main;
 #[cfg(windows)]
 mod standalone;
 
-/// CLI entry point: `--install`, `--uninstall`, `--console` (debug run in
-/// the current console) or, with no arguments, the SCM entry point.
+/// CLI entry point: `--install`, `--uninstall`, `--start`, `--stop`,
+/// `--console` (debug run in the current console) or, with no arguments, the
+/// SCM entry point.
 #[cfg(windows)]
 pub fn run() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("--install") => install::install(),
         Some("--uninstall") => install::uninstall(),
+        Some("--start") => install::start(),
+        Some("--stop") => install::stop(),
         Some("--console") => {
             service_main::run_console();
             Ok(())
         }
         None => service_main::run_dispatch(),
         Some(other) => anyhow::bail!(
-            "unknown argument `{other}`; usage: udsrp-service [--install|--uninstall|--console]"
+            "unknown argument `{other}`; usage: udsrp-service [--install|--uninstall|--start|--stop|--console]"
         ),
     }
 }

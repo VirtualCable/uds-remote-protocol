@@ -12,10 +12,12 @@
 use anyhow::{Context, Result};
 use tracing::info;
 use windows::Win32::System::Services::{
-    ChangeServiceConfig2W, CloseServiceHandle, CreateServiceW, DeleteService, OpenSCManagerW,
-    OpenServiceW, SC_ACTION, SC_HANDLE, SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS,
-    SERVICE_AUTO_START, SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_ERROR_NORMAL,
-    SERVICE_FAILURE_ACTIONSW, SERVICE_WIN32_OWN_PROCESS,
+    ChangeServiceConfig2W, CloseServiceHandle, ControlService, CreateServiceW, DeleteService,
+    OpenSCManagerW, OpenServiceW, QueryServiceStatus, SC_ACTION, SC_HANDLE,
+    SC_MANAGER_CREATE_SERVICE, SERVICE_ALL_ACCESS, SERVICE_AUTO_START,
+    SERVICE_CONFIG_FAILURE_ACTIONS, SERVICE_CONTROL_STOP, SERVICE_ERROR_NORMAL,
+    SERVICE_FAILURE_ACTIONSW, SERVICE_STATUS, SERVICE_STOPPED, SERVICE_WIN32_OWN_PROCESS,
+    StartServiceW,
 };
 use windows::core::HSTRING;
 
@@ -103,6 +105,9 @@ fn set_failure_actions(service: SC_HANDLE) -> Result<()> {
 /// Remove the service from the SCM.
 pub fn uninstall() -> Result<()> {
     logging::init();
+    // Stopping first avoids the "marked for deletion" limbo when the service
+    // is running (the process holds the binary locked until it exits).
+    stop().ok();
     let scm = ScHandle(
         unsafe { OpenSCManagerW(None, None, SC_MANAGER_CREATE_SERVICE) }
             .context("OpenSCManager (run elevated?)")?,
@@ -115,4 +120,49 @@ pub fn uninstall() -> Result<()> {
     info!("service uninstalled");
     println!("uninstalled {SERVICE_NAME}");
     Ok(())
+}
+
+/// Start the service (no-op if already running).
+pub fn start() -> Result<()> {
+    logging::init();
+    let scm = ScHandle(
+        unsafe { OpenSCManagerW(None, None, SC_MANAGER_CREATE_SERVICE) }
+            .context("OpenSCManager (run elevated?)")?,
+    );
+    let service = ScHandle(
+        unsafe { OpenServiceW(scm.0, &HSTRING::from(SERVICE_NAME), SERVICE_ALL_ACCESS) }
+            .context("OpenService (is it installed?)")?,
+    );
+    unsafe { StartServiceW(service.0, None) }.context("StartService")?;
+    info!("service start requested");
+    println!("started {SERVICE_NAME}");
+    Ok(())
+}
+
+/// Stop the service and wait (up to ~30s) until it is fully stopped, so a
+/// following delete/replace of the binary does not race a dying process.
+pub fn stop() -> Result<()> {
+    logging::init();
+    let scm = ScHandle(
+        unsafe { OpenSCManagerW(None, None, SC_MANAGER_CREATE_SERVICE) }
+            .context("OpenSCManager (run elevated?)")?,
+    );
+    let service = ScHandle(
+        unsafe { OpenServiceW(scm.0, &HSTRING::from(SERVICE_NAME), SERVICE_ALL_ACCESS) }
+            .context("OpenService (is it installed?)")?,
+    );
+    let mut status = SERVICE_STATUS::default();
+    unsafe { ControlService(service.0, SERVICE_CONTROL_STOP, &mut status) }
+        .context("ControlService(STOP)")?;
+    for _ in 0..300 {
+        let mut status = SERVICE_STATUS::default();
+        unsafe { QueryServiceStatus(service.0, &mut status) }.context("QueryServiceStatus")?;
+        if status.dwCurrentState == SERVICE_STOPPED {
+            info!("service stopped");
+            println!("stopped {SERVICE_NAME}");
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    anyhow::bail!("timed out waiting for {SERVICE_NAME} to stop")
 }
