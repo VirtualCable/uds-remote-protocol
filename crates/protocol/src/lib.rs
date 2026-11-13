@@ -28,6 +28,7 @@ mod quality;
 pub mod service_ipc;
 mod smartcard;
 mod storage;
+mod ticket;
 pub mod webcam;
 
 pub use channel::ChannelId;
@@ -36,8 +37,8 @@ pub use clipboard::{
 };
 pub use control::{
     CONSOLE_STATE_ACTIVE, CONSOLE_STATE_DISCONNECTED, CONSOLE_STATE_LOCKED, Capability,
-    ControlMessage, SESSION_END_CONSOLE_BUSY, SESSION_END_DENIED_BY_USER, SESSION_STAGE_AUTOLOGON,
-    SESSION_STAGE_EVICTING,
+    ControlMessage, MAX_CREDENTIAL_FIELD_LEN, SESSION_END_CONSOLE_BUSY, SESSION_END_DENIED_BY_USER,
+    SESSION_STAGE_AUTOLOGON, SESSION_STAGE_EVICTING,
 };
 pub use cursor::{CursorError, CursorMessage, MAX_CURSOR_DIM};
 pub use error::ProtocolError;
@@ -62,7 +63,7 @@ pub use smartcard::{
 };
 pub use storage::{
     ERR_BAD_NAME, ERR_BAD_OFFSET, ERR_BAD_TRANSFER, ERR_IO, ERR_NOT_FOUND, ERR_QUOTA_EXCEEDED,
-    ERR_TOO_LARGE,
-    MAX_CHUNK_PAYLOAD, MAX_ERROR_MSG_LEN, MAX_FILE_SIZE, MAX_NAME_LEN, STORAGE_CHUNK_SIZE,
-    StorageError, StorageMessage, validate_name,
+    ERR_TOO_LARGE, MAX_CHUNK_PAYLOAD, MAX_ERROR_MSG_LEN, MAX_FILE_SIZE, MAX_NAME_LEN,
+    STORAGE_CHUNK_SIZE, StorageError, StorageMessage, validate_name,
 };
+pub use ticket::{str_from_wire_ticket, wire_ticket_from_str};

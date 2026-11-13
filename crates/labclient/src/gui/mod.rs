@@ -432,6 +432,7 @@ fn spawn_session(
             flags.smartcard,
         ),
         pref_resolution,
+        credentials: None,
     };
     let (events_tx, events_rx) = flume::bounded(client::EVENT_CHANNEL_CAPACITY);
     let (session, commands, displays) = Session::new(config, events_tx);

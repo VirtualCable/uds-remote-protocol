@@ -69,31 +69,9 @@ pub struct SessionStats {
     pub bytes_received: u64,
 }
 
-/// Maps a broker ticket string to its wire form: raw UTF-8, NUL-padded to
-/// the 48-byte field. Fails when the ticket does not fit (a UUID is 36
-/// bytes; the field leaves 12 bytes of headroom).
-pub fn wire_ticket_from_str(ticket: &str) -> Result<[u8; protocol::TICKET_LENGTH]> {
-    let bytes = ticket.as_bytes();
-    anyhow::ensure!(
-        bytes.len() <= protocol::TICKET_LENGTH,
-        "broker ticket too long for the wire field ({} > {})",
-        bytes.len(),
-        protocol::TICKET_LENGTH
-    );
-    let mut out = [0u8; protocol::TICKET_LENGTH];
-    out[..bytes.len()].copy_from_slice(bytes);
-    Ok(out)
-}
-
-/// Inverse of [`wire_ticket_from_str`]: UTF-8 up to the first NUL.
-pub fn str_from_wire_ticket(ticket: &[u8; protocol::TICKET_LENGTH]) -> Result<String> {
-    let end = ticket.iter().position(|b| *b == 0).unwrap_or(ticket.len());
-    let s = std::str::from_utf8(&ticket[..end]).map_err(|_| {
-        anyhow::anyhow!("wire ticket is not a UTF-8 broker ticket (standalone ticket in pq mode?)")
-    })?;
-    anyhow::ensure!(!s.is_empty(), "empty wire ticket");
-    Ok(s.to_string())
-}
+// The ticket wire mapping (raw UTF-8, NUL-padded, pq mode) lives in the
+// protocol crate so clients (launcher, labclient) share the exact mapping.
+pub use protocol::{str_from_wire_ticket, wire_ticket_from_str};
 
 #[cfg(test)]
 mod tests {

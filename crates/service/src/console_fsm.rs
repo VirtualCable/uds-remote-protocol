@@ -56,6 +56,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// How long to wait for the autologon to produce a console session.
 const LOGON_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long the pre-session gate waits for the client's interactive
+/// `SessionCredentials` (pq mode without broker credentials) before
+/// proceeding without an identity. The launcher collects them in a dialog
+/// BEFORE connecting, so they arrive in the first round-trip; this bound
+/// only matters for a client that never sends them.
+const CREDENTIALS_WAIT: Duration = Duration::from_secs(10);
+
 /// SAS re-send cadence while an autologon is in flight: the first SAS can
 /// land while winlogon is still building the logon session (e.g. right
 /// after an eviction) and is lost (§18.53 lesson of 2026-11-04).
@@ -108,6 +115,11 @@ pub struct ClientValidated {
 enum Phase {
     /// Just arrived: evaluate the console conflict on the next drive.
     DecideConflict,
+    /// Pq mode without broker credentials: the client collected them
+    /// interactively and sends `SessionCredentials` right after the
+    /// handshake; wait for it (bounded) before the conflict evaluation,
+    /// which needs the identity to compare against the console owner.
+    AwaitCredentials,
     /// Policy `ask`: waiting for the client's `ConsoleConflictReply`.
     AwaitReply,
     /// Eviction fired: waiting for the console to leave `owner_id`.
@@ -281,11 +293,14 @@ async fn manager_loop(
     info!(state = ?manager.console, "console state machine up");
     let mut buf = [0u8; 2048];
     while !stop.load(Ordering::Relaxed) {
-        if matches!(
+        // Phases that wait for a client control message also read its
+        // stream: the conflict reply (AwaitReply) and the interactive
+        // credentials (AwaitCredentials).
+        let reading = matches!(
             manager.pending.as_ref().map(|p| &p.phase),
-            Some(Phase::AwaitReply)
-        ) {
-            // Awaiting the client's conflict answer: read its stream too.
+            Some(Phase::AwaitReply | Phase::AwaitCredentials)
+        );
+        if reading {
             let pending = manager.pending.as_mut().expect("checked above");
             tokio::select! {
                 event = rx.recv_async() => {
@@ -296,7 +311,7 @@ async fn manager_loop(
                 }
                 msg = pending.stream.recv_into(&mut buf) => {
                     let n = msg.map(|(ch, n)| (ch, n));
-                    manager.handle_conflict_reply(n, &buf).await;
+                    manager.handle_client_message(n, &buf).await;
                 }
                 _ = tokio::time::sleep(POLL_INTERVAL) => manager.check_timeouts().await,
             }
@@ -358,14 +373,25 @@ impl Manager {
             mode = crate::listener::mode_name(&client.runtime),
             "handshake validated (possession proof passed)"
         );
+        // Pq mode without broker credentials: the launcher collects them
+        // interactively and sends `SessionCredentials` right after the
+        // handshake; wait for it before the conflict evaluation (which
+        // needs the identity). Standalone mode and broker-provided
+        // credentials skip the wait entirely.
+        let await_credentials =
+            matches!(&*client.runtime, crate::standalone::Runtime::Pq(_)) && client.creds.is_none();
         self.pending = Some(Pending {
             stream: client.stream,
             runtime: client.runtime,
             grant: client.grant,
             creds: client.creds,
             conflict: client.conflict,
-            phase: Phase::DecideConflict,
-            deadline: Instant::now(),
+            phase: if await_credentials {
+                Phase::AwaitCredentials
+            } else {
+                Phase::DecideConflict
+            },
+            deadline: Instant::now() + CREDENTIALS_WAIT,
             last_sas: Instant::now(),
         });
         self.drive_pending().await;
@@ -449,6 +475,72 @@ impl Manager {
                 }
             }
         }
+    }
+
+    /// A client control message arrived while waiting for one
+    /// ([`Phase::AwaitReply`] or [`Phase::AwaitCredentials`]); dispatch by
+    /// the current phase.
+    async fn handle_client_message(
+        &mut self,
+        msg: std::result::Result<(u16, usize), transport::TransportError>,
+        buf: &[u8],
+    ) {
+        match self.pending.as_ref().map(|p| &p.phase) {
+            Some(Phase::AwaitCredentials) => self.handle_session_credentials(msg, buf).await,
+            _ => self.handle_conflict_reply(msg, buf).await,
+        }
+    }
+
+    /// The client's interactive `SessionCredentials` while in
+    /// [`Phase::AwaitCredentials`]. Validated and stored like the
+    /// broker-payload ones: `pending.creds` (conflict identity, autologon)
+    /// and the credprov slot. Anything else keeps the wait running until
+    /// the deadline.
+    async fn handle_session_credentials(
+        &mut self,
+        msg: std::result::Result<(u16, usize), transport::TransportError>,
+        buf: &[u8],
+    ) {
+        let (user, domain, password) = match msg {
+            Ok((ch, n)) if ch == channel::CONTROL => {
+                match ControlMessage::decode(&buf[..n]) {
+                    Ok(ControlMessage::SessionCredentials {
+                        user,
+                        domain,
+                        password,
+                    }) => (user, domain, password),
+                    // Not the awaited message; keep waiting.
+                    _ => return,
+                }
+            }
+            Ok(_) => return,
+            Err(err) => {
+                warn!(error = %format!("{err:#}"), "stream error awaiting credentials; dropping");
+                self.pending = None;
+                return;
+            }
+        };
+        // The client is untrusted (§18.78): bound the fields and require a
+        // non-empty user; a malformed set is dropped, never fatal — the
+        // wait continues to its deadline and the session proceeds without
+        // credentials.
+        let valid = !user.trim().is_empty()
+            && user.len() <= protocol::MAX_CREDENTIAL_FIELD_LEN
+            && domain.len() <= protocol::MAX_CREDENTIAL_FIELD_LEN
+            && password.len() <= protocol::MAX_CREDENTIAL_FIELD_LEN;
+        if !valid {
+            warn!("client sent malformed session credentials; ignored");
+            return;
+        }
+        let creds = Credentials::new(user.trim(), &domain, &password);
+        info!(user = %creds.username, "interactive session credentials received");
+        *self.creds_slot.lock().expect("creds slot poisoned") = Some(creds.clone());
+        let Some(pending) = &mut self.pending else {
+            return;
+        };
+        pending.creds = Some(creds);
+        pending.phase = Phase::DecideConflict;
+        self.drive_pending().await;
     }
 
     /// The client's `ConsoleConflictReply` (or any other message / stream
@@ -646,6 +738,19 @@ impl Manager {
             Phase::Autologon => {
                 warn!("autologon did not produce a console session in time; dropping");
                 self.pending = None;
+            }
+            Phase::AwaitCredentials => {
+                // The client never sent its interactive credentials:
+                // proceed without an identity (the console is mirrored;
+                // no autologon is possible without credentials).
+                info!(
+                    "no interactive credentials within {CREDENTIALS_WAIT:?}; proceeding without them"
+                );
+                let Some(pending) = &mut self.pending else {
+                    return;
+                };
+                pending.phase = Phase::DecideConflict;
+                self.drive_pending().await;
             }
             Phase::DecideConflict => {}
         }

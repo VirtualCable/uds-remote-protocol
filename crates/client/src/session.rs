@@ -78,6 +78,32 @@ const PRESENT_TICK: Duration = Duration::from_millis(8);
 /// A/V sync statistics are logged with this cadence.
 const SYNC_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Interactive logon credentials collected from the user by the consumer
+/// (launcher's dialog) when the broker did not provide them. Sent once,
+/// as the first control message right after the handshake, inside the
+/// already-authenticated encrypted channel; the service feeds them to its
+/// credential provider exactly like the broker-payload ones.
+#[derive(Clone)]
+pub struct SessionCredentials {
+    /// Username.
+    pub user: String,
+    /// Domain; empty/"." pins the logon to the local accounts.
+    pub domain: String,
+    /// Password.
+    pub password: String,
+}
+
+impl std::fmt::Debug for SessionCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never log the password.
+        f.debug_struct("SessionCredentials")
+            .field("user", &self.user)
+            .field("domain", &self.domain)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Static configuration of one client session.
 // A plain bag of independent switches the consumer fills; grouping them
 // into sub-structs would only add nesting at every call site.
@@ -108,6 +134,11 @@ pub struct ClientConfig {
     /// `(0, 0)` means no preference: the server keeps its current mode or
     /// applies its own fixed `resolution` policy.
     pub pref_resolution: (u16, u16),
+    /// Interactive logon credentials collected from the user when the
+    /// broker did not provide them; sent as the first control message of
+    /// the pre-session gate. `None` when the ticket payload already
+    /// carried them (or autologon is not wanted).
+    pub credentials: Option<SessionCredentials>,
 }
 
 /// One client session (§15.3). Build with [`Session::new`], then drive it
@@ -282,6 +313,18 @@ impl Session {
         &mut self,
         stream: &mut EncryptedStream<Box<dyn ReliableTransport>>,
     ) -> Result<Option<(u16, [u8; 16])>> {
+        // Interactive credentials (broker did not know them) travel first,
+        // inside the authenticated channel, so the service can evaluate the
+        // console conflict against the real identity and arm the autologon.
+        if let Some(creds) = self.config.credentials.take() {
+            info!(user = %creds.user, "sending interactive session credentials");
+            let msg = ControlMessage::SessionCredentials {
+                user: creds.user,
+                domain: creds.domain,
+                password: creds.password,
+            };
+            stream.send(channel::CONTROL, &msg.encode()?).await?;
+        }
         let deadline = Instant::now() + PRE_SESSION_TIMEOUT;
         let mut buf = [0u8; 2048];
         loop {

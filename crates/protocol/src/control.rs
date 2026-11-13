@@ -272,7 +272,27 @@ pub enum ControlMessage {
     /// `RequestKeyframe` (max 1 per 500 ms — riesgos §2.1). Appended at the
     /// end so existing postcard variant indices do not shift.
     WebcamRequestKeyframe,
+    /// Interactive session credentials, client → server: the broker did
+    /// not know the logon credentials, so the launcher's dialog collected
+    /// them from the user and they travel inside the already-authenticated
+    /// encrypted channel, right after the handshake. The service feeds
+    /// them to the credential provider exactly like the broker-payload
+    /// ones. Appended at the end so existing postcard variant indices do
+    /// not shift.
+    SessionCredentials {
+        /// Username.
+        user: String,
+        /// Domain; empty/"." pins the logon to the local accounts.
+        domain: String,
+        /// Password.
+        password: String,
+    },
 }
+
+/// Maximum length of each `SessionCredentials` field on the wire (bytes).
+/// Generous for real-world credentials, small enough to bound the control
+/// message (the control channel caps frame sizes anyway).
+pub const MAX_CREDENTIAL_FIELD_LEN: usize = 512;
 
 /// `SessionEnd` reason: the console is owned by another user and the server
 /// policy is `deny` (§18.53).
