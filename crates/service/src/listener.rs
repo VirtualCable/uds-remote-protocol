@@ -268,6 +268,16 @@ async fn handle_connection(
         *creds_slot.lock().expect("creds slot poisoned") = creds.clone();
     }
 
+    // Whether the client may supply the logon credentials interactively
+    // (pq: ticket payload's `interactive_credentials`, set by the broker's
+    // "empty creds"; standalone: `allow_client_credentials` in the config).
+    let allow_client_credentials = match &**runtime {
+        crate::standalone::Runtime::Standalone(standalone) => standalone.allow_client_credentials,
+        crate::standalone::Runtime::Pq(_) => grant
+            .as_ref()
+            .is_some_and(|grant| grant.interactive_credentials),
+    };
+
     // Hand the validated connection to the console state machine (§18.55):
     // it resolves the console conflict (§18.53), runs the autologon when
     // needed and completes the session with a fresh agent.
@@ -280,6 +290,7 @@ async fn handle_connection(
                 grant,
                 creds,
                 conflict,
+                allow_client_credentials,
             },
         )))
         .await

@@ -705,6 +705,11 @@ pub struct StandaloneConfig {
     /// Audio-in sink for the agent (§9.2; empty/`null` = mic off, "uds" =
     /// the udsaudio virtual microphone, "wav:PATH" = E2E file).
     pub mic_sink: Option<String>,
+    /// Accept client-supplied interactive credentials
+    /// (`ControlMessage::SessionCredentials`) when no auto-logon
+    /// credentials are configured. Off by default: without it the service
+    /// never waits for nor accepts credentials from the wire.
+    pub allow_client_credentials: bool,
     /// Console-conflict policy (§18.53): another user owns the console.
     pub console_conflict: ConsoleConflictPolicy,
     /// Whether the `ask` conflict message may reveal the console owner's
@@ -887,6 +892,7 @@ impl Default for StandaloneConfig {
             stats_csv: None,
             cam_sink: None,
             mic_sink: None,
+            allow_client_credentials: false,
             console_conflict: ConsoleConflictPolicy::default(),
             console_conflict_reveal_user: false,
             console_conflict_timeout_secs: DEFAULT_CONFLICT_TIMEOUT_SECS,

@@ -66,6 +66,7 @@ impl StandaloneProvider {
             }),
             channels,
             wallpaper_off: standalone.wallpaper_off,
+            interactive_credentials: standalone.allow_client_credentials,
             console_conflict: standalone.console_conflict,
             console_conflict_reveal_user: standalone.console_conflict_reveal_user,
             console_conflict_timeout_secs: standalone.console_conflict_timeout_secs,

@@ -43,6 +43,12 @@ pub struct TicketPayload {
     /// animation reduction is unconditional — this is the only opt-in).
     #[serde(default)]
     pub wallpaper_off: bool,
+    /// The broker does not know the logon credentials ("empty creds") and
+    /// allows the client to supply them interactively after the handshake
+    /// (`ControlMessage::SessionCredentials`). Off by default: without this
+    /// flag the service never waits for nor accepts client credentials.
+    #[serde(default)]
+    pub interactive_credentials: bool,
     /// Console-conflict policy (§18.53): another user owns the console.
     #[serde(default)]
     pub console_conflict: server_config::ConsoleConflictPolicy,
@@ -249,6 +255,9 @@ pub struct SessionGrant {
     pub channels: ChannelPolicy,
     /// Blank the desktop wallpaper during the session (§18.54).
     pub wallpaper_off: bool,
+    /// The client may supply the logon credentials interactively
+    /// (`ControlMessage::SessionCredentials` right after the handshake).
+    pub interactive_credentials: bool,
     /// Console-conflict policy (§18.53).
     pub console_conflict: server_config::ConsoleConflictPolicy,
     /// Whether the `ask` conflict message may reveal the console owner.
@@ -272,6 +281,7 @@ impl SessionGrant {
             video: payload.video,
             channels: payload.channels,
             wallpaper_off: payload.wallpaper_off,
+            interactive_credentials: payload.interactive_credentials,
             console_conflict: payload.console_conflict,
             console_conflict_reveal_user: payload.console_conflict_reveal_user,
             console_conflict_timeout_secs: payload.console_conflict_timeout_secs,

@@ -109,16 +109,20 @@ pub struct ClientValidated {
     pub creds: Option<Credentials>,
     /// Console-conflict configuration for this session.
     pub conflict: ConflictConfig,
+    /// The session policy allows client-supplied interactive credentials
+    /// (`ControlMessage::SessionCredentials`).
+    pub allow_client_credentials: bool,
 }
 
 /// Phases of a pending (validated, not yet handed off) session.
 enum Phase {
     /// Just arrived: evaluate the console conflict on the next drive.
     DecideConflict,
-    /// Pq mode without broker credentials: the client collected them
-    /// interactively and sends `SessionCredentials` right after the
-    /// handshake; wait for it (bounded) before the conflict evaluation,
-    /// which needs the identity to compare against the console owner.
+    /// The policy allows interactive credentials and none came with the
+    /// ticket: the client collected them interactively and sends
+    /// `SessionCredentials` right after the handshake; wait for it
+    /// (bounded) before the conflict evaluation, which needs the identity
+    /// to compare against the console owner.
     AwaitCredentials,
     /// Policy `ask`: waiting for the client's `ConsoleConflictReply`.
     AwaitReply,
