@@ -41,6 +41,9 @@ pub struct StandaloneRuntime {
     pub output_name: Option<String>,
     /// Auto-logon credentials for the credential provider, if configured.
     pub creds: Option<Credentials>,
+    /// Accept client-supplied interactive credentials when no auto-logon
+    /// credentials are configured (`[standalone] allow_client_credentials`).
+    pub allow_client_credentials: bool,
     /// Codec-ladder sensitivity overrides in wire form (empty = defaults).
     pub ladder: String,
     /// Adaptive-fps overrides in wire form (empty = disabled, §12.7).
@@ -201,6 +204,7 @@ fn load_standalone(
         preset: standalone.preset.clone(),
         output_name: standalone.output_name.clone(),
         creds,
+        allow_client_credentials: standalone.allow_client_credentials,
         ladder: standalone.ladder.to_wire(),
         fps_adapt: standalone
             .adaptive_fps
