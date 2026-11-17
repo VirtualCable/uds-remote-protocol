@@ -6,3 +6,9 @@ target-windows
 GEMINI.md
 # Added by code-review-graph
 .code-review-graph/
+# Agent/editor local configs (not distributable)
+AGENTS.md
+opencode.jsonc
+.mcp.json
+.vscode/mcp.json
+.github/instructions/
