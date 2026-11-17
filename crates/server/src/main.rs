@@ -482,35 +482,47 @@ const CLIENT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// duplication denied for a few seconds, so this must be generous.
 const RESIZE_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
-struct Legs<T: ReliableTransport> {
-    /// UDP send half, shared with the paced display-sender task (§12.6).
+struct Legs {
+    /// UDP send half, shared with the paced display-sender task (§12.6);
+    /// `None` on the stream fallback.
     udp: Option<Arc<Mutex<transport::DatagramSink<UdpTransport>>>>,
-    stream: Box<EncryptedStream<T>>,
-    /// Display fragments queued for the paced sender task; `None` on the
-    /// stream fallback, where the kernel's TCP flow control already paces.
-    frag_tx: Option<mpsc::Sender<Vec<u8>>>,
+    /// Control-class messages for the stream-IO task (probe acks, cursor,
+    /// clipboard, storage, printer, smartcard; audio on the fallback).
+    ctrl_tx: mpsc::Sender<StreamOut>,
+    /// Display fragments queued for the sender task: the paced UDP one
+    /// (§12.6) or the stream-IO one on the TCP fallback.
+    frag_tx: mpsc::Sender<Vec<u8>>,
 }
 
-impl<T: ReliableTransport> Legs<T> {
+impl Legs {
     /// Minimum free datagram slots the paced queue must keep before the
     /// session loop encodes another frame (§12.6 backpressure): below this,
     /// the capture is skipped instead of piling latency into the queue.
     const FRAG_QUEUE_HEADROOM: usize = 384;
 
     /// True when the paced queue is congested enough that encoding a new
-    /// frame would just pile up delay (§12.6). Always false on the stream
-    /// fallback (TCP flow control applies its own backpressure).
+    /// frame would just pile up delay (§12.6).
     fn frag_queue_limited(&self) -> bool {
-        match &self.frag_tx {
-            Some(tx) => tx.capacity() < Self::FRAG_QUEUE_HEADROOM,
-            None => false,
-        }
+        self.frag_tx.capacity() < Self::FRAG_QUEUE_HEADROOM
     }
 
-    /// Free datagram slots in the paced queue (`None` on the stream
-    /// fallback, where there is no bounded queue to watch).
-    fn frag_queue_free(&self) -> Option<usize> {
-        self.frag_tx.as_ref().map(mpsc::Sender::capacity)
+    /// Free datagram slots in the display queue.
+    fn frag_queue_free(&self) -> usize {
+        self.frag_tx.capacity()
+    }
+
+    /// Hands a control-class message to the stream-IO task without ever
+    /// blocking the session loop. A full queue means the client stopped
+    /// reading long ago (512 pending records): the session is unrecoverable.
+    fn send_stream(&self, ch: channel::ChannelId, payload: Vec<u8>) -> transport::Result<()> {
+        self.ctrl_tx
+            .try_send(StreamOut { ch, payload })
+            .map_err(|e| {
+                transport::TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    format!("stream control queue unavailable: {e}"),
+                ))
+            })
     }
 
     /// Queues one frame's fragments **all-or-nothing**: a partially-sent
@@ -524,12 +536,7 @@ impl<T: ReliableTransport> Legs<T> {
     /// caused the loss, so instead of dropping we wait briefly for the
     /// pacer to drain (bounded by [`KEYFRAME_QUEUE_WAIT`]) before giving up.
     async fn send_frame(&mut self, frags: Vec<Vec<u8>>, keyframe: bool) -> transport::Result<bool> {
-        let Some(tx) = &self.frag_tx else {
-            for frag in &frags {
-                self.stream.send(channel::DISPLAY, frag).await?;
-            }
-            return Ok(true);
-        };
+        let tx = &self.frag_tx;
         if tx.capacity() < frags.len() {
             if !keyframe {
                 return Ok(false);
@@ -562,23 +569,29 @@ impl<T: ReliableTransport> Legs<T> {
     async fn send_control(&mut self, msg: &[u8]) -> transport::Result<()> {
         match &self.udp {
             Some(d) => d.lock().await.send(channel::CONTROL, msg).await,
-            None => self.stream.send(channel::CONTROL, msg).await,
+            None => self.send_stream(channel::CONTROL, msg.to_vec()),
         }
     }
 
     /// Audio datagrams (§9): one Opus frame per datagram on `AUDIO_OUT`,
     /// over the UDP leg when present, else the reliable stream fallback.
+    /// On the fallback a congested queue drops the frame (a glitch is
+    /// cheaper than a session reset).
     async fn send_audio(&mut self, payload: &[u8]) -> transport::Result<()> {
-        match &self.udp {
-            Some(d) => d.lock().await.send(channel::AUDIO_OUT, payload).await,
-            None => self.stream.send(channel::AUDIO_OUT, payload).await,
+        if let Some(d) = &self.udp {
+            return d.lock().await.send(channel::AUDIO_OUT, payload).await;
         }
+        if self.ctrl_tx.capacity() == 0 {
+            return Ok(());
+        }
+        self.send_stream(channel::AUDIO_OUT, payload.to_vec())
     }
 
-    /// Cursor updates always take the reliable stream: the client keeps the
-    /// last shape as state, so losing one would leave a stale cursor (§10).
-    async fn send_cursor(&mut self, msg: &[u8]) -> transport::Result<()> {
-        self.stream.send(channel::CURSOR, msg).await
+    /// Cursor updates are delivered in order via the stream-IO task: the
+    /// client keeps the last shape as state, so losing one would leave a
+    /// stale cursor (§10).
+    fn send_cursor(&mut self, msg: &[u8]) -> transport::Result<()> {
+        self.send_stream(channel::CURSOR, msg.to_vec())
     }
 }
 
@@ -591,6 +604,72 @@ async fn recv_udp(
     match udp {
         Some(d) => d.recv_into(buf).await,
         None => std::future::pending().await,
+    }
+}
+
+/// One record crossing the reliable stream in either direction.
+#[derive(Debug)]
+struct StreamOut {
+    ch: channel::ChannelId,
+    payload: Vec<u8>,
+}
+
+/// Capacity of the session→client control queue (records). A full queue
+/// means the client has not been reading for far longer than the liveness
+/// timeout, so senders treat it as a dead session.
+const STREAM_CTRL_QUEUE: usize = 512;
+/// Capacity of the client→session forward queue (records). Backpressuring
+/// the IO task here just lets the kernel TCP buffer absorb bursts.
+const STREAM_IN_QUEUE: usize = 256;
+
+/// Stream IO task (§18.39 watchdog integrity): owns the reliable stream and
+/// shuttles records in both directions so the session loop never performs a
+/// blocking write itself. Before this split, a TCP-fallback client that
+/// stopped reading wedged the loop inside a display `send`, the pending
+/// probes went unread and the 5 s liveness watchdog killed a live session.
+///
+/// Poll order is biased: control records first, incoming packets second,
+/// display fragments last — probes and input stay responsive no matter how
+/// much video is queued. Ends when any leg errors or both out-queues close.
+async fn stream_io<T: ReliableTransport + 'static>(
+    mut stream: Box<EncryptedStream<T>>,
+    mut ctrl_rx: mpsc::Receiver<StreamOut>,
+    mut disp_rx: mpsc::Receiver<Vec<u8>>,
+    in_tx: mpsc::Sender<StreamOut>,
+) {
+    let mut buf = vec![0u8; 65_536];
+    loop {
+        tokio::select! {
+            biased;
+            msg = ctrl_rx.recv() => {
+                let Some(msg) = msg else { break };
+                if let Err(e) = stream.send(msg.ch, &msg.payload).await {
+                    warn!("stream IO: control send failed: {e}");
+                    break;
+                }
+            }
+            res = stream.recv_into(&mut buf) => {
+                match res {
+                    Ok((ch, n)) => {
+                        let msg = StreamOut { ch, payload: buf[..n].to_vec() };
+                        if in_tx.send(msg).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        info!("stream IO: receive ended: {e}");
+                        break;
+                    }
+                }
+            }
+            frag = disp_rx.recv() => {
+                let Some(frag) = frag else { break };
+                if let Err(e) = stream.send(channel::DISPLAY, &frag).await {
+                    warn!("stream IO: display send failed: {e}");
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -1901,18 +1980,16 @@ fn dump_h264_packet(codec: codec::VideoCodecType, packet: &codec::EncodedPacket)
 /// queued. The frame id is NOT assigned here: ids are handed out in output
 /// order by [`handle_encoded`], so empty frames keep consuming no id.
 #[allow(clippy::too_many_arguments)] // session state travels as separate locals
-fn submit_frame<T: ReliableTransport>(
+fn submit_frame(
     frame: Arc<OwnedFrame>,
-    legs: &Legs<T>,
+    legs: &Legs,
     enc: &EncoderHandle,
     in_flight: &mut usize,
     ctl: &mut ControlState,
     stats: &mut FrameStats,
     last_keyframe: &mut Instant,
 ) {
-    if let Some(free) = legs.frag_queue_free() {
-        stats.min_queue_free = stats.min_queue_free.min(free);
-    }
+    stats.min_queue_free = stats.min_queue_free.min(legs.frag_queue_free());
     // Backpressure (§12.6): the paced queue is congested — skip this frame
     // entirely (no encode CPU burned, no latency piled up) and force the
     // next sent frame to be a keyframe, since the peer may be missing the
@@ -1940,9 +2017,9 @@ fn submit_frame<T: ReliableTransport>(
 /// updates the quality EMAs and sends the fragments. Returns the next
 /// frame id.
 #[allow(clippy::too_many_arguments)] // session state travels as separate locals
-async fn handle_encoded<T: ReliableTransport>(
+async fn handle_encoded(
     out: EncoderOutput,
-    legs: &mut Legs<T>,
+    legs: &mut Legs,
     enc: &EncoderHandle,
     frame_id: u32,
     width: u32,
@@ -2047,9 +2124,9 @@ fn new_injector() -> Box<dyn server::input::InputInjector> {
 /// missing codec feature or a source init failure disables audio with a
 /// warning instead of failing the session.
 #[allow(clippy::type_complexity)] // the tuple is the session's audio state
-async fn setup_audio<T: ReliableTransport>(
+async fn setup_audio(
     args: &Args,
-    legs: &mut Legs<T>,
+    legs: &mut Legs,
     clock_start: Instant,
 ) -> Result<(
     Option<mpsc::Receiver<AudioPacket>>,
@@ -2122,7 +2199,7 @@ fn setup_mic(args: &Args) -> Option<std::sync::mpsc::SyncSender<Vec<u8>>> {
 /// Announces the audio-in decode parameters to the client (§9.2). The
 /// client sends raw Opus frames pre-jitter, so `jitter_ms`/`buffer_frames`
 /// are server-side concerns and are not part of the wire message.
-async fn announce_mic<T: ReliableTransport>(legs: &mut Legs<T>) -> Result<()> {
+async fn announce_mic(legs: &mut Legs) -> Result<()> {
     let preset = server::mic::audio_in_preset();
     legs.send_control(
         &ControlMessage::AudioInConfig {
@@ -2227,8 +2304,8 @@ fn forward_cam(cam: &mut Option<CamEndpoint>, payload: &[u8]) {
 /// loss, rate-limited to one per 500 ms like the display path (§12.2,
 /// riesgos §2.1): while throttled the flag stays set so the request is not
 /// lost, only deferred.
-async fn maybe_request_cam_keyframe<T: ReliableTransport>(
-    legs: &mut Legs<T>,
+async fn maybe_request_cam_keyframe(
+    legs: &mut Legs,
     ctl: &mut ControlState,
     cam: Option<&CamEndpoint>,
 ) {
@@ -2260,8 +2337,8 @@ async fn maybe_request_cam_keyframe<T: ReliableTransport>(
 /// (§18.57): the server clamps its preferred defaults to the client caps
 /// (Server > Client). No-op without a cam sink (`cam` is `None`) or when
 /// the client offers no VP9.
-async fn start_webcam<T: ReliableTransport>(
-    legs: &mut Legs<T>,
+async fn start_webcam(
+    legs: &mut Legs,
     cam: Option<&CamEndpoint>,
     caps: (u32, u32, u8, Vec<u16>),
 ) {
@@ -2330,7 +2407,7 @@ async fn serve<T: ReliableTransport>(
 // The session loop owns capture, display, audio and mic branches; splitting
 // it further would only scatter the shared session state.
 #[allow(clippy::too_many_lines)]
-async fn serve_stream<T: ReliableTransport>(
+async fn serve_stream<T: ReliableTransport + 'static>(
     mut stream: EncryptedStream<T>,
     ticket: &[u8; protocol::TICKET_LENGTH],
     key: &[u8; consts::KEY_LENGTH],
@@ -2363,6 +2440,13 @@ async fn serve_stream<T: ReliableTransport>(
         .peer_hello()
         .is_some_and(|h| h.flags & protocol::FLAG_H264_DECODE != 0);
     info!(client_h264, "client H.264 decode capability");
+
+    // Printer (§18.57): only when the client offered the channel — an
+    // unwilling client must never receive job data. Captured now because
+    // the stream moves into the IO task below.
+    let client_printer = stream
+        .peer_hello()
+        .is_some_and(|h| h.flags & protocol::FLAG_PRINTER != 0);
 
     // Resolution policy (§18.36/§18.37): a fixed server resolution wins;
     // otherwise approach the client's HELLO preference without exceeding it.
@@ -2418,6 +2502,12 @@ async fn serve_stream<T: ReliableTransport>(
         }
     };
     let (pacer_rate, _) = PacerRate::new();
+    // The reliable stream is owned by the IO task from here on: the session
+    // loop never writes to it directly (§18.39; see `stream_io`).
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<StreamOut>(STREAM_CTRL_QUEUE);
+    let (disp_tx, disp_rx) = mpsc::channel::<Vec<u8>>(DISPLAY_QUEUE_DGRAMS);
+    let (in_tx, mut in_rx) = mpsc::channel::<StreamOut>(STREAM_IN_QUEUE);
+    tokio::spawn(stream_io(Box::new(stream), ctrl_rx, disp_rx, in_tx));
     // Split the UDP leg: the source stays in this loop (probes, mic), the
     // sink is shared with the paced display-sender task (§12.6).
     let (udp_sink, mut udp_src, frag_tx) = match udp {
@@ -2430,13 +2520,13 @@ async fn serve_stream<T: ReliableTransport>(
                 Arc::clone(&sink),
                 Pacer::new(pacer_rate.clone()),
             ));
-            (Some(sink), Some(src), Some(tx))
+            (Some(sink), Some(src), tx)
         }
-        None => (None, None, None),
+        None => (None, None, disp_tx),
     };
     let mut legs = Legs {
         udp: udp_sink,
-        stream: Box::new(stream),
+        ctrl_tx,
         frag_tx,
     };
 
@@ -2610,11 +2700,7 @@ async fn serve_stream<T: ReliableTransport>(
     // Printer (§18.57 phase 0): only when the client offered the channel in
     // its HELLO — an unwilling client must never receive job data.
     let mut printer = args.printer_spool.clone().and_then(|dir| {
-        let offered = legs
-            .stream
-            .peer_hello()
-            .is_some_and(|h| h.flags & protocol::FLAG_PRINTER != 0);
-        if !offered {
+        if !client_printer {
             return None;
         }
         match server::printer::PrinterSpool::open(dir.clone()) {
@@ -2703,9 +2789,6 @@ async fn serve_stream<T: ReliableTransport>(
     };
 
     let mut udp_buf = vec![0u8; 2048];
-    // Sized for the largest stream record (~64 KiB): cursor shapes (§10)
-    // can be a few KiB.
-    let mut ctrl_buf = vec![0u8; 65_536];
     // Reusable buffer for audio datagram payloads (header + Opus frame).
     let mut audio_buf = Vec::with_capacity(1024);
     let mut frame_id = 0u32;
@@ -2829,7 +2912,7 @@ async fn serve_stream<T: ReliableTransport>(
                         );
                     }
                     Some(CaptureMsg::Cursor(update)) => {
-                        send_cursor_update(&mut legs, &update).await?;
+                        send_cursor_update(&mut legs, &update)?;
                     }
                     other => {
                         // The helper's frames channel closes when the helper
@@ -2910,27 +2993,31 @@ async fn serve_stream<T: ReliableTransport>(
                     maybe_request_cam_keyframe(&mut legs, &mut ctl, cam.as_ref()).await;
                 }
             }
-            res = legs.stream.recv_into(&mut ctrl_buf) => {
-                let (ch, n) = res?;
+            msg = in_rx.recv() => {
+                // The IO task ended (transport error or close): the session
+                // cannot continue without its stream leg.
+                let Some(msg) = msg else { bail!("stream IO task ended") };
                 last_recv = Instant::now();
+                let ch = msg.ch;
+                let ctrl_buf = msg.payload;
                 // Probes also arrive on the stream leg (TCP fallback
                 // keepalive, §18.39): answer them here too.
                 if ch == channel::CONTROL
-                    && let Ok(probe) = Probe::decode(&ctrl_buf[..n])
+                    && let Ok(probe) = Probe::decode(&ctrl_buf)
                 {
                     let now = micros_since(clock_start);
                     let ack = ProbeAck { t1: probe.t1, t2: now, t3: now };
                     legs.send_control(&ack.encode()).await?;
                 } else if ch == channel::AUDIO_IN {
-                    forward_mic(&mut mic_tx, &ctrl_buf[..n]);
+                    forward_mic(&mut mic_tx, &ctrl_buf);
                 } else if ch == channel::CLIPBOARD {
-                    handle_clipboard_packet(&mut legs, &mut clip_session, clipboard.as_ref(), &ctrl_buf[..n], clip_text_cap).await;
+                    handle_clipboard_packet(&mut legs, &mut clip_session, clipboard.as_ref(), &ctrl_buf, clip_text_cap);
                 } else if ch == channel::STORAGE {
-                    handle_storage_packet(&mut legs, &mut spool, &ctrl_buf[..n]).await;
+                    handle_storage_packet(&mut legs, &mut spool, &ctrl_buf);
                 } else if ch == channel::SMARTCARD {
-                    scard_router.handle_packet(&ctrl_buf[..n]);
+                    scard_router.handle_packet(&ctrl_buf);
                 } else if ch == channel::PRINTER {
-                    match protocol::PrinterMessage::decode(&ctrl_buf[..n]) {
+                    match protocol::PrinterMessage::decode(&ctrl_buf) {
                         Ok(msg) => {
                             if let Some(p) = &mut printer {
                                 p.on_reply(&msg);
@@ -2941,10 +3028,10 @@ async fn serve_stream<T: ReliableTransport>(
                 } else if ch == channel::WEBCAM {
                     // Lossy channel on the reliable leg: TCP fallback when
                     // there is no UDP (same as the display path).
-                    forward_cam(&mut cam, &ctrl_buf[..n]);
+                    forward_cam(&mut cam, &ctrl_buf);
                     maybe_request_cam_keyframe(&mut legs, &mut ctl, cam.as_ref()).await;
                 } else {
-                    handle_stream_packet(&mut ctl, &enc, ch, &ctrl_buf[..n]);
+                    handle_stream_packet(&mut ctl, &enc, ch, &ctrl_buf);
                 }
                 // A WebcamCaps (handled above, sync) is answered here with
                 // the async config/start pair.
@@ -2955,7 +3042,7 @@ async fn serve_stream<T: ReliableTransport>(
             _ = storage_tick.tick(), if spool.as_ref().is_some_and(server::storage::Spool::has_pending) => {
                 if let Some(s) = spool.as_mut() {
                     for msg in s.pump(4) {
-                        if let Err(e) = legs.stream.send(channel::STORAGE, &msg.encode()).await {
+                        if let Err(e) = legs.send_stream(channel::STORAGE, msg.encode()) {
                             warn!("storage chunk send failed: {e}");
                         }
                     }
@@ -2965,7 +3052,7 @@ async fn serve_stream<T: ReliableTransport>(
                 if let Some(p) = printer.as_mut() {
                     p.scan();
                     for msg in p.pump(4) {
-                        if let Err(e) = legs.stream.send(channel::PRINTER, &msg.encode()).await {
+                        if let Err(e) = legs.send_stream(channel::PRINTER, msg.encode()) {
                             warn!("printer chunk send failed: {e}");
                         }
                     }
@@ -3157,7 +3244,7 @@ async fn serve_stream<T: ReliableTransport>(
                 // Smartcard requests produced by the relay origin (§17);
                 // pends forever while the channel is inert.
                 if let Some(msg) = msg
-                    && let Err(e) = legs.stream.send(channel::SMARTCARD, &msg.encode()).await
+                    && let Err(e) = legs.send_stream(channel::SMARTCARD, msg.encode())
                 {
                     warn!("smartcard request send failed: {e}");
                 }
@@ -3166,7 +3253,7 @@ async fn serve_stream<T: ReliableTransport>(
                 match ev {
                     Some(server::clipboard::ClipboardEvent::TextChanged(text)) => {
                         let offer = clip_session.local_text_changed(text.as_bytes());
-                        if let Err(e) = legs.stream.send(channel::CLIPBOARD, &offer.encode()).await {
+                        if let Err(e) = legs.send_stream(channel::CLIPBOARD, offer.encode()) {
                             warn!("clipboard offer send failed: {e}");
                         }
                     }
@@ -3195,8 +3282,8 @@ async fn recv_clipboard(
 /// Handles one packet from the clipboard channel (M8): offers are pulled,
 /// requests answered from the session cache, and data applied to the OS
 /// clipboard through the backend.
-async fn handle_clipboard_packet<T: ReliableTransport>(
-    legs: &mut Legs<T>,
+fn handle_clipboard_packet(
+    legs: &mut Legs,
     session: &mut protocol::ClipboardSession,
     bridge: Option<&server::clipboard::ClipboardBridge>,
     buf: &[u8],
@@ -3206,14 +3293,14 @@ async fn handle_clipboard_packet<T: ReliableTransport>(
     match M::decode(buf) {
         Ok(M::Offer { seq, formats }) => {
             if let Some(req) = session.peer_offer(seq, formats)
-                && let Err(e) = legs.stream.send(channel::CLIPBOARD, &req.encode()).await
+                && let Err(e) = legs.send_stream(channel::CLIPBOARD, req.encode())
             {
                 warn!("clipboard request send failed: {e}");
             }
         }
         Ok(M::Request { seq, format }) => {
             let resp = session.peer_request(seq, format);
-            if let Err(e) = legs.stream.send(channel::CLIPBOARD, &resp.encode()).await {
+            if let Err(e) = legs.send_stream(channel::CLIPBOARD, resp.encode()) {
                 warn!("clipboard data send failed: {e}");
             }
         }
@@ -3249,8 +3336,8 @@ async fn handle_clipboard_packet<T: ReliableTransport>(
 /// Handles one packet from the storage channel (M8): decodes the message,
 /// applies it to the spool and sends back the immediate responses (chunk
 /// streams are produced by the session loop's pump tick).
-async fn handle_storage_packet<T: ReliableTransport>(
-    legs: &mut Legs<T>,
+fn handle_storage_packet(
+    legs: &mut Legs,
     spool: &mut Option<server::storage::Spool>,
     buf: &[u8],
 ) {
@@ -3276,7 +3363,7 @@ async fn handle_storage_packet<T: ReliableTransport>(
         }]
     };
     for resp in responses {
-        if let Err(e) = legs.stream.send(channel::STORAGE, &resp.encode()).await {
+        if let Err(e) = legs.send_stream(channel::STORAGE, resp.encode()) {
             warn!("storage response send failed: {e}");
         }
     }
@@ -3284,13 +3371,12 @@ async fn handle_storage_packet<T: ReliableTransport>(
 
 /// Encodes and sends one cursor update (visibility and/or shape) on the
 /// reliable stream (§10).
-async fn send_cursor_update<T: ReliableTransport>(
-    legs: &mut Legs<T>,
+fn send_cursor_update(
+    legs: &mut Legs,
     update: &server::capture::CursorUpdate,
 ) -> transport::Result<()> {
     if let Some(visible) = update.visible {
-        legs.send_cursor(&CursorMessage::Visibility { visible }.encode())
-            .await?;
+        legs.send_cursor(&CursorMessage::Visibility { visible }.encode())?;
     }
     if let Some(shape) = &update.shape {
         let msg = CursorMessage::Shape {
@@ -3311,7 +3397,7 @@ async fn send_cursor_update<T: ReliableTransport>(
                 "cursor shape exceeds stream record size; skipped"
             );
         } else {
-            legs.send_cursor(&msg).await?;
+            legs.send_cursor(&msg)?;
         }
     }
     Ok(())
@@ -3641,8 +3727,8 @@ fn lock_workstation() {
 
 /// Announces the display codec/geometry on the control channel (§8.3/§8.4);
 /// also used after a codec-ladder regime switch (§8.5).
-async fn announce_display<T: ReliableTransport>(
-    legs: &mut Legs<T>,
+async fn announce_display(
+    legs: &mut Legs,
     codec: codec::VideoCodecType,
     width: u32,
     height: u32,

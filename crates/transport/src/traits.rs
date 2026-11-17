@@ -60,7 +60,7 @@ impl Target {
 /// protocol layer ([`crate::EncryptedStream`]). This maps 1:1 to the opaque
 /// stream the launcher's local tunnel listener offers.
 #[async_trait]
-pub trait ReliableTransport: Send {
+pub trait ReliableTransport: Send + 'static {
     /// Sends the given bytes (full write).
     async fn send(&mut self, bytes: &[u8]) -> Result<()>;
     /// Receives bytes into `buf`, returning how many were read.
