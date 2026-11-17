@@ -9,6 +9,16 @@ authors.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Codec/audio forwarding to the client crate: consumers (the UDS launcher)
+# pick decoders through the facade instead of depending on `client` directly.
+default = []
+vp9 = ["client/vp9"]
+vp8 = ["client/vp8"]
+jpeg = ["client/jpeg"]
+audio = ["client/audio"]
+h264 = ["client/h264"]
+
 [dependencies]
 protocol.workspace = true
 transport.workspace = true
