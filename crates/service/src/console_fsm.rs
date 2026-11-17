@@ -109,9 +109,6 @@ pub struct ClientValidated {
     pub creds: Option<Credentials>,
     /// Console-conflict configuration for this session.
     pub conflict: ConflictConfig,
-    /// The session policy allows client-supplied interactive credentials
-    /// (`ControlMessage::SessionCredentials`).
-    pub allow_client_credentials: bool,
 }
 
 /// Phases of a pending (validated, not yet handed off) session.
