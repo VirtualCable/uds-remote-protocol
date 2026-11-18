@@ -15,7 +15,9 @@
 //! bitrate *within* the active preset (`set_bitrate`) and only jumps to
 //! another preset on large regime changes.
 
-use crate::{RawDecoder, RawEncoder, VideoCodecType, VideoDecoder, VideoEncoder};
+use crate::{VideoCodecType, VideoDecoder, VideoEncoder};
+#[cfg(debug_assertions)]
+use crate::{RawDecoder, RawEncoder};
 
 /// Tunable encoder parameters of a preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,10 @@ const fn with_quality(mut preset: CodecPreset, quality: i32) -> CodecPreset {
 /// in realtime mode at 1080p, so VP8 presets never go below 2 Mbps (its
 /// niche is saving CPU, not bandwidth).
 pub const PRESETS: &[CodecPreset] = &[
+    // Uncompressed reference codec: lab/debug only. A release build must
+    // never select it — a full-screen raw stream is an accidental bandwidth
+    // flood, so the name simply does not exist outside debug_assertions.
+    #[cfg(debug_assertions)]
     p("raw", VideoCodecType::Raw, None),
     // VP9: cpu_used 0-8, higher = faster/lower ratio. NOTE: cpu_used is the
     // CPU knob, NOT the bandwidth knob — cpu_used 4 costs 250% of a core at
@@ -121,6 +127,7 @@ impl CodecPreset {
         // they would be flagged as unused.
         let _ = (width, height, kbps, cpu, quality);
         match self.codec {
+            #[cfg(debug_assertions)]
             VideoCodecType::Raw => Ok(Box::new(RawEncoder::new())),
             #[cfg(feature = "codec-vp9")]
             VideoCodecType::Vp9 => Ok(Box::new(match cpu {
@@ -144,7 +151,9 @@ impl CodecPreset {
                 VideoCodecType::H264 => "h264 (not implemented yet)",
                 VideoCodecType::Av1 => "av1 (not implemented yet)",
                 VideoCodecType::JpegRects => "jpeg-rects (build with --features codec/codec-jpeg)",
-                VideoCodecType::Raw => unreachable!("raw handled above"),
+                // In release builds Raw reaches `other` (its arm is
+                // debug-only): refuse it instead of panicking.
+                VideoCodecType::Raw => "raw (debug builds only)",
             })),
         }
     }
@@ -154,6 +163,7 @@ impl CodecPreset {
 /// not compiled in. Unknown/future codecs are rejected here too.
 pub fn build_decoder(codec: VideoCodecType) -> crate::Result<Box<dyn VideoDecoder>> {
     match codec {
+        #[cfg(debug_assertions)]
         VideoCodecType::Raw => Ok(Box::new(RawDecoder::new())),
         #[cfg(feature = "codec-vp9")]
         VideoCodecType::Vp9 => Ok(Box::new(crate::Vp9Decoder::new()?)),
@@ -171,7 +181,8 @@ pub fn build_decoder(codec: VideoCodecType) -> crate::Result<Box<dyn VideoDecode
             }
             VideoCodecType::Av1 => "av1 (not implemented yet)",
             VideoCodecType::JpegRects => "jpeg-rects (build with --features codec/codec-jpeg)",
-            VideoCodecType::Raw => unreachable!("raw handled above"),
+            // See build_encoder: in release builds Raw has no decoder.
+            VideoCodecType::Raw => "raw (debug builds only)",
         })),
     }
 }
@@ -221,7 +232,10 @@ mod tests {
     fn every_codec_has_a_preset_and_defaults() {
         assert!(PRESETS.iter().any(|p| p.codec == VideoCodecType::Vp9));
         assert!(PRESETS.iter().any(|p| p.codec == VideoCodecType::Vp8));
+        #[cfg(debug_assertions)]
         assert!(PRESETS.iter().any(|p| p.codec == VideoCodecType::Raw));
+        #[cfg(not(debug_assertions))]
+        assert!(!PRESETS.iter().any(|p| p.codec == VideoCodecType::Raw));
         for preset in PRESETS {
             assert!(preset.params.bitrate_kbps > 0);
         }
@@ -237,6 +251,7 @@ mod tests {
         assert_eq!(p.params.cpu_used, Some(6));
     }
 
+    #[cfg(debug_assertions)]
     #[test]
     fn raw_preset_builds_encoder_and_decoder() {
         let p = CodecPreset::by_name("raw").unwrap();
@@ -255,6 +270,23 @@ mod tests {
         let decoded = dec.decode(&packet).unwrap().expect("frame");
         assert_eq!((decoded.width, decoded.height), (64, 64));
         assert_eq!(decoded.data[0], 7);
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn raw_is_refused_in_release() {
+        assert_eq!(CodecPreset::by_name("raw"), None);
+        assert!(build_decoder(VideoCodecType::Raw).is_err());
+        let synthetic = CodecPreset {
+            name: "raw",
+            codec: VideoCodecType::Raw,
+            params: CodecParams {
+                bitrate_kbps: 1,
+                cpu_used: None,
+                quality: None,
+            },
+        };
+        assert!(synthetic.build_encoder(64, 64).is_err());
     }
 
     #[cfg(feature = "codec-vp9")]

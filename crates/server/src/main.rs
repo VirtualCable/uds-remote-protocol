@@ -145,7 +145,13 @@ fn parse_args() -> Result<Args> {
         ticket: None,
         source: "synthetic".to_string(),
         output: server::capture::OutputSelector::Index(0),
-        preset: "raw".to_string(),
+        // Lab default: raw is debug-only (refused by release builds), so the
+        // release default is the adaptive ladder like any real deployment.
+        preset: if cfg!(debug_assertions) {
+            "raw".to_string()
+        } else {
+            "ladder".to_string()
+        },
         ladder: String::new(),
         fps_adapt: String::new(),
         bitrate: None,
