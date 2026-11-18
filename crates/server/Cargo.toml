@@ -11,7 +11,10 @@ workspace = true
 
 [features]
 default = ["opus"]
-windows-capture = ["dep:windows", "dep:image", "dep:udsscard-proto", "dep:vcam", "codec-mf"]
+# windows-capture adds the heavy capture/pipeline deps; the `windows` crate
+# itself is a permanent cfg(windows) dependency because feature-less modules
+# (secure_pipe, clipboard, ...) use it under plain cfg(windows).
+windows-capture = ["dep:image", "dep:udsscard-proto", "dep:vcam", "codec-mf"]
 codec-mf = ["codec/codec-mf"]
 codec-nvenc = ["codec/codec-nvenc"]
 vp9 = ["codec/codec-vp9"]
@@ -37,7 +40,8 @@ sha2.workspace = true
 toml.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true, optional = true, features = [
+# Not optional: plain cfg(windows) modules use it without windows-capture.
+windows = { workspace = true, features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_System_Threading",
@@ -45,6 +49,7 @@ windows = { workspace = true, optional = true, features = [
     "Win32_Storage_FileSystem",
     "Win32_Security_Authorization",
     "Win32_Networking_WinSock",
+    "Win32_System_RemoteDesktop",
 ] }
 vcam = { path = "../vcam", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
