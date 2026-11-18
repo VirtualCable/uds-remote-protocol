@@ -2829,6 +2829,14 @@ async fn serve_stream<T: ReliableTransport + 'static>(
     // Liveness (§18.39): the handshake itself was client traffic.
     let mut last_recv = Instant::now();
     let mut liveness_tick = tokio::time::interval(Duration::from_secs(1));
+    // Heartbeat (§18.39): an idle desktop produces no server→client traffic
+    // at all (no frames, no audio), and tunnel/NAT middleboxes can time the
+    // connection out from their own idle rules even while the client's
+    // probes flow client→server. A 1/s keepalive on the reliable stream
+    // (and on the UDP leg when present) keeps both directions busy and
+    // refreshes the client's liveness clock.
+    let mut keepalive_tick = tokio::time::interval(Duration::from_secs(1));
+    let keepalive_wire = ControlMessage::Keepalive.encode()?;
     // Resize requests get their own fast tick (gated on a pending request):
     // waiting for the 1 s liveness tick added up to a second of dead time
     // to every mode change for no reason (§18.37).
@@ -3074,6 +3082,20 @@ async fn serve_stream<T: ReliableTransport + 'static>(
                         if let Err(e) = legs.send_stream(channel::PRINTER, msg.encode()) {
                             warn!("printer chunk send failed: {e}");
                         }
+                    }
+                }
+            }
+            _ = keepalive_tick.tick() => {
+                // Reliable stream always (it is the tunnelled leg); the UDP
+                // leg too when it exists. A full stream queue means the
+                // client stopped reading long ago: warn and let the
+                // liveness watchdog do the killing.
+                if let Err(e) = legs.send_stream(channel::CONTROL, keepalive_wire.clone()) {
+                    warn!("stream keepalive queue failed: {e}");
+                }
+                if let Some(d) = &legs.udp {
+                    if let Err(e) = d.lock().await.send(channel::CONTROL, &keepalive_wire).await {
+                        warn!("UDP keepalive send failed: {e}");
                     }
                 }
             }
