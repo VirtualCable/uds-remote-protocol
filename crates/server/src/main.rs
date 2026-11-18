@@ -1377,9 +1377,12 @@ fn spawn_audio(
 
 /// Resolves `--audio-source` (§9): `synthetic` is the two-tone generator,
 /// `wasapi` is real desktop loopback (Windows with the `windows-capture`
-/// feature) and `auto` prefers WASAPI with a synthetic fallback. An
-/// explicit `wasapi` that cannot start disables audio with a loud error — a
-/// silently-fake source would hide the misconfiguration.
+/// feature) and `auto` prefers the UDS driver ring, then WASAPI. On Windows
+/// `auto` never falls back to synthetic: with no sound device at all the
+/// tones would be pure noise for a real user, so audio is disabled instead
+/// (§18.79). An explicit `wasapi` that cannot start also disables audio
+/// with a loud error — a silently-fake source would hide the
+/// misconfiguration.
 fn create_audio_source(kind: &str, preset: &AudioPreset) -> Option<Box<dyn AudioSource>> {
     let synthetic = || {
         Box::new(server::audio::SyntheticSource::new(
@@ -1436,7 +1439,7 @@ fn create_audio_source(kind: &str, preset: &AudioPreset) -> Option<Box<dyn Audio
         "auto" => {
             // Prefer the driver ring: it is entirely under our control and
             // cannot exhibit the engine-loopback garbage bursts. Fall back
-            // to WASAPI loopback (driver not installed) and then synthetic.
+            // to WASAPI loopback (driver not installed).
             #[cfg(all(windows, feature = "windows-capture"))]
             {
                 if let Some(s) = uds_loopback(false) {
@@ -1445,7 +1448,17 @@ fn create_audio_source(kind: &str, preset: &AudioPreset) -> Option<Box<dyn Audio
                 if let Some(s) = wasapi(false) {
                     return Some(s);
                 }
+                // No real source at all (VM without audio hardware, Audiosrv
+                // down): do NOT fall back to synthetic — streaming the
+                // two-tone generator to a real user is pure noise. Audio is
+                // disabled instead; explicit `--audio-source synthetic`
+                // remains for the lab.
+                warn!("no audio source available (no driver ring, no render endpoint); audio disabled");
+                None
             }
+            // Builds without a real backend (lab on other platforms) keep
+            // the synthetic source as the only option.
+            #[cfg(not(all(windows, feature = "windows-capture")))]
             Some(synthetic())
         }
         other => {
