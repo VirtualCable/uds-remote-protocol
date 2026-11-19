@@ -11,7 +11,6 @@
 //!
 //! Implementations behind features (none by default):
 //! - `codec-vp9`: VP9 video via libvpx (royalty-free).
-//! - `codec-vp8`: VP8 video via libvpx (compat only, not recommended — §8.4).
 //! - `codec-jpeg`: JPEG-over-dirty-rects video via libjpeg-turbo (§8.5).
 //! - `codec-opus`: Opus audio (royalty-free), with per-direction limits
 //!   (bitrate, sample rate) negotiated during the handshake.
@@ -35,7 +34,7 @@ mod opus;
 mod preset;
 mod raw;
 mod video;
-#[cfg(any(feature = "codec-vp9", feature = "codec-vp8"))]
+#[cfg(feature = "codec-vp9")]
 mod vpx;
 
 /// Audio format adaptation between device shapes and the wire format:
@@ -71,8 +70,6 @@ pub use video::{
     DecodedFrame, EncodedPacket, MAX_DECODE_DIM, VideoCodecType, VideoDecoder, VideoEncoder,
     VideoFrame, packet_is_keyframe,
 };
-#[cfg(feature = "codec-vp8")]
-pub use vpx::{Vp8Decoder, Vp8Encoder};
 #[cfg(feature = "codec-vp9")]
 pub use vpx::{Vp9Decoder, Vp9Encoder};
 
