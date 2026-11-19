@@ -23,6 +23,8 @@
 //! The protocol is versioned: a peer that does not understand `version` must
 //! drop the connection.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -502,6 +504,81 @@ pub fn pick_credentials(
     lab_file: Option<Credentials>,
 ) -> Option<Credentials> {
     session.or(lab_file)
+}
+
+/// Tracks the `ClearCredentials` requests sent to the credential provider as
+/// generations. A request bumps `requested`; a clear is pending while
+/// `requested` is ahead of `done`. A `SetCredentials` marks as done the
+/// requests made before it was sent, because the set overwrites them.
+#[derive(Debug, Default)]
+pub struct ProviderClearGate {
+    requested: AtomicU64,
+    done: AtomicU64,
+}
+
+impl ProviderClearGate {
+    /// Creates a gate with no requests pending.
+    pub const fn new() -> Self {
+        Self {
+            requested: AtomicU64::new(0),
+            done: AtomicU64::new(0),
+        }
+    }
+
+    /// Records a clear request for the provider.
+    pub fn request_clear(&self) {
+        self.requested.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Generation of the latest clear request.
+    pub fn requested(&self) -> u64 {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    /// Generation of the clear still to deliver, if any.
+    pub fn pending(&self) -> Option<u64> {
+        let wanted = self.requested();
+        (wanted > self.done.load(Ordering::SeqCst)).then_some(wanted)
+    }
+
+    /// Records that clears up to `generation` have been delivered.
+    pub fn mark_done(&self, generation: u64) {
+        self.done.fetch_max(generation, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod clear_gate_tests {
+    use super::ProviderClearGate;
+
+    #[test]
+    fn clear_is_pending_until_marked_done() {
+        let gate = ProviderClearGate::new();
+        assert_eq!(gate.pending(), None);
+        gate.request_clear();
+        let generation = gate.pending().expect("clear pending");
+        assert_eq!(gate.pending(), Some(generation));
+        gate.mark_done(generation);
+        assert_eq!(gate.pending(), None);
+    }
+
+    #[test]
+    fn delivered_set_supersedes_earlier_clear() {
+        let gate = ProviderClearGate::new();
+        gate.request_clear();
+        let before_set = gate.requested();
+        gate.mark_done(before_set);
+        assert_eq!(gate.pending(), None);
+    }
+
+    #[test]
+    fn clear_requested_during_set_stays_pending() {
+        let gate = ProviderClearGate::new();
+        let before_set = gate.requested();
+        gate.request_clear();
+        gate.mark_done(before_set);
+        assert!(gate.pending().is_some());
+    }
 }
 
 #[cfg(test)]

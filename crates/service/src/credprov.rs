@@ -26,7 +26,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use tracing::{error, info, warn};
-use udscredprov::logic::{self, Credentials, FrameDecoder, Request, Response, pick_credentials};
+use udscredprov::logic::{
+    self, Credentials, FrameDecoder, ProviderClearGate, Request, Response, pick_credentials,
+};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -58,13 +60,30 @@ pub(crate) const ARM_PATH: &str = r"C:\ProgramData\UdsRp\arm-autologon";
 /// How long to wait for a response frame before re-checking the stop flag.
 const POLL: Duration = Duration::from_millis(500);
 
-/// Set when the provider must drop its stored credentials (a failed or
-/// timed-out autologon). The pipe loop sends `ClearCredentials` on its next
-/// turn.
-static CLEAR_PROVIDER: AtomicBool = AtomicBool::new(false);
+/// Clears requested when the provider must drop its stored credentials (a
+/// failed or timed-out autologon). The pipe loop delivers them.
+static PROVIDER_CLEAR: ProviderClearGate = ProviderClearGate::new();
 
 pub(crate) fn request_provider_clear() {
-    CLEAR_PROVIDER.store(true, Ordering::Relaxed);
+    PROVIDER_CLEAR.request_clear();
+}
+
+/// Sends `SetCredentials`. Clears requested before the set are overwritten by
+/// it, so they are marked done only after the set has been delivered.
+fn send_set(pipe: &mut Pipe, creds: &Credentials) -> Result<()> {
+    let before_set = PROVIDER_CLEAR.requested();
+    pipe.send_request(&Request::SetCredentials(creds.clone()))?;
+    PROVIDER_CLEAR.mark_done(before_set);
+    Ok(())
+}
+
+/// Sends `ClearCredentials`. The clear is marked done only once delivered, so
+/// a failed write leaves it pending for the next pipe instance.
+fn send_clear(pipe: &mut Pipe) -> Result<()> {
+    let generation = PROVIDER_CLEAR.requested();
+    pipe.send_request(&Request::ClearCredentials)?;
+    PROVIDER_CLEAR.mark_done(generation);
+    Ok(())
 }
 
 /// Starts the pipe server on a background thread. `creds_slot` carries the
@@ -124,7 +143,7 @@ fn serve_one(stop: &AtomicBool, creds_source: &dyn Fn() -> Option<Credentials>) 
     let armed = std::path::Path::new(ARM_PATH).exists();
     let creds = creds_source();
     if let Some(creds) = creds.as_ref().filter(|_| armed) {
-        pipe.send_request(&Request::SetCredentials(creds.clone()))?;
+        send_set(&mut pipe, creds)?;
         info!(user = %creds.username, "credentials pushed to the provider (armed)");
         pushed = true;
     } else if creds.is_some() {
@@ -136,8 +155,8 @@ fn serve_one(stop: &AtomicBool, creds_source: &dyn Fn() -> Option<Credentials>) 
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
-        if CLEAR_PROVIDER.swap(false, Ordering::Relaxed) {
-            pipe.send_request(&Request::ClearCredentials)?;
+        if PROVIDER_CLEAR.pending().is_some() {
+            send_clear(&mut pipe)?;
             pushed = false;
             info!("provider credentials cleared on request");
         }
@@ -169,7 +188,8 @@ fn serve_one(stop: &AtomicBool, creds_source: &dyn Fn() -> Option<Credentials>) 
                 }
                 pushed = false;
                 if !success {
-                    pipe.send_request(&Request::ClearCredentials)?;
+                    PROVIDER_CLEAR.request_clear();
+                    send_clear(&mut pipe)?;
                     info!("provider credentials cleared after failed logon");
                 }
             }
@@ -181,7 +201,7 @@ fn serve_one(stop: &AtomicBool, creds_source: &dyn Fn() -> Option<Credentials>) 
                     && std::path::Path::new(ARM_PATH).exists()
                     && let Some(creds) = creds_source()
                 {
-                    pipe.send_request(&Request::SetCredentials(creds.clone()))?;
+                    send_set(&mut pipe, &creds)?;
                     info!(user = %creds.username, "credentials pushed to the provider (late arm)");
                     pushed = true;
                 }
