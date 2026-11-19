@@ -24,7 +24,7 @@ use crate::{RawDecoder, RawEncoder};
 pub struct CodecParams {
     /// Target bitrate in kbps.
     pub bitrate_kbps: u32,
-    /// libvpx speed/quality knob (VP9: 0-8 realtime range; VP8: -16..16).
+    /// libvpx speed/quality knob (VP9: 0-8 realtime range).
     /// `None` leaves the backend default.
     pub cpu_used: Option<i32>,
     /// JPEG quality (1-100) for rect-oriented codecs; ignored elsewhere.
@@ -75,9 +75,7 @@ const fn with_quality(mut preset: CodecPreset, quality: i32) -> CodecPreset {
 /// carries the [`VideoCodecType`] wire ID.
 ///
 /// Bitrate defaults come from the 1080p sweep (see `DEFAULT_BITRATE_KBPS`):
-/// VP9 tracks its target; VP8 has a ~1.7 Mbps floor and a ~2.3 Mbps ceiling
-/// in realtime mode at 1080p, so VP8 presets never go below 2 Mbps (its
-/// niche is saving CPU, not bandwidth).
+/// VP9 tracks its target.
 pub const PRESETS: &[CodecPreset] = &[
     // Uncompressed reference codec: lab/debug only. A release build must
     // never select it — a full-screen raw stream is an accidental bandwidth
@@ -91,10 +89,6 @@ pub const PRESETS: &[CodecPreset] = &[
     with_kbps(p("vp9-low-latency", VideoCodecType::Vp9, Some(8)), 2500),
     p("vp9-balanced", VideoCodecType::Vp9, Some(6)),
     with_kbps(p("vp9-bandwidth-saver", VideoCodecType::Vp9, Some(6)), 1000),
-    // VP8: cpu_used -16..16, lower = slower/better quality.
-    with_kbps(p("vp8-low-latency", VideoCodecType::Vp8, Some(-6)), 2500),
-    with_kbps(p("vp8-balanced", VideoCodecType::Vp8, Some(-10)), 2500),
-    with_kbps(p("vp8-quality", VideoCodecType::Vp8, Some(-14)), 4000),
     // JPEG over dirty rects (§8.5): the base regime of the codec ladder.
     // Bitrate has no meaning for the encoder itself (no rate control —
     // congestion handled by ladder jumps; `set_bitrate` degrades quality
@@ -134,11 +128,6 @@ impl CodecPreset {
                 Some(c) => crate::Vp9Encoder::with_cpu_used(width, height, kbps, c)?,
                 None => crate::Vp9Encoder::new(width, height, kbps)?,
             })),
-            #[cfg(feature = "codec-vp8")]
-            VideoCodecType::Vp8 => Ok(Box::new(match cpu {
-                Some(c) => crate::Vp8Encoder::with_cpu_used(width, height, kbps, c)?,
-                None => crate::Vp8Encoder::new(width, height, kbps)?,
-            })),
             #[cfg(feature = "codec-jpeg")]
             VideoCodecType::JpegRects => Ok(Box::new(crate::JpegRectsEncoder::new(
                 width,
@@ -147,7 +136,6 @@ impl CodecPreset {
             )?)),
             other => Err(crate::CodecError::Unsupported(match other {
                 VideoCodecType::Vp9 => "vp9 (build with --features codec/codec-vp9)",
-                VideoCodecType::Vp8 => "vp8 (build with --features codec/codec-vp8)",
                 VideoCodecType::H264 => "h264 (not implemented yet)",
                 VideoCodecType::Av1 => "av1 (not implemented yet)",
                 VideoCodecType::JpegRects => "jpeg-rects (build with --features codec/codec-jpeg)",
@@ -167,15 +155,12 @@ pub fn build_decoder(codec: VideoCodecType) -> crate::Result<Box<dyn VideoDecode
         VideoCodecType::Raw => Ok(Box::new(RawDecoder::new())),
         #[cfg(feature = "codec-vp9")]
         VideoCodecType::Vp9 => Ok(Box::new(crate::Vp9Decoder::new()?)),
-        #[cfg(feature = "codec-vp8")]
-        VideoCodecType::Vp8 => Ok(Box::new(crate::Vp8Decoder::new()?)),
         #[cfg(feature = "codec-jpeg")]
         VideoCodecType::JpegRects => Ok(Box::new(crate::JpegRectsDecoder::new())),
         #[cfg(any(feature = "codec-h264", all(windows, feature = "codec-mf")))]
         VideoCodecType::H264 => build_h264_decoder(),
         other => Err(crate::CodecError::Unsupported(match other {
             VideoCodecType::Vp9 => "vp9 (build with --features codec/codec-vp9)",
-            VideoCodecType::Vp8 => "vp8 (build with --features codec/codec-vp8)",
             VideoCodecType::H264 => {
                 "h264 (build with --features codec/codec-h264 or codec/codec-mf)"
             }
@@ -231,7 +216,7 @@ mod tests {
     #[test]
     fn every_codec_has_a_preset_and_defaults() {
         assert!(PRESETS.iter().any(|p| p.codec == VideoCodecType::Vp9));
-        assert!(PRESETS.iter().any(|p| p.codec == VideoCodecType::Vp8));
+        assert!(PRESETS.iter().any(|p| p.codec == VideoCodecType::JpegRects));
         #[cfg(debug_assertions)]
         assert!(PRESETS.iter().any(|p| p.codec == VideoCodecType::Raw));
         #[cfg(not(debug_assertions))]
@@ -289,6 +274,14 @@ mod tests {
         assert!(synthetic.build_encoder(64, 64).is_err());
     }
 
+    #[test]
+    fn vp8_presets_are_gone() {
+        // Lab-sweep leftovers; the catalog no longer offers VP8.
+        for name in ["vp8-low-latency", "vp8-balanced", "vp8-quality"] {
+            assert_eq!(CodecPreset::by_name(name), None);
+        }
+    }
+
     #[cfg(feature = "codec-vp9")]
     #[test]
     fn vp9_presets_build_encoders() {
@@ -298,16 +291,5 @@ mod tests {
             assert_eq!(enc.codec_type(), VideoCodecType::Vp9);
         }
         assert!(build_decoder(VideoCodecType::Vp9).is_ok());
-    }
-
-    #[cfg(feature = "codec-vp8")]
-    #[test]
-    fn vp8_presets_build_encoders() {
-        for name in ["vp8-low-latency", "vp8-balanced", "vp8-quality"] {
-            let p = CodecPreset::by_name(name).unwrap();
-            let enc = p.build_encoder(320, 240).unwrap();
-            assert_eq!(enc.codec_type(), VideoCodecType::Vp8);
-        }
-        assert!(build_decoder(VideoCodecType::Vp8).is_ok());
     }
 }

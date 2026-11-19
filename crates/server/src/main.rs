@@ -13,10 +13,12 @@
 //!                 [--audio-preset NAME] [--audio-source auto|synthetic|uds-loopback|wasapi]
 //!                 [--no-audio] [--mic-sink null|uds|wav:PATH] [--cam-sink null|raw:PATH] [--allow-lock]`
 //!
-//! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`,
-//! `vp8-low-latency`); VP8/VP9 presets require the crate features
-//! `vp9`/`vp8`. The chosen codec/geometry is announced on the control
-//! channel (`DisplayInfo`) before the first frame.
+//! `--preset` is a name from `codec::PRESETS` (e.g. `raw`, `vp9-balanced`),
+//! `ladder`, or the abstract alias `h264` (forced hardware H.264 leg, no
+//! ladder: NVENC, only when the client advertised H.264 decode; anything
+//! missing degrades to the ladder with a warning, §18.78). VP9 presets
+//! require the crate feature `vp9`. The chosen codec/geometry is announced
+//! on the control channel (`DisplayInfo`) before the first frame.
 //!
 //! `--output N` captures the Nth output of the first adapter that has one
 //! (0 = primary, the default — console mirroring); `--output-name SUBSTR`
@@ -216,7 +218,10 @@ fn parse_args() -> Result<Args> {
             // broker is the source of truth but may be buggy, and a bad
             // string must not kill the session. Anything invalid falls
             // back to the defaults with a warning.
-            if args.preset != "ladder" && codec::CodecPreset::by_name(&args.preset).is_none() {
+            if args.preset != "ladder"
+                && args.preset != "h264"
+                && codec::CodecPreset::by_name(&args.preset).is_none()
+            {
                 warn!(preset = %args.preset, "unknown preset in the agent config; using ladder");
                 args.preset = "ladder".to_string();
             }
@@ -4138,119 +4143,173 @@ fn video_ceiling_kbps(args: &Args, width: u32, height: u32) -> u32 {
     }
 }
 
-/// Builds the display encoder from `--preset`: a named preset, or the codec
-/// ladder (`--preset ladder`, feature `ladder`) which starts in rects-JPEG
-/// and switches to VP9 on sustained video-like change (§8.5).
+/// Builds the display encoder from `--preset`: a named preset from
+/// `codec::PRESETS`, the abstract alias `h264` (forced hardware H.264 leg,
+/// no ladder), or the codec ladder (`--preset ladder`, feature `ladder`)
+/// which starts in rects-JPEG and switches to VP9 on sustained video-like
+/// change (§8.5).
+///
+/// Broker-originated presets are untrusted input (§18.78): anything the
+/// session cannot honor (the client advertised no matching decoder, the
+/// codec feature is not compiled in, the hardware encoder is missing)
+/// degrades to the ladder with a warning — it must never kill the session.
 fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Result<ServerEncoder> {
-    // Used only by the NVENC branch (Windows + codec-nvenc + ladder).
-    let _ = client_h264;
-    #[cfg(feature = "ladder")]
-    if args.preset == "ladder" {
-        let kbps = video_ceiling_kbps(args, width, height);
-        let knobs = ladder_knobs(&args.ladder)?;
-        anyhow::ensure!(
-            matches!(
-                args.encoder.as_str(),
-                "" | "auto" | "mf" | "software" | "nvenc"
-            ),
-            "bad encoder backend {:?} (auto|mf|software|nvenc)",
-            args.encoder
-        );
-        // NVENC H.264 leg (Windows, NVIDIA): only when the client
-        // advertised H.264 decode (§18.75.9) — without a decoder the
-        // session must stay on VP9. "nvenc" asks for it explicitly (falls
-        // back to the normal backend chain with a warning when the GPU,
-        // driver or client capability is missing); "auto" prefers it over
-        // Media Foundation when everything lines up.
-        //
-        // Hardware legs run WITHOUT the ladder (§18.75.21): jpegrects only
-        // pays off as the cheap leg of a CPU-bound regime. A hardware
-        // encoder emits near-empty P-frames on static content at ~0 CPU,
-        // so the base regime buys nothing and every switch costs a
-        // keyframe plus a decoder rebuild on the client (observed: menu
-        // openings bouncing rects-jpeg <-> h264 within seconds).
-        #[cfg(all(windows, feature = "codec-nvenc"))]
-        if matches!(args.encoder.as_str(), "" | "auto" | "nvenc") && client_h264 {
-            // §18.76: [quality] h264_rc selects the rate control:
-            // "cbr" (hard ceiling), "vbr_hq" (mean = ceiling, peak = 2×)
-            // or "quality" (const-QP, fixed quality, floating bandwidth).
-            let rc = match args.quality.h264_rc {
-                server::config::H264Rc::Cbr => codec::NvencRc::Cbr,
-                server::config::H264Rc::VbrHq => codec::NvencRc::VbrHq,
-                server::config::H264Rc::Quality => codec::NvencRc::ConstQp(args.quality.h264_qp),
-            };
-            match codec::NvencEncoder::with_rc(width, height, 30, kbps, rc) {
-                Ok(encoder) => {
-                    info!(
-                        width,
-                        height, kbps, rc = ?rc, "h264 via NVENC ready (no ladder: hardware leg)"
-                    );
-                    return Ok(ServerEncoder::Simple(Box::new(encoder)));
-                }
-                Err(err) => {
-                    warn!(error = %format!("{err:#}"), "NVENC H.264 unavailable; falling back");
-                }
-            }
+    let mut preset = args.preset.as_str();
+    if preset == "h264" {
+        if !client_h264 {
+            warn!("forced h264 but the client advertised no H.264 decoder; using the codec ladder");
+            preset = "ladder";
+        } else if let Some(encoder) = nvenc_h264(args, width, height) {
+            info!(width, height, "h264 forced by preset: NVENC ready (no ladder: hardware leg)");
+            return Ok(ServerEncoder::Simple(encoder));
+        } else {
+            warn!("forced h264 but no hardware H.264 encoder is available; using the codec ladder");
+            preset = "ladder";
         }
-        // Media Foundation VP9 leg (Windows), hardware MFTs only: the
-        // Microsoft Store software MFT measured clearly worse than our
-        // tuned libvpx, so it is never used. "" / "auto" tries HW quietly;
-        // "mf" asks for it explicitly (same behavior, louder intent);
-        // either way an absent/failing HW MFT falls back to libvpx with a
-        // warning.
-        #[cfg(all(windows, feature = "codec-mf"))]
-        if matches!(args.encoder.as_str(), "" | "auto" | "mf") {
-            match codec::LadderEncoder::with_mf_vp9(
-                width,
-                height,
-                knobs.policy.clone(),
-                kbps,
-                80,
-                true,
-            ) {
-                Ok(encoder) => {
-                    info!(
-                        width,
-                        height,
-                        kbps,
-                        "codec ladder ready (rects-jpeg <-> vp9 via Media Foundation)"
-                    );
-                    return Ok(ServerEncoder::Ladder(Box::new(encoder)));
-                }
-                Err(err) => {
-                    warn!(error = %format!("{err:#}"), "Media Foundation VP9 unavailable; falling back to libvpx");
-                }
-            }
-        }
-        let mut encoder = match (knobs.vp9_cpu, knobs.threads) {
-            (None, None) => codec::LadderEncoder::new(width, height, knobs.policy, kbps, 80)?,
-            (cpu, threads) => codec::LadderEncoder::with_tuning(
-                width,
-                height,
-                knobs.policy,
-                kbps,
-                80,
-                cpu.unwrap_or(8),
-                threads.unwrap_or(4),
-            )?,
-        };
-        // §18.76: [quality] vp9_aq biases bits toward perceptually complex
-        // areas on the software leg (no-op on MF/NVENC legs).
-        if args.quality.vp9_aq > 0 {
-            encoder.set_vp9_aq(args.quality.vp9_aq);
-        }
-        info!(width, height, kbps, overrides = %args.ladder, "codec ladder ready (rects-jpeg <-> vp9)");
-        return Ok(ServerEncoder::Ladder(Box::new(encoder)));
     }
-    let preset = CodecPreset::by_name(&args.preset)
-        .with_context(|| format!("unknown preset: {}", args.preset))?;
-    let preset = match args.bitrate {
-        Some(kbps) => preset.with_bitrate(kbps),
-        None => preset,
+    #[cfg(feature = "ladder")]
+    if preset == "ladder" {
+        return build_ladder(args, width, height, client_h264);
+    }
+    let named = CodecPreset::by_name(preset)
+        .with_context(|| format!("unknown preset: {preset}"))?;
+    let named = match args.bitrate {
+        Some(kbps) => named.with_bitrate(kbps),
+        None => named,
     };
-    let encoder = preset.build_encoder(width, height)?;
-    info!(preset = preset.name, codec = ?preset.codec, width, height, "display encoder ready");
-    Ok(ServerEncoder::Simple(encoder))
+    match named.build_encoder(width, height) {
+        Ok(encoder) => {
+            info!(preset = named.name, codec = ?named.codec, width, height, "display encoder ready");
+            Ok(ServerEncoder::Simple(encoder))
+        }
+        // A broker-forced preset whose codec feature is not compiled in (or
+        // whose encoder fails to init) must not kill the session (§18.78).
+        Err(err) => {
+            warn!(preset = named.name, error = %format!("{err:#}"), "forced preset unavailable; falling back to the codec ladder");
+            build_ladder(args, width, height, client_h264)
+        }
+    }
+}
+
+/// NVENC H.264 encoder with the `[quality] h264_rc` rate control (§18.76):
+/// "cbr" (hard ceiling), "vbr_hq" (mean = ceiling, peak = 2×) or "quality"
+/// (const-QP, fixed quality, floating bandwidth). `None` when the GPU,
+/// driver or build does not offer NVENC.
+#[cfg(all(windows, feature = "codec-nvenc"))]
+fn nvenc_h264(args: &Args, width: u32, height: u32) -> Option<Box<dyn codec::VideoEncoder>> {
+    let kbps = video_ceiling_kbps(args, width, height);
+    let rc = match args.quality.h264_rc {
+        server::config::H264Rc::Cbr => codec::NvencRc::Cbr,
+        server::config::H264Rc::VbrHq => codec::NvencRc::VbrHq,
+        server::config::H264Rc::Quality => codec::NvencRc::ConstQp(args.quality.h264_qp),
+    };
+    match codec::NvencEncoder::with_rc(width, height, 30, kbps, rc) {
+        Ok(encoder) => Some(Box::new(encoder)),
+        Err(err) => {
+            warn!(error = %format!("{err:#}"), "NVENC H.264 unavailable");
+            None
+        }
+    }
+}
+
+/// No NVENC in this build: the forced-h264 alias always falls back.
+#[cfg(not(all(windows, feature = "codec-nvenc")))]
+fn nvenc_h264(args: &Args, width: u32, height: u32) -> Option<Box<dyn codec::VideoEncoder>> {
+    let _ = (args, width, height);
+    None
+}
+
+/// The codec ladder (§8.5): rects-JPEG base regime, VP9 (or hardware legs)
+/// on sustained video-like change. Hardware legs run WITHOUT the ladder
+/// (§18.75.21): jpegrects only pays off as the cheap leg of a CPU-bound
+/// regime — a hardware encoder emits near-empty P-frames on static content
+/// at ~0 CPU, so the base regime buys nothing and every switch costs a
+/// keyframe plus a decoder rebuild on the client.
+#[cfg(feature = "ladder")]
+fn build_ladder(args: &Args, width: u32, height: u32, client_h264: bool) -> Result<ServerEncoder> {
+    // Used only by the NVENC leg (Windows + codec-nvenc).
+    #[cfg(not(all(windows, feature = "codec-nvenc")))]
+    let _ = client_h264;
+    let kbps = video_ceiling_kbps(args, width, height);
+    let knobs = ladder_knobs(&args.ladder)?;
+    anyhow::ensure!(
+        matches!(
+            args.encoder.as_str(),
+            "" | "auto" | "mf" | "software" | "nvenc"
+        ),
+        "bad encoder backend {:?} (auto|mf|software|nvenc)",
+        args.encoder
+    );
+    // NVENC H.264 leg (Windows, NVIDIA): only when the client advertised
+    // H.264 decode (§18.75.9) — without a decoder the session must stay on
+    // VP9. "nvenc" asks for it explicitly (falls back to the normal backend
+    // chain with a warning when the GPU, driver or client capability is
+    // missing); "auto" prefers it over Media Foundation when everything
+    // lines up.
+    #[cfg(all(windows, feature = "codec-nvenc"))]
+    if matches!(args.encoder.as_str(), "" | "auto" | "nvenc") && client_h264 {
+        if let Some(encoder) = nvenc_h264(args, width, height) {
+            info!(width, height, kbps, "h264 via NVENC ready (no ladder: hardware leg)");
+            return Ok(ServerEncoder::Simple(encoder));
+        }
+    }
+    // Media Foundation VP9 leg (Windows), hardware MFTs only: the
+    // Microsoft Store software MFT measured clearly worse than our
+    // tuned libvpx, so it is never used. "" / "auto" tries HW quietly;
+    // "mf" asks for it explicitly (same behavior, louder intent);
+    // either way an absent/failing HW MFT falls back to libvpx with a
+    // warning.
+    #[cfg(all(windows, feature = "codec-mf"))]
+    if matches!(args.encoder.as_str(), "" | "auto" | "mf") {
+        match codec::LadderEncoder::with_mf_vp9(
+            width,
+            height,
+            knobs.policy.clone(),
+            kbps,
+            80,
+            true,
+        ) {
+            Ok(encoder) => {
+                info!(
+                    width,
+                    height,
+                    kbps,
+                    "codec ladder ready (rects-jpeg <-> vp9 via Media Foundation)"
+                );
+                return Ok(ServerEncoder::Ladder(Box::new(encoder)));
+            }
+            Err(err) => {
+                warn!(error = %format!("{err:#}"), "Media Foundation VP9 unavailable; falling back to libvpx");
+            }
+        }
+    }
+    let mut encoder = match (knobs.vp9_cpu, knobs.threads) {
+        (None, None) => codec::LadderEncoder::new(width, height, knobs.policy, kbps, 80)?,
+        (cpu, threads) => codec::LadderEncoder::with_tuning(
+            width,
+            height,
+            knobs.policy,
+            kbps,
+            80,
+            cpu.unwrap_or(8),
+            threads.unwrap_or(4),
+        )?,
+    };
+    // §18.76: [quality] vp9_aq biases bits toward perceptually complex
+    // areas on the software leg (no-op on MF/NVENC legs).
+    if args.quality.vp9_aq > 0 {
+        encoder.set_vp9_aq(args.quality.vp9_aq);
+    }
+    info!(width, height, kbps, overrides = %args.ladder, "codec ladder ready (rects-jpeg <-> vp9)");
+    Ok(ServerEncoder::Ladder(Box::new(encoder)))
+}
+
+/// No ladder feature: a forced preset is the only option, and a forced
+/// preset that failed to build has nowhere to fall back to.
+#[cfg(not(feature = "ladder"))]
+fn build_ladder(args: &Args, width: u32, height: u32, client_h264: bool) -> Result<ServerEncoder> {
+    let _ = (args, width, height, client_h264);
+    anyhow::bail!("codec ladder not compiled in (feature `ladder`)")
 }
 
 /// Frame producer selected by `--source`: the synthetic pattern everywhere,
@@ -4468,5 +4527,76 @@ mod ladder_knobs_tests {
     fn unknown_keys_are_rejected() {
         assert!(ladder_knobs("vp9cpu=6").is_err());
         assert!(ladder_knobs("threads=abc").is_err());
+    }
+}
+
+#[cfg(all(test, feature = "ladder", feature = "vp9", feature = "jpeg"))]
+mod encoder_policy_tests {
+    use super::*;
+
+    fn test_args(preset: &str) -> Args {
+        Args {
+            bind: "127.0.0.1:19790".parse().unwrap(),
+            key: [0; consts::KEY_LENGTH],
+            ticket: None,
+            source: "synthetic".to_string(),
+            output: server::capture::OutputSelector::Index(0),
+            preset: preset.to_string(),
+            ladder: String::new(),
+            fps_adapt: String::new(),
+            bitrate: None,
+            width: 640,
+            height: 480,
+            fixed_resolution: None,
+            fps: 30,
+            max_frames: None,
+            audio: true,
+            clipboard: true,
+            storage: true,
+            smartcard: true,
+            audio_preset: "opus-music".to_string(),
+            audio_source: "auto".to_string(),
+            mic_sink: "null".to_string(),
+            cam_sink: "null".to_string(),
+            spool: None,
+            printer_spool: None,
+            stats_csv: None,
+            allow_lock: false,
+            wallpaper_off: false,
+            handoff: None,
+            quality: server::config::QualityConfig::default(),
+            encoder: String::new(),
+            limits: server::config::LimitsConfig::default(),
+        }
+    }
+
+    #[test]
+    fn forced_h264_without_client_decoder_falls_back_to_ladder() {
+        // §18.78: the broker wish must never break the session.
+        let args = test_args("h264");
+        let enc = build_encoder(&args, 320, 240, false).expect("ladder fallback");
+        assert!(matches!(enc, ServerEncoder::Ladder(_)));
+    }
+
+    #[cfg(not(all(windows, feature = "codec-nvenc")))]
+    #[test]
+    fn forced_h264_without_hardware_falls_back_to_ladder() {
+        // This build/host has no NVENC: the forced alias degrades too.
+        let args = test_args("h264");
+        let enc = build_encoder(&args, 320, 240, true).expect("ladder fallback");
+        assert!(matches!(enc, ServerEncoder::Ladder(_)));
+    }
+
+    #[test]
+    fn forced_catalog_preset_builds_a_plain_encoder() {
+        let args = test_args("vp9-balanced");
+        let enc = build_encoder(&args, 320, 240, false).expect("vp9 encoder");
+        assert!(matches!(enc, ServerEncoder::Simple(_)));
+    }
+
+    #[test]
+    fn unknown_preset_is_an_error() {
+        let args = test_args("vp8-balanced"); // removed from the catalog
+        assert!(build_encoder(&args, 320, 240, false).is_err());
     }
 }

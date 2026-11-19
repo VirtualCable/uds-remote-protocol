@@ -14,7 +14,6 @@ workspace = true
 # pick decoders through the facade instead of depending on `client` directly.
 default = []
 vp9 = ["client/vp9"]
-vp8 = ["client/vp8"]
 jpeg = ["client/jpeg"]
 audio = ["client/audio"]
 h264 = ["client/h264"]

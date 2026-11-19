@@ -6,7 +6,7 @@
 //! Video codec traits and common types (design doc §8).
 //!
 //! The protocol negotiates a codec via capabilities; the core only sees
-//! these traits. The trait is codec-agnostic (VP9 today; VP8, H.264 or AV1
+//! these traits. The trait is codec-agnostic (VP9 today; H.264 or AV1
 //! tomorrow) and backend-agnostic (software or hardware): the negotiated
 //! capability announces `codec + backend`.
 
@@ -16,8 +16,6 @@ pub enum VideoCodecType {
     /// Uncompressed BGRA (reference implementation for tests; never
     /// negotiated in production).
     Raw,
-    /// VP8 (libvpx; low CPU cost, worse ratio).
-    Vp8,
     /// VP9 (libvpx; better ratio, more CPU).
     Vp9,
     /// H.264 (e.g. Cisco OpenH264, loaded dynamically — never redistributed).
@@ -35,7 +33,7 @@ impl VideoCodecType {
     pub fn wire_id(self) -> u16 {
         match self {
             Self::Raw => 0,
-            Self::Vp8 => 1,
+            // Wire ID 1 was VP8 (removed; never reuse removed IDs).
             Self::Vp9 => 2,
             Self::H264 => 3,
             Self::Av1 => 4,
@@ -48,7 +46,6 @@ impl VideoCodecType {
     pub fn from_wire_id(id: u16) -> Option<Self> {
         match id {
             0 => Some(Self::Raw),
-            1 => Some(Self::Vp8),
             2 => Some(Self::Vp9),
             3 => Some(Self::H264),
             4 => Some(Self::Av1),
@@ -75,11 +72,6 @@ pub fn packet_is_keyframe(codec: VideoCodecType, data: &[u8]) -> bool {
             // could never converge.)
             data.first()
                 .is_some_and(|b0| (b0 >> 6) == 0b10 && b0 & 0b100 == 0)
-        }
-        VideoCodecType::Vp8 => {
-            // VP8 frame tag, little-endian: bit 0 of the first byte is the
-            // frame type — 0 means keyframe.
-            data.first().is_some_and(|b0| b0 & 1 == 0)
         }
         VideoCodecType::H264 => {
             // Annex B stream: keyframe iff any NAL has nal_unit_type 5 (IDR).

@@ -1203,7 +1203,7 @@ impl DecodeWorker {
         if self.recovery_awaiting.load(Ordering::Relaxed)
             && matches!(
                 codec_type,
-                VideoCodecType::Vp8 | VideoCodecType::Vp9 | VideoCodecType::H264
+                VideoCodecType::Vp9 | VideoCodecType::H264
             )
             && !codec::packet_is_keyframe(codec_type, &payload)
         {

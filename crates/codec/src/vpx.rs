@@ -3,7 +3,7 @@
 // All rights reserved.
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-//! VP9/VP8 video codecs over libvpx (feature `codec-vp9` / `codec-vp8`).
+//! VP9 video over libvpx (feature `codec-vp9`).
 //!
 //! Realtime, low-latency configuration for interactive desktop: no lag in
 //! frames, keyframes on demand (never periodic storms), bitrate changeable
@@ -55,13 +55,11 @@ fn ctx_err(ctx: &sys::vpx_codec_ctx_t, prefix: &str) -> CodecError {
     CodecError::Backend(format!("{prefix}: {detail}"))
 }
 
-/// Which libvpx interface to use (VP9 or VP8, encode or decode).
+/// Which libvpx interface to use (encode or decode).
 #[derive(Clone, Copy)]
 enum Iface {
     Vp9Enc,
     Vp9Dec,
-    Vp8Enc,
-    Vp8Dec,
 }
 
 impl Iface {
@@ -71,8 +69,6 @@ impl Iface {
             match self {
                 Self::Vp9Enc => sys::vpx_codec_vp9_cx(),
                 Self::Vp9Dec => sys::vpx_codec_vp9_dx(),
-                Self::Vp8Enc => sys::vpx_codec_vp8_cx(),
-                Self::Vp8Dec => sys::vpx_codec_vp8_dx(),
             }
         }
     }
@@ -127,8 +123,8 @@ impl VpxEncoder {
     }
 
     /// `cpu_used`: libvpx speed/quality knob (VP9: 0 best/slowest .. 8
-    /// fastest; VP8: +16 best .. -16 fastest). `None` uses the realtime
-    /// defaults tuned for interactive desktop (VP9: 6, VP8: -10).
+    /// fastest). `None` uses the realtime default tuned for interactive
+    /// desktop (VP9: 6).
     /// `threads`: row-MT worker count; `None` keeps 4. On small VMs (2-4
     /// vCPU) 2 threads leave headroom for the capture loop and the rest of
     /// the pipeline.
@@ -142,7 +138,6 @@ impl VpxEncoder {
     ) -> Result<Self> {
         let iface = match codec {
             VideoCodecType::Vp9 => Iface::Vp9Enc,
-            VideoCodecType::Vp8 => Iface::Vp8Enc,
             other => {
                 return Err(CodecError::Unsupported(match other {
                     VideoCodecType::Raw => "raw is not a libvpx codec",
@@ -182,12 +177,8 @@ impl VpxEncoder {
                 return Err(ctx_err(&ctx, "vpx_codec_enc_init"));
             }
 
-            // Speed/quality knob (control id 13 is shared by VP8 and VP9 in
-            // libvpx ≥ 1.15) plus VP9 desktop-content tuning.
-            let cpu = cpu_used.unwrap_or(match codec {
-                VideoCodecType::Vp9 => 6,
-                _ => -10,
-            });
+            // Speed/quality knob plus VP9 desktop-content tuning.
+            let cpu = cpu_used.unwrap_or(6);
             let e = sys::vpx_codec_control_(
                 &mut ctx,
                 sys::vp8e_enc_control_id_VP8E_SET_CPUUSED as i32,
@@ -239,7 +230,7 @@ impl VpxEncoder {
     /// next encoded frame.
     #[cfg_attr(not(feature = "codec-ladder"), allow(dead_code))] // only the ladder calls it
     pub fn set_cpu_used(&mut self, cpu_used: i32) -> Result<()> {
-        // SAFETY: ctx is live; the control id is shared by VP8/VP9 (≥1.15).
+        // SAFETY: ctx is live; the control id is valid for VP9 (≥1.15).
         unsafe {
             let e = sys::vpx_codec_control_(
                 &mut self.ctx,
@@ -434,7 +425,6 @@ impl VpxDecoder {
     fn new(codec: VideoCodecType) -> Result<Self> {
         let iface = match codec {
             VideoCodecType::Vp9 => Iface::Vp9Dec,
-            VideoCodecType::Vp8 => Iface::Vp8Dec,
             _ => return Err(CodecError::Unsupported("not a libvpx decoder")),
         };
         // §18.78: cap the decoder's frame pool at MAX_DECODE_DIM so a
@@ -623,79 +613,6 @@ impl Vp9Decoder {
 }
 
 impl VideoDecoder for Vp9Decoder {
-    fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {
-        self.0.decode(packet)
-    }
-
-    fn codec_type(&self) -> VideoCodecType {
-        self.0.codec_type()
-    }
-}
-
-/// VP8 encoder (libvpx, realtime profile; the low-CPU option — see the
-/// design doc §8: worse ratio than VP9, ~2-3x cheaper encode).
-#[cfg(feature = "codec-vp8")]
-pub struct Vp8Encoder(VpxEncoder);
-
-#[cfg(feature = "codec-vp8")]
-impl Vp8Encoder {
-    /// Creates a VP8 encoder for `width`x`height` at `kbps` target bitrate.
-    pub fn new(width: u32, height: u32, kbps: u32) -> Result<Self> {
-        Ok(Self(VpxEncoder::new(
-            VideoCodecType::Vp8,
-            width,
-            height,
-            kbps,
-        )?))
-    }
-
-    /// Creates a VP8 encoder with an explicit `cpu_used` (+16 best .. -16
-    /// fastest; realtime default is -10).
-    pub fn with_cpu_used(width: u32, height: u32, kbps: u32, cpu_used: i32) -> Result<Self> {
-        Ok(Self(VpxEncoder::with_options(
-            VideoCodecType::Vp8,
-            width,
-            height,
-            kbps,
-            Some(cpu_used),
-            None,
-        )?))
-    }
-}
-
-#[cfg(feature = "codec-vp8")]
-impl VideoEncoder for Vp8Encoder {
-    fn encode(&mut self, frame: &VideoFrame<'_>) -> Result<EncodedPacket> {
-        self.0.encode(frame)
-    }
-
-    fn request_keyframe(&mut self) {
-        self.0.request_keyframe();
-    }
-
-    fn set_bitrate(&mut self, kbps: u32) -> Result<()> {
-        self.0.set_bitrate(kbps)
-    }
-
-    fn codec_type(&self) -> VideoCodecType {
-        self.0.codec_type()
-    }
-}
-
-/// VP8 decoder (libvpx).
-#[cfg(feature = "codec-vp8")]
-pub struct Vp8Decoder(VpxDecoder);
-
-#[cfg(feature = "codec-vp8")]
-impl Vp8Decoder {
-    /// Creates a VP8 decoder.
-    pub fn new() -> Result<Self> {
-        Ok(Self(VpxDecoder::new(VideoCodecType::Vp8)?))
-    }
-}
-
-#[cfg(feature = "codec-vp8")]
-impl VideoDecoder for Vp8Decoder {
     fn decode(&mut self, packet: &EncodedPacket) -> Result<Option<DecodedFrame>> {
         self.0.decode(packet)
     }

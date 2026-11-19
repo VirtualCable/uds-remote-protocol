@@ -93,7 +93,6 @@ fn raw_decoder_rejects_garbage() {
 fn codec_types_have_wire_ids() {
     // Negotiation needs stable numeric IDs (capabilities, §8).
     assert_eq!(VideoCodecType::Raw.wire_id(), 0);
-    assert_eq!(VideoCodecType::Vp8.wire_id(), 1);
     assert_eq!(VideoCodecType::Vp9.wire_id(), 2);
     assert_eq!(VideoCodecType::from_wire_id(2), Some(VideoCodecType::Vp9));
     assert_eq!(VideoCodecType::from_wire_id(255), None);
