@@ -14,7 +14,7 @@
 #
 # "Everything" means the full binary set: server, service, udscredprov, vcam,
 # labclient (testclient + uds-rp-client) and labtools, built with the full
-# feature set (windows-capture, vp9, vp8, jpeg, ladder, codec-mf, codec-nvenc),
+# feature set (windows-capture, vp9, jpeg, ladder, codec-mf, codec-nvenc),
 # plus the drivers (udsaudio, udsscard) via build-drivers.ps1. Nothing is
 # signed with a real certificate here: executables ship unsigned and drivers
 # get cargo-wdk's auto-generated WDRLocalTestCert unless -CertPassword is
@@ -78,7 +78,6 @@ if ($Package -ne "") {
 $features = @(
     "server/windows-capture",
     "server/vp9",
-    "server/vp8",
     "server/jpeg",
     "server/ladder",
     "server/codec-mf",

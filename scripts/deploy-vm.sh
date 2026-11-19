@@ -21,7 +21,7 @@ VM_HOST="${VM_HOST:-dkmaster@172.27.1.47}"
 BUILDER="${BUILDER:-builder@win22-build}"
 EXPORT_DIR='C:\Users\builder\udsrp-export'
 IMAGE="${IMAGE:-uds-rp-builder}"
-FEATURES='server/windows-capture,server/vp9,server/vp8,server/jpeg,server/ladder'
+FEATURES='server/windows-capture,server/vp9,server/jpeg,server/ladder'
 
 BUILD_PS1=/tmp/udsrp-build.ps1
 VM_PS1=/tmp/udsrp-install.ps1
