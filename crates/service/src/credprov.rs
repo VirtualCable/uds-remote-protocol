@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use tracing::{error, info, warn};
-use udscredprov::logic::{self, Credentials, FrameDecoder, Request, Response};
+use udscredprov::logic::{self, Credentials, FrameDecoder, Request, Response, pick_credentials};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -83,12 +83,13 @@ fn pipe_loop(stop: &AtomicBool, creds_slot: std::sync::Arc<std::sync::Mutex<Opti
     };
     info!("credential-provider pipe server listening");
     while !stop.load(Ordering::Relaxed) {
-        let creds = creds_slot
-            .lock()
-            .expect("creds slot poisoned")
-            .clone()
-            .or_else(|| file_creds.clone());
-        match serve_one(stop, creds.as_ref()) {
+        let creds_source = || {
+            pick_credentials(
+                creds_slot.lock().expect("creds slot poisoned").clone(),
+                file_creds.clone(),
+            )
+        };
+        match serve_one(stop, &creds_source) {
             Ok(()) => info!("credential provider disconnected; recreating the pipe"),
             Err(err) => warn!(error = %format!("{err:#}"), "credential-provider pipe cycle failed"),
         }
@@ -103,7 +104,7 @@ fn pipe_loop(stop: &AtomicBool, creds_slot: std::sync::Arc<std::sync::Mutex<Opti
 /// timeout: auto-unlock (§18.41) arms AFTER the provider connected (it is
 /// LogonUI, already running at the lock screen), so pushing only at connect
 /// time would miss it.
-fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
+fn serve_one(stop: &AtomicBool, creds_source: &dyn Fn() -> Option<Credentials>) -> Result<()> {
     let mut pipe = Pipe::create()?;
     if !pipe.wait_connected(stop)? {
         return Ok(()); // stopped while waiting
@@ -112,7 +113,8 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
 
     let mut pushed = false;
     let armed = std::path::Path::new(ARM_PATH).exists();
-    if let Some(creds) = creds.filter(|_| armed) {
+    let creds = creds_source();
+    if let Some(creds) = creds.as_ref().filter(|_| armed) {
         pipe.send_request(&Request::SetCredentials(creds.clone()))?;
         info!(user = %creds.username, "credentials pushed to the provider (armed)");
         pushed = true;
@@ -163,7 +165,7 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
                 // credentials to the already-connected provider.
                 if !pushed
                     && std::path::Path::new(ARM_PATH).exists()
-                    && let Some(creds) = creds
+                    && let Some(creds) = creds_source()
                 {
                     pipe.send_request(&Request::SetCredentials(creds.clone()))?;
                     info!(user = %creds.username, "credentials pushed to the provider (late arm)");

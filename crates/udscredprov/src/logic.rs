@@ -484,6 +484,15 @@ impl FrameDecoder {
     }
 }
 
+/// Credentials the provider should get: the session's own set (interactive or
+/// broker-sent) wins over the lab fallback file.
+pub fn pick_credentials(
+    session: Option<Credentials>,
+    lab_file: Option<Credentials>,
+) -> Option<Credentials> {
+    session.or(lab_file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +656,29 @@ mod tests {
         assert!(Credentials::new("alice", "", "pw").is_valid());
         assert!(!Credentials::new("", "", "pw").is_valid());
         assert!(!Credentials::new("alice", "", "").is_valid());
+    }
+
+    #[test]
+    fn session_credentials_win_over_lab_file() {
+        let session = Credentials::new("session-user", ".", "pw-session");
+        let lab = Credentials::new("lab-user", ".", "pw-lab");
+        assert_eq!(
+            pick_credentials(Some(session), Some(lab)).unwrap().username,
+            "session-user"
+        );
+    }
+
+    #[test]
+    fn lab_file_used_without_session_credentials() {
+        let lab = Credentials::new("lab-user", ".", "pw-lab");
+        assert_eq!(
+            pick_credentials(None, Some(lab)).unwrap().username,
+            "lab-user"
+        );
+    }
+
+    #[test]
+    fn no_credentials_when_neither_source_has_them() {
+        assert!(pick_credentials(None, None).is_none());
     }
 }
