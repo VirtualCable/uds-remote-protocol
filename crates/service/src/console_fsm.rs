@@ -622,11 +622,14 @@ impl Manager {
             self.pending = None;
             return;
         };
+        let creds = creds.clone().with_local_domain_if_empty();
+        *self.creds_slot.lock().expect("creds slot poisoned") = Some(creds.clone());
         info!(user = %creds.username, "no console session; arming autologon and sending SAS");
         // The sign-in takes a few seconds; tell the client.
         crate::console::send_progress(&mut pending.stream, SESSION_STAGE_AUTOLOGON).await;
         if let Err(err) = std::fs::write(crate::credprov::ARM_PATH, b"") {
             warn!(error = %format!("{err:#}"), "cannot create the autologon arm flag; dropping");
+            self.scrub_autologon();
             self.pending = None;
             return;
         }
@@ -636,6 +639,14 @@ impl Manager {
         pending.phase = Phase::Autologon;
         pending.deadline = Instant::now() + LOGON_TIMEOUT;
         pending.last_sas = Instant::now();
+    }
+
+    /// Forgets the autologon credentials, the arm flag, and the copy the
+    /// provider holds, after a failed or timed-out attempt.
+    fn scrub_autologon(&self) {
+        *self.creds_slot.lock().expect("creds slot poisoned") = None;
+        let _ = std::fs::remove_file(crate::credprov::ARM_PATH);
+        crate::credprov::request_provider_clear();
     }
 
     /// Console up and conflict resolved: hand the connection to a fresh
@@ -738,6 +749,7 @@ impl Manager {
             }
             Phase::Autologon => {
                 warn!("autologon did not produce a console session in time; dropping");
+                self.scrub_autologon();
                 self.pending = None;
             }
             Phase::AwaitCredentials => {

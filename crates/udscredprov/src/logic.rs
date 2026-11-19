@@ -23,6 +23,8 @@
 //! The protocol is versioned: a peer that does not understand `version` must
 //! drop the connection.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use thiserror::Error;
 use zeroize::{Zeroize, Zeroizing};
 
@@ -484,6 +486,101 @@ impl FrameDecoder {
     }
 }
 
+impl Credentials {
+    /// An empty domain makes LogonUI reject a valid local account (0xC000006D),
+    /// so a broker set without a domain logs on against the local accounts.
+    pub fn with_local_domain_if_empty(mut self) -> Self {
+        if self.domain.is_empty() {
+            self.domain = ".".to_string();
+        }
+        self
+    }
+}
+
+/// Credentials the provider should get: the session's own set (interactive or
+/// broker-sent) wins over the lab fallback file.
+pub fn pick_credentials(
+    session: Option<Credentials>,
+    lab_file: Option<Credentials>,
+) -> Option<Credentials> {
+    session.or(lab_file)
+}
+
+/// Tracks the `ClearCredentials` requests sent to the credential provider as
+/// generations. A request bumps `requested`; a clear is pending while
+/// `requested` is ahead of `done`. A `SetCredentials` marks as done the
+/// requests made before it was sent, because the set overwrites them.
+#[derive(Debug, Default)]
+pub struct ProviderClearGate {
+    requested: AtomicU64,
+    done: AtomicU64,
+}
+
+impl ProviderClearGate {
+    /// Creates a gate with no requests pending.
+    pub const fn new() -> Self {
+        Self {
+            requested: AtomicU64::new(0),
+            done: AtomicU64::new(0),
+        }
+    }
+
+    /// Records a clear request for the provider.
+    pub fn request_clear(&self) {
+        self.requested.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Generation of the latest clear request.
+    pub fn requested(&self) -> u64 {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    /// Generation of the clear still to deliver, if any.
+    pub fn pending(&self) -> Option<u64> {
+        let wanted = self.requested();
+        (wanted > self.done.load(Ordering::SeqCst)).then_some(wanted)
+    }
+
+    /// Records that clears up to `generation` have been delivered.
+    pub fn mark_done(&self, generation: u64) {
+        self.done.fetch_max(generation, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+mod clear_gate_tests {
+    use super::ProviderClearGate;
+
+    #[test]
+    fn clear_is_pending_until_marked_done() {
+        let gate = ProviderClearGate::new();
+        assert_eq!(gate.pending(), None);
+        gate.request_clear();
+        let generation = gate.pending().expect("clear pending");
+        assert_eq!(gate.pending(), Some(generation));
+        gate.mark_done(generation);
+        assert_eq!(gate.pending(), None);
+    }
+
+    #[test]
+    fn delivered_set_supersedes_earlier_clear() {
+        let gate = ProviderClearGate::new();
+        gate.request_clear();
+        let before_set = gate.requested();
+        gate.mark_done(before_set);
+        assert_eq!(gate.pending(), None);
+    }
+
+    #[test]
+    fn clear_requested_during_set_stays_pending() {
+        let gate = ProviderClearGate::new();
+        let before_set = gate.requested();
+        gate.request_clear();
+        gate.mark_done(before_set);
+        assert!(gate.pending().is_some());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,5 +744,41 @@ mod tests {
         assert!(Credentials::new("alice", "", "pw").is_valid());
         assert!(!Credentials::new("", "", "pw").is_valid());
         assert!(!Credentials::new("alice", "", "").is_valid());
+    }
+
+    #[test]
+    fn session_credentials_win_over_lab_file() {
+        let session = Credentials::new("session-user", ".", "pw-session");
+        let lab = Credentials::new("lab-user", ".", "pw-lab");
+        assert_eq!(
+            pick_credentials(Some(session), Some(lab)).unwrap().username,
+            "session-user"
+        );
+    }
+
+    #[test]
+    fn lab_file_used_without_session_credentials() {
+        let lab = Credentials::new("lab-user", ".", "pw-lab");
+        assert_eq!(
+            pick_credentials(None, Some(lab)).unwrap().username,
+            "lab-user"
+        );
+    }
+
+    #[test]
+    fn empty_domain_becomes_local_account_marker() {
+        let creds = Credentials::new("user", "", "pw").with_local_domain_if_empty();
+        assert_eq!(creds.domain, ".");
+    }
+
+    #[test]
+    fn explicit_domain_is_kept() {
+        let creds = Credentials::new("user", "CORP", "pw").with_local_domain_if_empty();
+        assert_eq!(creds.domain, "CORP");
+    }
+
+    #[test]
+    fn no_credentials_when_neither_source_has_them() {
+        assert!(pick_credentials(None, None).is_none());
     }
 }

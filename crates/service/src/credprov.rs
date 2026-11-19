@@ -26,7 +26,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use tracing::{error, info, warn};
-use udscredprov::logic::{self, Credentials, FrameDecoder, Request, Response};
+use udscredprov::logic::{
+    self, Credentials, FrameDecoder, ProviderClearGate, Request, Response, pick_credentials,
+};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_IO_PENDING, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -58,6 +60,32 @@ pub(crate) const ARM_PATH: &str = r"C:\ProgramData\UdsRp\arm-autologon";
 /// How long to wait for a response frame before re-checking the stop flag.
 const POLL: Duration = Duration::from_millis(500);
 
+/// Clears requested when the provider must drop its stored credentials (a
+/// failed or timed-out autologon). The pipe loop delivers them.
+static PROVIDER_CLEAR: ProviderClearGate = ProviderClearGate::new();
+
+pub(crate) fn request_provider_clear() {
+    PROVIDER_CLEAR.request_clear();
+}
+
+/// Sends `SetCredentials`. Clears requested before the set are overwritten by
+/// it, so they are marked done only after the set has been delivered.
+fn send_set(pipe: &mut Pipe, creds: &Credentials) -> Result<()> {
+    let before_set = PROVIDER_CLEAR.requested();
+    pipe.send_request(&Request::SetCredentials(creds.clone()))?;
+    PROVIDER_CLEAR.mark_done(before_set);
+    Ok(())
+}
+
+/// Sends `ClearCredentials`. The clear is marked done only once delivered, so
+/// a failed write leaves it pending for the next pipe instance.
+fn send_clear(pipe: &mut Pipe) -> Result<()> {
+    let generation = PROVIDER_CLEAR.requested();
+    pipe.send_request(&Request::ClearCredentials)?;
+    PROVIDER_CLEAR.mark_done(generation);
+    Ok(())
+}
+
 /// Starts the pipe server on a background thread. `creds_slot` carries the
 /// active auto-logon credentials: pre-filled in standalone mode (taking
 /// precedence over the lab credentials file), filled per session by the
@@ -83,12 +111,13 @@ fn pipe_loop(stop: &AtomicBool, creds_slot: std::sync::Arc<std::sync::Mutex<Opti
     };
     info!("credential-provider pipe server listening");
     while !stop.load(Ordering::Relaxed) {
-        let creds = creds_slot
-            .lock()
-            .expect("creds slot poisoned")
-            .clone()
-            .or_else(|| file_creds.clone());
-        match serve_one(stop, creds.as_ref()) {
+        let creds_source = || {
+            pick_credentials(
+                creds_slot.lock().expect("creds slot poisoned").clone(),
+                file_creds.clone(),
+            )
+        };
+        match serve_one(stop, &creds_source) {
             Ok(()) => info!("credential provider disconnected; recreating the pipe"),
             Err(err) => warn!(error = %format!("{err:#}"), "credential-provider pipe cycle failed"),
         }
@@ -103,7 +132,7 @@ fn pipe_loop(stop: &AtomicBool, creds_slot: std::sync::Arc<std::sync::Mutex<Opti
 /// timeout: auto-unlock (§18.41) arms AFTER the provider connected (it is
 /// LogonUI, already running at the lock screen), so pushing only at connect
 /// time would miss it.
-fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
+fn serve_one(stop: &AtomicBool, creds_source: &dyn Fn() -> Option<Credentials>) -> Result<()> {
     let mut pipe = Pipe::create()?;
     if !pipe.wait_connected(stop)? {
         return Ok(()); // stopped while waiting
@@ -112,8 +141,9 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
 
     let mut pushed = false;
     let armed = std::path::Path::new(ARM_PATH).exists();
-    if let Some(creds) = creds.filter(|_| armed) {
-        pipe.send_request(&Request::SetCredentials(creds.clone()))?;
+    let creds = creds_source();
+    if let Some(creds) = creds.as_ref().filter(|_| armed) {
+        send_set(&mut pipe, creds)?;
         info!(user = %creds.username, "credentials pushed to the provider (armed)");
         pushed = true;
     } else if creds.is_some() {
@@ -124,6 +154,11 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
+        }
+        if PROVIDER_CLEAR.pending().is_some() {
+            send_clear(&mut pipe)?;
+            pushed = false;
+            info!("provider credentials cleared on request");
         }
         match pipe.read_response(POLL)? {
             Some(Response::Hello { version }) => info!(version, "provider Hello"),
@@ -153,7 +188,11 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
                 }
                 pushed = false;
                 if !success {
-                    pipe.send_request(&Request::ClearCredentials)?;
+                    // LogonResult carries no attempt id, so a late failure can clear
+                    // the credentials of a newer attempt. Accepted risk until the
+                    // protocol carries an attempt id.
+                    PROVIDER_CLEAR.request_clear();
+                    send_clear(&mut pipe)?;
                     info!("provider credentials cleared after failed logon");
                 }
             }
@@ -163,9 +202,9 @@ fn serve_one(stop: &AtomicBool, creds: Option<&Credentials>) -> Result<()> {
                 // credentials to the already-connected provider.
                 if !pushed
                     && std::path::Path::new(ARM_PATH).exists()
-                    && let Some(creds) = creds
+                    && let Some(creds) = creds_source()
                 {
-                    pipe.send_request(&Request::SetCredentials(creds.clone()))?;
+                    send_set(&mut pipe, &creds)?;
                     info!(user = %creds.username, "credentials pushed to the provider (late arm)");
                     pushed = true;
                 }
