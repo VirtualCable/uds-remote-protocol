@@ -218,13 +218,7 @@ fn parse_args() -> Result<Args> {
             // broker is the source of truth but may be buggy, and a bad
             // string must not kill the session. Anything invalid falls
             // back to the defaults with a warning.
-            if args.preset != "ladder"
-                && args.preset != "h264"
-                && codec::CodecPreset::by_name(&args.preset).is_none()
-            {
-                warn!(preset = %args.preset, "unknown preset in the agent config; using ladder");
-                args.preset = "ladder".to_string();
-            }
+            args.preset = broker_preset_or_ladder(args.preset);
             #[cfg(feature = "ladder")]
             if let Err(e) = ladder_knobs(&args.ladder) {
                 warn!(error = %e, "bad ladder overrides in the agent config; using defaults");
@@ -467,6 +461,14 @@ fn read_config_frame() -> Result<Vec<u8>> {
         .read_to_end(&mut buf)
         .context("reading the agent config frame from stdin")?;
     Ok(buf)
+}
+
+fn broker_preset_or_ladder(preset: String) -> String {
+    if preset == "ladder" || preset == "h264" || codec::CodecPreset::by_name(&preset).is_some() {
+        return preset;
+    }
+    warn!(preset = %preset, "unknown preset in the agent config; using ladder");
+    "ladder".to_string()
 }
 
 /// Session legs after UDP detection (§4.2): the reliable control stream is
@@ -4598,5 +4600,38 @@ mod encoder_policy_tests {
     fn unknown_preset_is_an_error() {
         let args = test_args("vp8-balanced"); // removed from the catalog
         assert!(build_encoder(&args, 320, 240, false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod broker_preset_tests {
+    use super::broker_preset_or_ladder;
+
+    #[test]
+    fn removed_vp8_preset_falls_back_to_ladder() {
+        assert_eq!(
+            broker_preset_or_ladder("vp8-balanced".to_string()),
+            "ladder"
+        );
+    }
+
+    #[test]
+    fn empty_preset_falls_back_to_ladder() {
+        assert_eq!(broker_preset_or_ladder(String::new()), "ladder");
+    }
+
+    #[test]
+    fn ladder_and_h264_aliases_are_kept() {
+        assert_eq!(broker_preset_or_ladder("ladder".to_string()), "ladder");
+        assert_eq!(broker_preset_or_ladder("h264".to_string()), "h264");
+    }
+
+    #[cfg(feature = "vp9")]
+    #[test]
+    fn catalog_preset_is_kept() {
+        assert_eq!(
+            broker_preset_or_ladder("vp9-balanced".to_string()),
+            "vp9-balanced"
+        );
     }
 }
