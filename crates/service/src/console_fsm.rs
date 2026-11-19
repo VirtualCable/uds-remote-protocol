@@ -641,11 +641,12 @@ impl Manager {
         pending.last_sas = Instant::now();
     }
 
-    /// Forgets the autologon credentials and the arm flag after a failed or
-    /// timed-out attempt, so the provider cannot send them later.
+    /// Forgets the autologon credentials, the arm flag, and the copy the
+    /// provider holds, after a failed or timed-out attempt.
     fn scrub_autologon(&self) {
         *self.creds_slot.lock().expect("creds slot poisoned") = None;
         let _ = std::fs::remove_file(crate::credprov::ARM_PATH);
+        crate::credprov::request_provider_clear();
     }
 
     /// Console up and conflict resolved: hand the connection to a fresh

@@ -58,6 +58,15 @@ pub(crate) const ARM_PATH: &str = r"C:\ProgramData\UdsRp\arm-autologon";
 /// How long to wait for a response frame before re-checking the stop flag.
 const POLL: Duration = Duration::from_millis(500);
 
+/// Set when the provider must drop its stored credentials (a failed or
+/// timed-out autologon). The pipe loop sends `ClearCredentials` on its next
+/// turn.
+static CLEAR_PROVIDER: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn request_provider_clear() {
+    CLEAR_PROVIDER.store(true, Ordering::Relaxed);
+}
+
 /// Starts the pipe server on a background thread. `creds_slot` carries the
 /// active auto-logon credentials: pre-filled in standalone mode (taking
 /// precedence over the lab credentials file), filled per session by the
@@ -126,6 +135,11 @@ fn serve_one(stop: &AtomicBool, creds_source: &dyn Fn() -> Option<Credentials>) 
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
+        }
+        if CLEAR_PROVIDER.swap(false, Ordering::Relaxed) {
+            pipe.send_request(&Request::ClearCredentials)?;
+            pushed = false;
+            info!("provider credentials cleared on request");
         }
         match pipe.read_response(POLL)? {
             Some(Response::Hello { version }) => info!(version, "provider Hello"),
