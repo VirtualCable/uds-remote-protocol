@@ -622,7 +622,7 @@ impl Manager {
             self.pending = None;
             return;
         };
-        let creds = creds.clone();
+        let creds = creds.clone().with_local_domain_if_empty();
         *self.creds_slot.lock().expect("creds slot poisoned") = Some(creds.clone());
         info!(user = %creds.username, "no console session; arming autologon and sending SAS");
         // The sign-in takes a few seconds; tell the client.

@@ -484,6 +484,17 @@ impl FrameDecoder {
     }
 }
 
+impl Credentials {
+    /// An empty domain makes LogonUI reject a valid local account (0xC000006D),
+    /// so a broker set without a domain logs on against the local accounts.
+    pub fn with_local_domain_if_empty(mut self) -> Self {
+        if self.domain.is_empty() {
+            self.domain = ".".to_string();
+        }
+        self
+    }
+}
+
 /// Credentials the provider should get: the session's own set (interactive or
 /// broker-sent) wins over the lab fallback file.
 pub fn pick_credentials(
@@ -675,6 +686,18 @@ mod tests {
             pick_credentials(None, Some(lab)).unwrap().username,
             "lab-user"
         );
+    }
+
+    #[test]
+    fn empty_domain_becomes_local_account_marker() {
+        let creds = Credentials::new("user", "", "pw").with_local_domain_if_empty();
+        assert_eq!(creds.domain, ".");
+    }
+
+    #[test]
+    fn explicit_domain_is_kept() {
+        let creds = Credentials::new("user", "CORP", "pw").with_local_domain_if_empty();
+        assert_eq!(creds.domain, "CORP");
     }
 
     #[test]
