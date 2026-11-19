@@ -333,6 +333,16 @@ mod tests {
     }
 
     #[test]
+    fn payload_keeps_video_preset_from_broker() {
+        let payload = TicketPayload::from_json(
+            r#"{"version": 1, "video": {"preset": "vp9-balanced"}}"#,
+        )
+        .expect("valid payload");
+        let video = payload.video.expect("video policy present");
+        assert_eq!(video.preset.as_deref(), Some("vp9-balanced"));
+    }
+
+    #[test]
     fn payload_rejects_unknown_version() {
         assert!(TicketPayload::from_json(r#"{"version": 99}"#).is_err());
     }
