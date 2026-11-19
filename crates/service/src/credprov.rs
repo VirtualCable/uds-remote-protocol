@@ -188,6 +188,9 @@ fn serve_one(stop: &AtomicBool, creds_source: &dyn Fn() -> Option<Credentials>) 
                 }
                 pushed = false;
                 if !success {
+                    // LogonResult carries no attempt id, so a late failure can clear
+                    // the credentials of a newer attempt. Accepted risk until the
+                    // protocol carries an attempt id.
                     PROVIDER_CLEAR.request_clear();
                     send_clear(&mut pipe)?;
                     info!("provider credentials cleared after failed logon");
