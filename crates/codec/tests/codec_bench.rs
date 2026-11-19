@@ -3,12 +3,12 @@
 // All rights reserved.
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-//! VP8 vs VP9 benchmark (design doc §8: CPU cost vs compression ratio).
+//! VP9 benchmark (design doc §8: CPU cost vs compression ratio).
 //!
 //! Ignored by default — run on demand, in release, with:
-//! `cargo test -p codec --release --features "codec-vp8 codec-vp9" --test codec_bench -- --ignored --nocapture`
+//! `cargo test -p codec --release --features "codec-vp9" --test codec_bench -- --ignored --nocapture`
 
-#![cfg(all(feature = "codec-vp8", feature = "codec-vp9"))]
+#![cfg(feature = "codec-vp9")]
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use std::time::Instant;
@@ -36,56 +36,6 @@ fn frame_at(width: u32, height: u32, tick: u32) -> Vec<u8> {
         }
     }
     data
-}
-
-fn bench<E: VideoEncoder>(name: &str, mut enc: E, frames: &[Vec<u8>], w: u32, h: u32) {
-    let mut total_bytes = 0usize;
-    let start = Instant::now();
-    for (i, data) in frames.iter().enumerate() {
-        let frame = VideoFrame {
-            width: w,
-            height: h,
-            stride: (w * 4) as usize,
-            data,
-        };
-        let packet = enc.encode(&frame).expect("encode");
-        total_bytes += packet.data.len();
-        if i == 0 {
-            assert!(packet.keyframe);
-        }
-    }
-    let elapsed = start.elapsed().as_secs_f64();
-    let fps = frames.len() as f64 / elapsed;
-    println!(
-        "{name}: {n} frames {w}x{h} in {elapsed:.2}s = {fps:.1} fps ({ms:.1} ms/frame), \
-         {kb:.0} KiB total, {kbf:.1} KiB/frame",
-        n = frames.len(),
-        ms = elapsed * 1000.0 / frames.len() as f64,
-        kb = total_bytes as f64 / 1024.0,
-        kbf = total_bytes as f64 / 1024.0 / frames.len() as f64,
-    );
-}
-
-#[test]
-#[ignore = "benchmark: run explicitly in release"]
-fn vp8_vs_vp9_1080p() {
-    let (w, h, n, kbps) = (1920u32, 1080u32, 90u32, 4000u32);
-    let frames: Vec<Vec<u8>> = (0..n).map(|t| frame_at(w, h, t)).collect();
-    println!("--- {n} frames {w}x{h} @ {kbps} kbps target ---");
-    bench(
-        "VP8",
-        codec::Vp8Encoder::new(w, h, kbps).expect("vp8"),
-        &frames,
-        w,
-        h,
-    );
-    bench(
-        "VP9",
-        codec::Vp9Encoder::new(w, h, kbps).expect("vp9"),
-        &frames,
-        w,
-        h,
-    );
 }
 
 /// Mean PSNR (dB) over B/G/R between the source BGRA frames and their
@@ -222,9 +172,6 @@ fn bitrate_sweep_1080p() {
         "vp9-bandwidth-saver",
         "vp9-balanced",
         "vp9-low-latency",
-        "vp8-balanced",
-        "vp8-low-latency",
-        "vp8-quality",
     ] {
         let preset = codec::CodecPreset::by_name(name).expect("preset");
         sweep(name, preset, &frames, w, h);
@@ -235,37 +182,5 @@ fn bitrate_sweep_1080p() {
             .expect("preset")
             .with_bitrate(kbps);
         sweep("vp9-balanced", preset, &frames, w, h);
-    }
-}
-
-/// VP8 across its whole cpu_used range (-16..16): is there a point where
-/// the CPU cost collapses while quality stays acceptable? That would be
-/// VP8's only remaining niche (ultra-low CPU); at quality settings it is
-/// dominated by vp9-low-latency on both axes (2026-09-30 data).
-#[test]
-#[ignore = "benchmark: run explicitly in release"]
-fn vp8_cpu_sweep_1080p() {
-    let (w, h, n) = (1920u32, 1080u32, 90u32);
-    let frames: Vec<Vec<u8>> = (0..n).map(|t| frame_at(w, h, t)).collect();
-    println!("--- {n} frames {w}x{h}: VP8 cpu_used sweep @2.5M vs VP9 cpu 8 ---");
-    // Reference point.
-    sweep(
-        "vp9-low-latency(ref)",
-        codec::CodecPreset::by_name("vp9-low-latency").expect("preset"),
-        &frames,
-        w,
-        h,
-    );
-    for cpu in [-14, -10, -6, 0, 4, 8, 12, 16] {
-        let preset = codec::CodecPreset {
-            name: "vp8-sweep",
-            codec: codec::VideoCodecType::Vp8,
-            params: codec::CodecParams {
-                bitrate_kbps: 2500,
-                cpu_used: Some(cpu),
-                quality: None,
-            },
-        };
-        sweep("vp8", preset, &frames, w, h);
     }
 }

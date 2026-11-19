@@ -12,7 +12,6 @@ workspace = true
 [features]
 default = []
 codec-vp9 = ["dep:vpx-sys"]
-codec-vp8 = ["dep:vpx-sys"]
 codec-jpeg = ["dep:turbojpeg"]
 codec-ladder = ["codec-jpeg", "codec-vp9"]
 codec-opus = ["dep:opus"]
