@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "channels"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "client",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "client"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "codec",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "codec"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "libloading",
@@ -1957,7 +1957,7 @@ checksum = "e2db585e1d738fc771bf08a151420d3ed193d9d895a36df7f6f8a9456b911ddc"
 
 [[package]]
 name = "labclient"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -1979,7 +1979,7 @@ dependencies = [
 
 [[package]]
 name = "labtools"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "codec",
@@ -3300,7 +3300,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "protocol"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "hkdf",
@@ -3815,7 +3815,7 @@ dependencies = [
 
 [[package]]
 name = "server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3842,7 +3842,7 @@ dependencies = [
 
 [[package]]
 name = "server-config"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "getrandom 0.3.4",
@@ -3854,7 +3854,7 @@ dependencies = [
 
 [[package]]
 name = "service"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4455,7 +4455,7 @@ dependencies = [
 
 [[package]]
 name = "transport"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "getrandom 0.3.4",
@@ -4519,7 +4519,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "uds-rp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "client",
  "codec",
@@ -4530,7 +4530,7 @@ dependencies = [
 
 [[package]]
 name = "udscredprov"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "thiserror 2.0.21",
@@ -4545,7 +4545,7 @@ dependencies = [
 
 [[package]]
 name = "udsscard-proto"
-version = "0.1.0"
+version = "1.0.0"
 
 [[package]]
 name = "unicode-ident"
@@ -4647,7 +4647,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vcam"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "windows 0.62.2",
@@ -4674,7 +4674,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vpx-sys"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "pkg-config",
  "vcpkg",
