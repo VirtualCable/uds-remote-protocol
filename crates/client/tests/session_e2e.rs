@@ -19,6 +19,7 @@ use protocol::fragment::Fragmenter;
 use protocol::{ControlMessage, CursorMessage, InputMessage, Probe, ProbeAck, channel};
 use transport::{DirectListener, EncryptedDatagram, EncryptedStream, UdpTransport, udp_offer};
 
+/// Per-session salt (the server sends a fresh one per handshake).
 const TICKET: [u8; protocol::TICKET_LENGTH] = [0x42; protocol::TICKET_LENGTH];
 const KEY: [u8; 32] = [0x07; 32];
 
@@ -83,7 +84,11 @@ async fn serve_udp(listener: DirectListener, got_input: flume::Sender<()>) -> Re
     let clock_start = Instant::now();
     let (udp, first) =
         tokio::time::timeout(Duration::from_secs(3), pending.wait_first(&token)).await??;
-    let keys = protocol::crypt::derive_datagram_keys(&TICKET, &KEY)?;
+    // The datagram leg uses the SAME per-session salt as the stream (§6.1).
+    let salt = *stream
+        .session_salt()
+        .ok_or_else(|| anyhow::anyhow!("no session salt"))?;
+    let keys = protocol::crypt::derive_datagram_keys(&TICKET, &salt, &KEY)?;
     let mut dgram = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
 
     // Answer the detection probe(s) that opened the leg (§4.2).

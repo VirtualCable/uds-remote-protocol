@@ -14,14 +14,19 @@ connection_method = "standalone"
 
 # Shared key for the encrypted handshake (hex, 32 bytes). Generate with:
 #   openssl rand -hex 32
-shared_key = "733b5b19754ebb4af75efa1b885e078116b85abb8488c4381078bf5fcb90958c"
+#
+# The value below is a PLACEHOLDER, not a key: it is rejected at load time
+# ("shared_key must not be all zeros"), so a deployment that copies this file
+# unchanged fails loudly instead of running with a public secret.
+shared_key = "0000000000000000000000000000000000000000000000000000000000000000"
 
 bind = "0.0.0.0:19790"
 
 [standalone]
 # The fixed, human-typed ticket. Clients present the same string; a
-# ".scrambler" suffix is ignored (broker heritage).
-ticket = "lab-ticket"
+# ".scrambler" suffix is ignored (broker heritage). Replace it with a
+# private value: it is the HKDF salt of the session keys.
+ticket = "REPLACE-WITH-A-PRIVATE-TICKET"
 
 # Optional auto-logon credentials, handed to the credential provider.
 # user = "alice"

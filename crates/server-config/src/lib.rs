@@ -42,6 +42,38 @@ use protocol::crypt::consts;
 /// Default config file name.
 pub const CONFIG_FILE_NAME: &str = "uds-rp-server.toml";
 
+/// The shared key published in the shipped example configuration
+/// (`crates/server/uds-rp-server.example.toml`) and in the project
+/// documentation. It is public knowledge, so a deployment that keeps it is
+/// not protected by the possession proof at all: any peer that reads the
+/// repository can derive the session keys and complete the handshake.
+const PUBLISHED_EXAMPLE_KEY: [u8; consts::KEY_LENGTH] = [
+    0x73, 0x3b, 0x5b, 0x19, 0x75, 0x4e, 0xbb, 0x4a, 0xf7, 0x5e, 0xfa, 0x1b, 0x88, 0x5e, 0x07, 0x81,
+    0x16, 0xb8, 0x5a, 0xbb, 0x84, 0x88, 0xc4, 0x38, 0x10, 0x78, 0xbf, 0x5f, 0xcb, 0x90, 0x95, 0x8c,
+];
+
+/// Decodes the configured shared key and rejects the values that offer no
+/// protection: the key published in the shipped example configuration and
+/// the all-zero key. Both are public knowledge, so a deployment that keeps
+/// one of them hands every peer that can read the repository a valid
+/// session credential.
+pub fn resolve_shared_key(hex: &str) -> Result<[u8; consts::KEY_LENGTH]> {
+    anyhow::ensure!(
+        !hex.is_empty(),
+        "shared_key must not be empty (hex, 32 bytes)"
+    );
+    let key: [u8; consts::KEY_LENGTH] = protocol::hex::decode(hex).context("bad shared_key hex")?;
+    anyhow::ensure!(
+        key != [0u8; consts::KEY_LENGTH],
+        "shared_key must not be all zeros (it is public knowledge)"
+    );
+    anyhow::ensure!(
+        key != PUBLISHED_EXAMPLE_KEY,
+        "shared_key is the value published in the shipped example configuration; generate a private one with `openssl rand -hex 32`"
+    );
+    Ok(key)
+}
+
 /// Top-level server configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -1008,8 +1040,7 @@ impl ServerConfig {
             !self.shared_key.is_empty(),
             "shared_key must not be empty (hex, 32 bytes)"
         );
-        let shared_key = protocol::hex::decode(&self.shared_key).context("bad shared_key hex")?;
-        let key: [u8; consts::KEY_LENGTH] = shared_key;
+        let key = resolve_shared_key(&self.shared_key)?;
         let validator: Box<dyn TicketValidator> = match self.connection_method {
             ConnectionMethod::Oneshot => {
                 let mut ticket = [0u8; TICKET_LENGTH];
@@ -1065,6 +1096,13 @@ pub fn load(path: &Path) -> Result<ServerConfig> {
         .with_context(|| format!("reading config {}", path.display()))?;
     let config: ServerConfig =
         toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))?;
+    // Reject a shared key that is public knowledge (the value shipped in the
+    // example configuration, or an all-zero key) at load time: this is the
+    // chokepoint every consumer goes through (the reference server and the
+    // service both read the key from here), and a deployment that keeps the
+    // published value offers no authentication at all.
+    resolve_shared_key(&config.shared_key)
+        .with_context(|| format!("validating shared_key of {}", path.display()))?;
     config
         .quality
         .validate()
@@ -1110,7 +1148,45 @@ pub fn find_config_file() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    const KEY_HEX: &str = "733b5b19754ebb4af75efa1b885e078116b85abb8488c4381078bf5fcb90958c";
+    /// A private test key (NOT the value published in the example config:
+    /// that one is rejected on purpose, see `resolve_shared_key`).
+    const KEY_HEX: &str = "1f7c3a9d5e2b8c6f0a4d1e7b3c9f5a2d6e8b0c4f2a1d3e5b7c9f1a3d5e7b9c0d";
+
+    #[test]
+    fn rejects_the_published_example_key() {
+        // The key shipped in `crates/server/uds-rp-server.example.toml` is
+        // public knowledge: a deployment that keeps it offers no protection.
+        let err =
+            resolve_shared_key("733b5b19754ebb4af75efa1b885e078116b85abb8488c4381078bf5fcb90958c")
+                .expect_err("the published example key must be rejected");
+        assert!(format!("{err:#}").contains("published"));
+    }
+
+    #[test]
+    fn rejects_an_all_zero_key() {
+        let err = resolve_shared_key(&"0".repeat(64)).expect_err("the zero key must be rejected");
+        assert!(format!("{err:#}").contains("all zeros"));
+    }
+
+    #[test]
+    fn accepts_a_private_key() {
+        let key = resolve_shared_key(KEY_HEX).expect("a private key is accepted");
+        assert_eq!(key[0], 0x1f);
+    }
+
+    #[test]
+    fn the_shipped_example_config_is_refused() {
+        // Regression: the example configuration used to ship a working,
+        // publicly known shared key. It must now fail to load, so a
+        // deployment that copies it unchanged cannot run with it.
+        let example =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/uds-rp-server.example.toml");
+        let loaded = load(&example);
+        assert!(
+            loaded.is_err(),
+            "the shipped example configuration must not be loadable"
+        );
+    }
 
     #[test]
     fn human_ticket_maps_to_48_bytes() {

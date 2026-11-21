@@ -35,6 +35,11 @@ struct Upload {
     final_path: PathBuf,
     /// Declared total size.
     size: u64,
+    /// Bytes actually reserved against the quota for this upload: the
+    /// declared size, or [`MIN_UPLOAD_RESERVATION`] when it is smaller.
+    /// Stored so the reservation released on completion/abort matches
+    /// the one that was charged.
+    reserved: u64,
     /// Bytes received so far (also the expected next chunk offset).
     received: u64,
 }
@@ -62,6 +67,29 @@ struct Download {
     size: u64,
 }
 
+/// Maximum concurrent uploads (C→S) a client may keep open (§18.78).
+/// The byte quota alone does not bound the NUMBER of transfers: a client
+/// that declares a zero-byte size reserves nothing and could otherwise
+/// open an unlimited number of uploads, each holding a `.part` file and
+/// an open handle on the host.
+pub const MAX_CONCURRENT_UPLOADS: usize = 16;
+
+/// Maximum concurrent downloads (S→C) a client may keep queued (§18.78).
+/// Every queued download holds an open file handle on the host, so the
+/// queue must be bounded independently of the upload-side byte quota.
+pub const MAX_CONCURRENT_DOWNLOADS: usize = 64;
+
+/// Minimum bytes reserved per in-flight upload (§18.78). A zero-byte
+/// declaration would otherwise reserve nothing against the quota, so the
+/// count of transfers — not only their byte total — has to be charged.
+const MIN_UPLOAD_RESERVATION: u64 = 1024;
+
+/// Maximum number of files the spool may hold (§18.78). The byte quota
+/// does not bound the file count: an empty file costs no bytes but still
+/// occupies a directory entry (and an inode), so a client could fill the
+/// spool directory while the quota still reads zero.
+pub const MAX_SPOOL_FILES: u64 = 4_096;
+
 /// Server spool: directory root plus the active transfers.
 pub struct Spool {
     root: PathBuf,
@@ -74,6 +102,13 @@ pub struct Spool {
     used: u64,
     /// Bytes reserved by in-progress uploads (their declared sizes).
     pending: u64,
+    /// Number of committed files in the spool.
+    ///
+    /// The byte quota alone does not bound the FILE COUNT: a zero-byte
+    /// upload consumes no bytes but still creates an inode, so a client
+    /// could otherwise fill the spool directory with entries while the
+    /// quota still reads zero.
+    files: u64,
 }
 
 impl Spool {
@@ -81,14 +116,19 @@ impl Spool {
     /// (§18.78); existing files count against it from the start.
     pub fn open(root: PathBuf, quota_mb: u32) -> std::io::Result<Self> {
         fs::create_dir_all(&root)?;
-        let used = fs::read_dir(&root)?
-            .flatten()
-            .filter_map(|entry| {
-                let meta = entry.metadata().ok()?;
-                let name = entry.file_name();
-                (meta.is_file() && validate_name(name.to_str()?).is_ok()).then_some(meta.len())
-            })
-            .sum();
+        let mut used = 0u64;
+        let mut files = 0u64;
+        for entry in fs::read_dir(&root)?.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if !meta.is_file() || validate_name(&name).is_err() {
+                continue;
+            }
+            used += meta.len();
+            files += 1;
+        }
         Ok(Self {
             root,
             uploads: HashMap::new(),
@@ -96,6 +136,7 @@ impl Spool {
             quota_bytes: u64::from(quota_mb) * 1024 * 1024,
             used,
             pending: 0,
+            files,
         })
     }
 
@@ -251,10 +292,44 @@ impl Spool {
                 message: "transfer id already in use".into(),
             }];
         }
+        // Defence in depth: the wire decoder already validates the name,
+        // but the spool is a PUBLIC type — a library consumer that builds
+        // a `StorageMessage` by hand reaches this sink with an unvalidated
+        // name, and the paths below are built from it.
+        if let Err(e) = validate_name(name) {
+            return vec![StorageMessage::Error {
+                transfer_id,
+                code: protocol::ERR_BAD_NAME,
+                message: format!("{name:?}: {e}"),
+            }];
+        }
+        // File-count cap (§18.78): the byte quota does not bound how many
+        // files the spool holds. Reject BEFORE creating any file.
+        if self.files + self.uploads.len() as u64 >= MAX_SPOOL_FILES {
+            return vec![StorageMessage::Error {
+                transfer_id,
+                code: protocol::ERR_QUOTA_EXCEEDED,
+                message: "spool file count exceeded".into(),
+            }];
+        }
+        // Count cap (§18.78): the byte quota does not bound how many
+        // transfers may be open at once (a zero-byte upload reserves
+        // nothing), and every upload holds a `.part` file plus an open
+        // handle on the host. Reject BEFORE creating any file.
+        if self.uploads.len() >= MAX_CONCURRENT_UPLOADS {
+            return vec![StorageMessage::Error {
+                transfer_id,
+                code: protocol::ERR_QUOTA_EXCEEDED,
+                message: "too many concurrent uploads".into(),
+            }];
+        }
         // Quota (§18.78): committed bytes plus every in-progress declared
         // size must leave room for this upload; the reservation is released
         // if the transfer aborts or errors out.
-        if self.used + self.pending + size > self.quota_bytes {
+        // The reservation is at least MIN_UPLOAD_RESERVATION so a zero-byte
+        // declaration still costs the spool something.
+        let reserved = size.max(MIN_UPLOAD_RESERVATION);
+        if self.used + self.pending + reserved > self.quota_bytes {
             return vec![StorageMessage::Error {
                 transfer_id,
                 code: protocol::ERR_QUOTA_EXCEEDED,
@@ -265,7 +340,7 @@ impl Spool {
         let tmp_path = self.root.join(format!(".{name}.{transfer_id}.part"));
         match File::create(&tmp_path) {
             Ok(file) => {
-                self.pending += size;
+                self.pending += reserved;
                 self.uploads.insert(
                     transfer_id,
                     Upload {
@@ -273,6 +348,7 @@ impl Spool {
                         tmp_path,
                         final_path,
                         size,
+                        reserved,
                         received: 0,
                     },
                 );
@@ -287,7 +363,7 @@ impl Spool {
     /// `Upload` cleans the `.part` file).
     fn drop_upload(&mut self, transfer_id: u32) {
         if let Some(up) = self.uploads.remove(&transfer_id) {
-            self.pending = self.pending.saturating_sub(up.size);
+            self.pending = self.pending.saturating_sub(up.reserved);
         }
     }
 
@@ -343,7 +419,7 @@ impl Spool {
                 message: "no active upload with this id".into(),
             }];
         };
-        self.pending = self.pending.saturating_sub(up.size);
+        self.pending = self.pending.saturating_sub(up.reserved);
         if up.received != up.size {
             return vec![StorageMessage::Error {
                 transfer_id,
@@ -355,7 +431,13 @@ impl Spool {
         let final_path = up.final_path.clone();
         match fs::rename(&up.tmp_path, &up.final_path) {
             Ok(()) => {
-                self.used += up.size;
+                // Charge the RESERVED amount, not the real size: the
+                // reservation is what the quota check admitted, and
+                // charging `up.size` would let a zero-byte upload give
+                // its 1 KiB reservation back for free, so the spool could
+                // fill with empty files while the quota still read zero.
+                self.used += up.reserved;
+                self.files += 1;
                 drop(up); // tmp no longer exists: Drop has nothing to clean.
                 info!(transfer_id, path = %final_path.display(), "upload committed");
                 vec![StorageMessage::PutAck { transfer_id }]
@@ -368,6 +450,34 @@ impl Spool {
     /// flow from [`Spool::pump`]. An `offset` past the end is rejected, so
     /// resume requests for a file that shrank fail loudly.
     fn get_start(&mut self, transfer_id: u32, name: &str, offset: u64) -> Vec<StorageMessage> {
+        // Defence in depth: see `put_start` — the spool must not depend on
+        // the caller having decoded the message through the wire parser.
+        if let Err(e) = validate_name(name) {
+            return vec![StorageMessage::Error {
+                transfer_id,
+                code: protocol::ERR_BAD_NAME,
+                message: format!("{name:?}: {e}"),
+            }];
+        }
+        // One queued download per transfer id, so a repeated `GetStart`
+        // cannot queue the same file (and handle) twice.
+        if self.downloads.iter().any(|d| d.id == transfer_id) {
+            return vec![StorageMessage::Error {
+                transfer_id,
+                code: protocol::ERR_BAD_TRANSFER,
+                message: "transfer id already in use".into(),
+            }];
+        }
+        // Count cap (§18.78): every queued download holds an open file
+        // handle on the host, and the upload-side byte quota does not
+        // cover this direction at all. Reject BEFORE opening the file.
+        if self.downloads.len() >= MAX_CONCURRENT_DOWNLOADS {
+            return vec![StorageMessage::Error {
+                transfer_id,
+                code: protocol::ERR_QUOTA_EXCEEDED,
+                message: "too many concurrent downloads".into(),
+            }];
+        }
         let path = self.root.join(name);
         let open = File::open(&path).and_then(|mut f| {
             let size = f.metadata()?.len();
@@ -594,6 +704,104 @@ mod tests {
         let msgs = s.handle(&StorageMessage::PutAbort { transfer_id: 1 });
         assert_eq!(msgs, Vec::new());
         assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
+    }
+
+    #[test]
+    fn bad_names_are_rejected_by_the_spool_itself() {
+        // Regression: the spool is a public type, so it must not rely on
+        // the caller having decoded the message through the wire parser.
+        // Before the fix a name like "./../evil.txt" escaped the spool
+        // root through the ".{name}.{id}.part" temporary path.
+        let (dir, mut s) = spool();
+        for name in [
+            "../evil.txt",
+            "./../evil.txt",
+            "..\\evil.txt",
+            "/etc/passwd",
+            "sub/dir.txt",
+            "C:\\win.txt",
+            "",
+            ".hidden",
+            "trailing.",
+            "trailing ",
+        ] {
+            let msgs = s.handle(&StorageMessage::PutStart {
+                transfer_id: 1,
+                name: name.to_string(),
+                size: 4,
+            });
+            assert!(
+                matches!(
+                    msgs.as_slice(),
+                    [StorageMessage::Error { code, .. }] if *code == protocol::ERR_BAD_NAME
+                ),
+                "name {name:?} was accepted: {msgs:?}"
+            );
+            // Nothing may have been created, inside or outside the spool.
+            assert_eq!(fs::read_dir(dir.path()).expect("dir").count(), 0);
+            assert!(
+                !dir.path()
+                    .parent()
+                    .expect("parent")
+                    .join("evil.txt")
+                    .exists()
+            );
+            // The same holds for the download direction.
+            let msgs = s.handle(&StorageMessage::GetStart {
+                transfer_id: 2,
+                name: name.to_string(),
+                offset: 0,
+            });
+            assert!(
+                matches!(
+                    msgs.as_slice(),
+                    [StorageMessage::Error { code, .. }] if *code == protocol::ERR_BAD_NAME
+                ),
+                "download name {name:?} was accepted: {msgs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_uploads_cannot_fill_the_spool() {
+        // Regression: a zero-byte upload consumed no quota, so a client
+        // could create an unbounded number of files while the spool's
+        // byte accounting still read zero.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut s = Spool::open(dir.path().to_path_buf(), 1).expect("spool"); // 1 MiB
+        let mut committed = 0u32;
+        for id in 1..=2_000u32 {
+            let msgs = s.handle(&StorageMessage::PutStart {
+                transfer_id: id,
+                name: format!("e{id}.bin"),
+                size: 0,
+            });
+            if msgs
+                .iter()
+                .any(|m| matches!(m, protocol::StorageMessage::Error { .. }))
+            {
+                break;
+            }
+            let msgs = s.handle(&StorageMessage::PutDone { transfer_id: id });
+            if msgs
+                .iter()
+                .any(|m| matches!(m, protocol::StorageMessage::PutAck { .. }))
+            {
+                committed += 1;
+            } else {
+                break;
+            }
+        }
+        // Every empty file now costs its MIN_UPLOAD_RESERVATION against
+        // the quota, so the 1 MiB quota admits at most 1024 of them.
+        assert!(
+            committed <= 1_024,
+            "empty uploads were committed without bound: {committed}"
+        );
+        assert!(committed > 0, "the bound must not block every upload");
+        let files = fs::read_dir(dir.path()).expect("dir").flatten().count();
+        assert!(files as u64 <= MAX_SPOOL_FILES);
+        assert_eq!(files as u32, committed);
     }
 
     #[test]

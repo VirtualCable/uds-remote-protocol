@@ -152,10 +152,26 @@ impl ChannelPolicy {
         use protocol::service_ipc as ipc;
         let mut mask = 0u8;
         mask |= if self.audio { ipc::CHANNEL_AUDIO } else { 0 };
-        mask |= if self.clipboard { ipc::CHANNEL_CLIPBOARD } else { 0 };
-        mask |= if self.storage { ipc::CHANNEL_STORAGE } else { 0 };
-        mask |= if self.smartcard { ipc::CHANNEL_SMARTCARD } else { 0 };
-        mask |= if self.printer { ipc::CHANNEL_PRINTER } else { 0 };
+        mask |= if self.clipboard {
+            ipc::CHANNEL_CLIPBOARD
+        } else {
+            0
+        };
+        mask |= if self.storage {
+            ipc::CHANNEL_STORAGE
+        } else {
+            0
+        };
+        mask |= if self.smartcard {
+            ipc::CHANNEL_SMARTCARD
+        } else {
+            0
+        };
+        mask |= if self.printer {
+            ipc::CHANNEL_PRINTER
+        } else {
+            0
+        };
         mask
     }
 }
@@ -195,8 +211,7 @@ impl TicketPayload {
         );
         if let Some(display) = &payload.display {
             anyhow::ensure!(
-                (200..=7680).contains(&display.width)
-                    && (200..=7680).contains(&display.height),
+                (200..=7680).contains(&display.width) && (200..=7680).contains(&display.height),
                 "ticket display policy {}x{} out of range (200..=7680 per axis)",
                 display.width,
                 display.height
@@ -326,18 +341,14 @@ mod tests {
             policy.to_mask(),
             ipc::CHANNEL_AUDIO | ipc::CHANNEL_STORAGE | ipc::CHANNEL_PRINTER
         );
-        assert_eq!(
-            ChannelPolicy::default().to_mask(),
-            ipc::CHANNELS_DEFAULT
-        );
+        assert_eq!(ChannelPolicy::default().to_mask(), ipc::CHANNELS_DEFAULT);
     }
 
     #[test]
     fn payload_keeps_video_preset_from_broker() {
-        let payload = TicketPayload::from_json(
-            r#"{"version": 1, "video": {"preset": "vp9-balanced"}}"#,
-        )
-        .expect("valid payload");
+        let payload =
+            TicketPayload::from_json(r#"{"version": 1, "video": {"preset": "vp9-balanced"}}"#)
+                .expect("valid payload");
         let video = payload.video.expect("video policy present");
         assert_eq!(video.preset.as_deref(), Some("vp9-balanced"));
     }
@@ -360,9 +371,7 @@ mod tests {
         // §18.78: a field is absent (default applies) or valid; explicit
         // null is an error, at any nesting level.
         assert!(TicketPayload::from_json(r#"{"version": 1, "display": null}"#).is_err());
-        assert!(
-            TicketPayload::from_json(r#"{"version": 1, "video": {"preset": null}}"#).is_err()
-        );
+        assert!(TicketPayload::from_json(r#"{"version": 1, "video": {"preset": null}}"#).is_err());
     }
 
     #[test]

@@ -170,8 +170,9 @@ fn load_standalone(
             return None;
         }
     };
-    let key: [u8; protocol::service_ipc::KEY_LEN] = match protocol::hex::decode(&config.shared_key)
-    {
+    let key: [u8; protocol::service_ipc::KEY_LEN] = match server_config::resolve_shared_key(
+        &config.shared_key,
+    ) {
         Ok(key) => key,
         Err(err) => {
             warn!(error = %format!("{err:#}"), path = %path.display(), "bad shared_key in the server config; ignoring it");

@@ -116,7 +116,9 @@ mod tests {
     fn config() -> ServerConfig {
         ServerConfig {
             connection_method: ConnectionMethod::Standalone,
-            shared_key: "733b5b19754ebb4af75efa1b885e078116b85abb8488c4381078bf5fcb90958c"
+            // A private test key (NOT the value published in the example
+            // configuration, which is rejected on purpose).
+            shared_key: "1f7c3a9d5e2b8c6f0a4d1e7b3c9f5a2d6e8b0c4f2a1d3e5b7c9f1a3d5e7b9c0d"
                 .to_string(),
             standalone: Some(StandaloneConfig {
                 ticket: "lab-ticket".to_string(),
@@ -133,7 +135,7 @@ mod tests {
         let provider = StandaloneProvider::new(&config()).unwrap();
         let ticket = server_config::ticket_bytes("lab-ticket");
         let grant = provider.start(&ticket, "127.0.0.1").await.unwrap();
-        assert_eq!(grant.key[0], 0x73);
+        assert_eq!(grant.key[0], 0x1f);
         assert_eq!(
             grant.credentials.as_ref().map(|c| c.user.as_str()),
             Some("dkmaster")

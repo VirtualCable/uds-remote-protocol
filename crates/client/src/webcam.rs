@@ -72,11 +72,19 @@ pub struct CamClient {
     /// Capture thread handle (joined on stop, so the camera is released
     /// deterministically); the thread hands the source back on exit.
     thread: Option<JoinHandle<Box<dyn crate::integrations::webcam::WebcamSource>>>,
+    /// Local consent (§18.78): the camera opens only while the consumer
+    /// allows it. Closed by default — a remote peer asking for the stream
+    /// is not consent.
+    allowed: bool,
 }
 
 impl CamClient {
     /// Creates the endpoint with the probed source (or `None` when no
     /// camera/mock is available — webcam redirection is then not offered).
+    ///
+    /// Capture starts closed: the consumer must grant consent with
+    /// [`ClientCommand::SetWebcam`](crate::ClientCommand::SetWebcam) before
+    /// a remote peer's `WebcamStart` may open the camera.
     #[must_use]
     pub fn new(source: Option<Box<dyn crate::integrations::webcam::WebcamSource>>) -> Self {
         Self {
@@ -85,6 +93,7 @@ impl CamClient {
             spec: None,
             keyframe: Arc::new(AtomicBool::new(false)),
             thread: None,
+            allowed: false,
         }
     }
 
@@ -129,8 +138,7 @@ impl CamClient {
         }
         let spec = if let Some(source) = &self.source {
             let (max_width, max_height) = source.max_dimensions();
-            let max_fps =
-                u8::try_from(source.max_fps().min(u32::from(u8::MAX))).unwrap_or(u8::MAX);
+            let max_fps = u8::try_from(source.max_fps().min(u32::from(u8::MAX))).unwrap_or(u8::MAX);
             let clamped = CamSpec {
                 width: spec.width.clamp(16, max_width.max(16)),
                 height: spec.height.clamp(16, max_height.max(16)),
@@ -138,8 +146,12 @@ impl CamClient {
                 bitrate_kbps: spec.bitrate_kbps.clamp(16, MAX_CAM_BITRATE_KBPS),
                 ..spec
             };
-            if (clamped.width, clamped.height, clamped.fps, clamped.bitrate_kbps)
-                != (spec.width, spec.height, spec.fps, spec.bitrate_kbps)
+            if (
+                clamped.width,
+                clamped.height,
+                clamped.fps,
+                clamped.bitrate_kbps,
+            ) != (spec.width, spec.height, spec.fps, spec.bitrate_kbps)
             {
                 warn!(
                     requested = ?(spec.width, spec.height, spec.fps, spec.bitrate_kbps),
@@ -156,6 +168,13 @@ impl CamClient {
 
     /// Starts capture+encode with the configured parameters.
     pub fn start(&mut self) {
+        if !self.allowed {
+            // §18.78: the camera is the user's device; a remote peer
+            // asking for the stream is not consent. The consumer grants
+            // it with `ClientCommand::SetWebcam(true)`.
+            warn!("webcam capture requested without local consent; camera stays closed");
+            return;
+        }
         if self.rx.is_some() {
             return; // already streaming
         }
@@ -209,6 +228,51 @@ impl CamClient {
             self.source = Some(source);
         }
         debug!("webcam stream stopped");
+    }
+
+    /// Consumer consent toggle (§18.78): `true` lets a remote peer's
+    /// `WebcamStart` open the camera, `false` revokes it (the capture
+    /// thread is stopped and the source released).
+    ///
+    /// Revoking also clears the pending server configuration, so a later
+    /// `WebcamStart` cannot resume the stream without a fresh consent.
+    pub fn set_allowed(&mut self, allowed: bool) {
+        if self.allowed == allowed {
+            return;
+        }
+        self.allowed = allowed;
+        if allowed {
+            // A grant may arrive after the peer already asked for the
+            // stream: start it now with the configuration we have.
+            if self.spec.is_some() {
+                self.start();
+            }
+        } else {
+            info!("webcam capture revoked by the consumer; camera closed");
+            self.stop();
+            self.spec = None;
+        }
+    }
+
+    /// Whether the consumer allows the camera to be opened.
+    #[must_use]
+    pub fn allowed(&self) -> bool {
+        self.allowed
+    }
+
+    /// Whether a server configuration is pending (the peer asked for the
+    /// stream but local consent is still missing).
+    #[must_use]
+    pub fn pending_request(&self) -> bool {
+        self.spec.is_some() && !self.allowed
+    }
+
+    /// The geometry the peer asked for (`(0, 0, 0)` when it asked for
+    /// nothing yet). Used to tell the consumer what it is being asked to
+    /// authorise.
+    #[must_use]
+    pub fn requested_spec(&self) -> (u32, u32, u8) {
+        self.spec.map_or((0, 0, 0), |s| (s.width, s.height, s.fps))
     }
 
     /// Receives the next datagram payload; pends forever while the webcam

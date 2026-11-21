@@ -29,6 +29,9 @@ pub struct EncryptedStream<T: ReliableTransport> {
     rx_filled: usize,
     /// Declared body length once the header is fully read.
     rx_record_len: Option<usize>,
+    /// The server's per-session salt (§6.1): part of the HKDF salt, fresh
+    /// per handshake. The datagram leg derives its own keys from it.
+    session_salt: Option<[u8; consts::SESSION_SALT_LENGTH]>,
 }
 
 /// Stream sequence numbers of one end (recovery, §4.3).
@@ -42,6 +45,25 @@ pub struct StreamSeqs {
     pub send: u64,
     /// Next expected incoming seq.
     pub recv: u64,
+}
+
+/// A stored session the server can resume on `Recover` (§4.3).
+///
+/// The ticket is part of the stored state on purpose: a recovery request
+/// must be bound to the session it claims to resume, otherwise any peer
+/// could ask for "the live session" and be handed its counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredSession {
+    /// Ticket the session was opened with (part of the HKDF salt).
+    pub ticket: [u8; protocol::TICKET_LENGTH],
+    /// Per-session salt the session was opened with (§6.1). A recovery
+    /// resumes the SAME session, so it must reuse the original salt —
+    /// generating a new one would derive different keys and break the
+    /// session (and, worse, silently reuse the original nonce schedule
+    /// under a different key).
+    pub session_salt: [u8; consts::SESSION_SALT_LENGTH],
+    /// Stream sequence numbers of the stored session.
+    pub seqs: StreamSeqs,
 }
 
 /// Outcome of a client `Recover` attempt.
@@ -67,6 +89,7 @@ impl<T: ReliableTransport> EncryptedStream<T> {
             rx: StreamDecrypt::new(rx_key),
             peer_hello: None,
             rx_buf: Vec::with_capacity(2048),
+            session_salt: None,
             rx_filled: 0,
             rx_record_len: None,
         }
@@ -104,8 +127,13 @@ impl<T: ReliableTransport> EncryptedStream<T> {
             pref_height: pref.1,
         };
         inner.send(&hello.encode()).await?;
-        let keys = derive_session_keys(ticket, key)?;
+        // The server sends its per-session salt in the clear before the
+        // encrypted records begin (§6.1); it is part of the HKDF salt.
+        let mut session_salt = [0u8; consts::SESSION_SALT_LENGTH];
+        read_full(&mut inner, &mut session_salt).await?;
+        let keys = derive_session_keys(ticket, &session_salt, key)?;
         let mut stream = Self::with_keys(inner, &keys, Role::Client);
+        stream.session_salt = Some(session_salt);
         // Protocol v4: the server answers the Hello with an encrypted random
         // nonce and expects the possession proof back; this happens on every
         // Open (never on Recover, which is only valid against a live session
@@ -146,24 +174,41 @@ impl<T: ReliableTransport> EncryptedStream<T> {
         };
         inner.send(&hello.encode()).await?;
 
+        // The server sends its per-session salt in the clear BEFORE the
+        // status byte (§6.1): the salt is part of the HKDF salt, so both
+        // ends need it before anything else. A recovery resumes the SAME
+        // session, so the server sends back the salt it stored with it.
+        let mut session_salt = [0u8; consts::SESSION_SALT_LENGTH];
+        read_full(&mut inner, &mut session_salt).await?;
+
         let mut status = [0u8; 1];
         read_full(&mut inner, &mut status).await?;
         if status[0] != RECOVER_OK {
             return Ok(RecoverOutcome::SessionUnknown);
         }
 
+        // The server demands the same possession proof as Open (§4.3): it
+        // sends a fresh nonce right after the status byte. The proof must
+        // be answered before the seqs are declared, so the encrypted stream
+        // is built first.
+        let keys = derive_session_keys(ticket, &session_salt, key)?;
+        let mut stream = Self::with_keys(inner, &keys, Role::Client);
+        stream.session_salt = Some(session_salt);
+        let mut nonce = [0u8; 16];
+        stream.read_control_exact(&mut nonce).await?;
+        let proof = protocol::crypt::possession_proof(&nonce, &keys);
+        stream.send(protocol::channel::CONTROL, &proof).await?;
+
         let mut out = [0u8; 16];
         out[..8].copy_from_slice(&seqs.send.to_be_bytes());
         out[8..].copy_from_slice(&seqs.recv.to_be_bytes());
-        inner.send(&out).await?;
+        stream.inner.send(&out).await?;
 
         let mut applied = [0u8; 16];
-        read_full(&mut inner, &mut applied).await?;
+        read_full(&mut stream.inner, &mut applied).await?;
         let server_send = u64::from_be_bytes(applied[..8].try_into().expect("8-byte slice"));
         let server_recv = u64::from_be_bytes(applied[8..].try_into().expect("8-byte slice"));
 
-        let keys = derive_session_keys(ticket, key)?;
-        let mut stream = Self::with_keys(inner, &keys, Role::Client);
         stream.tx = StreamCrypt::with_seq(&keys.c2s, seqs.send.max(server_recv));
         stream.rx = StreamDecrypt::with_seq(&keys.s2c, seqs.recv.max(server_send));
         Ok(RecoverOutcome::Resumed(Box::new(stream)))
@@ -180,7 +225,7 @@ impl<T: ReliableTransport> EncryptedStream<T> {
     pub async fn server_handshake(
         inner: T,
         key: &[u8; consts::KEY_LENGTH],
-        session: Option<StreamSeqs>,
+        session: Option<StoredSession>,
     ) -> Result<Self> {
         Self::server_handshake_with(inner, session, |_ticket| {
             let key = *key;
@@ -200,7 +245,7 @@ impl<T: ReliableTransport> EncryptedStream<T> {
     /// proof) behaves exactly as in [`EncryptedStream::server_handshake`].
     pub async fn server_handshake_with<R, Fut>(
         mut inner: T,
-        session: Option<StreamSeqs>,
+        session: Option<StoredSession>,
         resolve: R,
     ) -> Result<Self>
     where
@@ -219,26 +264,90 @@ impl<T: ReliableTransport> EncryptedStream<T> {
             });
         }
         let key = resolve(hello.ticket).await?;
-        let keys = derive_session_keys(&hello.ticket, &key)?;
+        let peer_ticket = hello.ticket;
+        let is_recover = hello.command == Command::Recover;
+        // Per-session salt (§6.1): the server generates 32 fresh random bytes
+        // per handshake and sends them in the clear BEFORE the keys are
+        // derived. It is mixed into the HKDF salt, so two sessions under the
+        // same ticket and PSK derive different keys and therefore never
+        // repeat an AES-GCM `(key, nonce)` pair. It is public by design: a
+        // salt only has to be UNIQUE, not secret.
+        //
+        // A `Recover` resumes an EXISTING session, so it must reuse the salt
+        // that session was opened with; a fresh salt would derive different
+        // keys and desynchronize the stream.
+        let session_salt = if is_recover {
+            match session {
+                Some(stored) => stored.session_salt,
+                None => {
+                    // No stored session: the branch below reports
+                    // RECOVER_UNKNOWN, but the salt still has to go out
+                    // first so both ends agree on the wire format.
+                    [0u8; consts::SESSION_SALT_LENGTH]
+                }
+            }
+        } else {
+            let mut salt = [0u8; consts::SESSION_SALT_LENGTH];
+            getrandom::fill(&mut salt)
+                .map_err(|e| TransportError::UnexpectedMessage(format!("rng: {e}")))?;
+            salt
+        };
+        inner.send(&session_salt).await?;
+        let keys = derive_session_keys(&hello.ticket, &session_salt, &key)?;
         let mut stream = Self::with_keys(inner, &keys, Role::Server);
+        stream.session_salt = Some(session_salt);
         stream.peer_hello = Some(hello);
 
         if stream.peer_hello.as_ref().expect("just set").command == Command::Recover {
+            // The stored session must belong to the ticket the peer presents:
+            // otherwise any peer could ask for "the live session" and be
+            // handed its counters.
             let Some(stored) = session else {
                 stream.inner.send(&[RECOVER_UNKNOWN]).await?;
                 return Err(TransportError::UnexpectedMessage(
                     "Recover without stored session".into(),
                 ));
             };
+            if !constant_time_eq(&stored.ticket, &peer_ticket) {
+                stream.inner.send(&[RECOVER_UNKNOWN]).await?;
+                return Err(TransportError::UnexpectedMessage(
+                    "Recover for an unknown ticket".into(),
+                ));
+            }
+            // Recover demands the same possession proof as Open (§4.3): the
+            // stored state proves nothing about WHO is asking, so a fresh
+            // nonce + proof exchange is what makes it safe to hand over.
+            // The status byte still comes first (wire compatibility), but
+            // the sensitive part (the counters) is only released after the
+            // proof verifies.
             stream.inner.send(&[RECOVER_OK]).await?;
+            let mut nonce = [0u8; 16];
+            getrandom::fill(&mut nonce)
+                .map_err(|e| TransportError::UnexpectedMessage(format!("rng: {e}")))?;
+            stream.send(protocol::channel::CONTROL, &nonce).await?;
+            let mut proof = [0u8; protocol::crypt::PROOF_LENGTH];
+            stream.read_control_exact(&mut proof).await?;
+            if !constant_time_eq(&proof, &protocol::crypt::possession_proof(&nonce, &keys)) {
+                return Err(TransportError::ProofFailed);
+            }
 
             let mut declared = [0u8; 16];
             read_full(&mut stream.inner, &mut declared).await?;
             let client_send = u64::from_be_bytes(declared[..8].try_into().expect("8-byte slice"));
             let client_recv = u64::from_be_bytes(declared[8..].try_into().expect("8-byte slice"));
 
-            let send = stored.send.max(client_recv);
-            let recv = stored.recv.max(client_send);
+            // The client may only move its own counters forward, and only
+            // within a bounded window: an unbounded `max` let a peer push
+            // the server's counters to an arbitrary value and permanently
+            // skip that part of the sequence space.
+            let send = stored
+                .seqs
+                .send
+                .max(client_recv.min(stored.seqs.send.saturating_add(MAX_SEQ_ADVANCE)));
+            let recv = stored
+                .seqs
+                .recv
+                .max(client_send.min(stored.seqs.recv.saturating_add(MAX_SEQ_ADVANCE)));
             let mut applied = [0u8; 16];
             applied[..8].copy_from_slice(&send.to_be_bytes());
             applied[8..].copy_from_slice(&recv.to_be_bytes());
@@ -289,6 +398,15 @@ impl<T: ReliableTransport> EncryptedStream<T> {
         Self::new(inner, tx_key, rx_key)
     }
 
+    /// The server's per-session salt (§6.1).
+    ///
+    /// The datagram leg derives its keys and its session token from it, so
+    /// it must be the same value both ends used for the stream.
+    #[must_use]
+    pub fn session_salt(&self) -> Option<&[u8; consts::SESSION_SALT_LENGTH]> {
+        self.session_salt.as_ref()
+    }
+
     /// Peer Hello (only available on the server side after the handshake).
     #[must_use]
     pub fn peer_hello(&self) -> Option<&Hello> {
@@ -299,10 +417,13 @@ impl<T: ReliableTransport> EncryptedStream<T> {
     /// transport plus the state a new owner needs to resume the stream
     /// (service → session-agent socket handoff, §18.32). The peer Hello is
     /// always present on a completed server handshake.
-    pub fn into_handoff(self) -> (T, Hello, StreamSeqs) {
+    pub fn into_handoff(self) -> (T, Hello, StreamSeqs, [u8; consts::SESSION_SALT_LENGTH]) {
         let seqs = self.seqs();
         let hello = self.peer_hello.expect("server handshake sets peer_hello");
-        (self.inner, hello, seqs)
+        let salt = self
+            .session_salt
+            .expect("server handshake sets the session salt");
+        (self.inner, hello, seqs, salt)
     }
 
     /// Rebuilds the server side of a stream received via handoff: the caller
@@ -314,6 +435,22 @@ impl<T: ReliableTransport> EncryptedStream<T> {
         stream.tx = StreamCrypt::with_seq(&keys.s2c, seqs.send);
         stream.rx = StreamDecrypt::with_seq(&keys.c2s, seqs.recv);
         stream.peer_hello = Some(peer_hello);
+        stream
+    }
+
+    /// Rebuilds the server side of a handoff while keeping the session
+    /// salt, so the datagram leg of the resumed session derives the same
+    /// keys and token as the original owner.
+    #[must_use]
+    pub fn from_handoff_with_salt(
+        inner: T,
+        keys: &SessionKeys,
+        peer_hello: Hello,
+        seqs: StreamSeqs,
+        session_salt: [u8; consts::SESSION_SALT_LENGTH],
+    ) -> Self {
+        let mut stream = Self::from_handoff(inner, keys, peer_hello, seqs);
+        stream.session_salt = Some(session_salt);
         stream
     }
 
@@ -397,6 +534,11 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 const RECOVER_OK: u8 = 1;
 /// Recovery status byte: no stored session; the client must re-`Open`.
 const RECOVER_UNKNOWN: u8 = 0;
+/// How far a recovering peer may claim to have advanced its counters
+/// (§4.3). The merge keeps `max(stored, claimed)`, so an unbounded claim
+/// would let a peer push the server's counters to an arbitrary value and
+/// permanently skip that part of the sequence space.
+const MAX_SEQ_ADVANCE: u64 = 1 << 16;
 
 /// Reads exactly `buf.len()` bytes from the transport (a TCP `read` may
 /// return fewer bytes than requested).

@@ -283,7 +283,9 @@ fn parse_args() -> Result<Args> {
                     Ok(q) => args.quality = q,
                     // Untrusted broker input (§18.78): bad quality policy
                     // falls back to the §12.5 defaults, never kills the agent.
-                    Err(e) => warn!(error = %e, "bad quality policy in the agent config; using defaults"),
+                    Err(e) => {
+                        warn!(error = %e, "bad quality policy in the agent config; using defaults")
+                    }
                 }
             }
             args.source = "dxgi".to_string();
@@ -1460,7 +1462,9 @@ fn create_audio_source(kind: &str, preset: &AudioPreset) -> Option<Box<dyn Audio
                 // two-tone generator to a real user is pure noise. Audio is
                 // disabled instead; explicit `--audio-source synthetic`
                 // remains for the lab.
-                warn!("no audio source available (no driver ring, no render endpoint); audio disabled");
+                warn!(
+                    "no audio source available (no driver ring, no render endpoint); audio disabled"
+                );
                 None
             }
             // Builds without a real backend (lab on other platforms) keep
@@ -2363,11 +2367,7 @@ async fn maybe_request_cam_keyframe(
 /// (§18.57): the server clamps its preferred defaults to the client caps
 /// (Server > Client). No-op without a cam sink (`cam` is `None`) or when
 /// the client offers no VP9.
-async fn start_webcam(
-    legs: &mut Legs,
-    cam: Option<&CamEndpoint>,
-    caps: (u32, u32, u8, Vec<u16>),
-) {
+async fn start_webcam(legs: &mut Legs, cam: Option<&CamEndpoint>, caps: (u32, u32, u8, Vec<u16>)) {
     let (max_width, max_height, max_fps, codecs) = caps;
     let Some(_) = cam else {
         info!(
@@ -2502,10 +2502,14 @@ async fn serve_stream<T: ReliableTransport + 'static>(
     let (pending, token) = udp_offer(&mut stream, &udp_bind.to_string(), ticket, key).await?;
 
     let clock_start = Instant::now();
-    let udp = match tokio::time::timeout(Duration::from_secs(3), pending.wait_first(&token)).await
-    {
+    let udp = match tokio::time::timeout(Duration::from_secs(3), pending.wait_first(&token)).await {
         Ok(Ok((udp, first))) => {
-            let keys = protocol::crypt::derive_datagram_keys(ticket, key)?;
+            // The datagram leg uses the SAME per-session salt as the
+            // stream (§6.1).
+            let session_salt = *stream
+                .session_salt()
+                .ok_or_else(|| anyhow::anyhow!("no session salt"))?;
+            let keys = protocol::crypt::derive_datagram_keys(ticket, &session_salt, key)?;
             let mut dgram = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
             if answer_probes(&mut dgram, &first, clock_start).await? {
                 info!("display leg: UDP");
@@ -3384,11 +3388,7 @@ fn handle_clipboard_packet(
 /// Handles one packet from the storage channel (M8): decodes the message,
 /// applies it to the spool and sends back the immediate responses (chunk
 /// streams are produced by the session loop's pump tick).
-fn handle_storage_packet(
-    legs: &mut Legs,
-    spool: &mut Option<server::storage::Spool>,
-    buf: &[u8],
-) {
+fn handle_storage_packet(legs: &mut Legs, spool: &mut Option<server::storage::Spool>, buf: &[u8]) {
     let msg = match protocol::StorageMessage::decode(buf) {
         Ok(m) => m,
         Err(e) => {
@@ -3727,7 +3727,10 @@ fn handle_stream_packet(ctl: &mut ControlState, enc: &EncoderHandle, ch: u16, bu
             // §18.78 log cap: same aggregation as malformed input records.
             ctl.bad_control_msgs += 1;
             if ctl.bad_control_msgs == 1 || ctl.bad_control_msgs % 1000 == 0 {
-                warn!(count = ctl.bad_control_msgs, "undecodable control message: {e}");
+                warn!(
+                    count = ctl.bad_control_msgs,
+                    "undecodable control message: {e}"
+                );
             }
         }
     }
@@ -4162,7 +4165,10 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
             warn!("forced h264 but the client advertised no H.264 decoder; using the codec ladder");
             preset = "ladder";
         } else if let Some(encoder) = nvenc_h264(args, width, height) {
-            info!(width, height, "h264 forced by preset: NVENC ready (no ladder: hardware leg)");
+            info!(
+                width,
+                height, "h264 forced by preset: NVENC ready (no ladder: hardware leg)"
+            );
             return Ok(ServerEncoder::Simple(encoder));
         } else {
             warn!("forced h264 but no hardware H.264 encoder is available; using the codec ladder");
@@ -4173,8 +4179,8 @@ fn build_encoder(args: &Args, width: u32, height: u32, client_h264: bool) -> Res
     if preset == "ladder" {
         return build_ladder(args, width, height, client_h264);
     }
-    let named = CodecPreset::by_name(preset)
-        .with_context(|| format!("unknown preset: {preset}"))?;
+    let named =
+        CodecPreset::by_name(preset).with_context(|| format!("unknown preset: {preset}"))?;
     let named = match args.bitrate {
         Some(kbps) => named.with_bitrate(kbps),
         None => named,
@@ -4251,7 +4257,10 @@ fn build_ladder(args: &Args, width: u32, height: u32, client_h264: bool) -> Resu
     #[cfg(all(windows, feature = "codec-nvenc"))]
     if matches!(args.encoder.as_str(), "" | "auto" | "nvenc") && client_h264 {
         if let Some(encoder) = nvenc_h264(args, width, height) {
-            info!(width, height, kbps, "h264 via NVENC ready (no ladder: hardware leg)");
+            info!(
+                width,
+                height, kbps, "h264 via NVENC ready (no ladder: hardware leg)"
+            );
             return Ok(ServerEncoder::Simple(encoder));
         }
     }
@@ -4263,20 +4272,12 @@ fn build_ladder(args: &Args, width: u32, height: u32, client_h264: bool) -> Resu
     // warning.
     #[cfg(all(windows, feature = "codec-mf"))]
     if matches!(args.encoder.as_str(), "" | "auto" | "mf") {
-        match codec::LadderEncoder::with_mf_vp9(
-            width,
-            height,
-            knobs.policy.clone(),
-            kbps,
-            80,
-            true,
-        ) {
+        match codec::LadderEncoder::with_mf_vp9(width, height, knobs.policy.clone(), kbps, 80, true)
+        {
             Ok(encoder) => {
                 info!(
                     width,
-                    height,
-                    kbps,
-                    "codec ladder ready (rects-jpeg <-> vp9 via Media Foundation)"
+                    height, kbps, "codec ladder ready (rects-jpeg <-> vp9 via Media Foundation)"
                 );
                 return Ok(ServerEncoder::Ladder(Box::new(encoder)));
             }
@@ -4474,16 +4475,17 @@ async fn run() -> Result<()> {
         // ticket here desynchronizes AEAD from the very first record whenever
         // the two differ (e.g. a client that hashes its ticket differently).
         let ticket = hello.ticket;
-        let keys = protocol::crypt::derive_session_keys(&ticket, &args.key)?;
+        let keys = protocol::crypt::derive_session_keys(&ticket, &handoff.session_salt, &args.key)?;
         let seqs = transport::StreamSeqs {
             send: handoff.send_seq,
             recv: handoff.recv_seq,
         };
-        let stream = EncryptedStream::from_handoff(
+        let stream = EncryptedStream::from_handoff_with_salt(
             transport::TcpTransport::new(stream_tokio),
             &keys,
             hello,
             seqs,
+            handoff.session_salt,
         );
         info!("serving handed-off connection");
         serve_stream(stream, &ticket, &args.key, &args).await?;

@@ -962,6 +962,21 @@ async fn run() -> Result<()> {
                             take_over: on_conflict_take_over,
                         });
                     }
+                    ClientEvent::WebcamConsentRequired { width, height, fps } => {
+                        // §18.78: the operator's `--webcam` flag is the
+                        // local consent; without it the camera stays shut.
+                        info!(width, height, fps, "UDSRP-WEBCAM-CONSENT-REQUIRED");
+                        let allow = args.webcam;
+                        let _ = commands.try_send(ClientCommand::WebcamConsent(allow));
+                    }
+                    ClientEvent::WebcamActive { active } => {
+                        info!(active, "UDSRP-WEBCAM-ACTIVE");
+                    }
+                    ClientEvent::SmartcardConsentRequired => {
+                        info!("UDSRP-SMARTCARD-CONSENT-REQUIRED");
+                        let allow = args.smartcard;
+                        let _ = commands.try_send(ClientCommand::SmartcardConsent(allow));
+                    }
                     ClientEvent::Status(msg) => info!("UDSRP-STATUS: {msg}"),
                     ClientEvent::PrintJobDone { path, bytes } => {
                         info!(path = %path.display(), bytes, "UDSRP-PRINT-OK");

@@ -71,6 +71,25 @@ pub(crate) const SECURE_EVENT: &str = r"Global\UDSRP-SecureDesktop";
 /// Grace period after spawning before the mutex must be observable.
 const MUTEX_GRACE: Duration = Duration::from_secs(15);
 
+/// Whether the operator opted in to writing the live session credentials
+/// (PSK + ticket) to the service log in cleartext. The legacy workflow
+/// (no config file, proactive agent spawn) needs the credentials to be
+/// printed for the client to connect, so the capability is preserved —
+/// but it is OFF by default, because the service log is not a secret store:
+/// it lives in a state directory every local user can read.
+fn lab_credentials_logging_enabled() -> bool {
+    std::env::var("UDSRP_LOG_LAB_CREDENTIALS")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+/// Short, non-reversible fingerprint of a secret, for log correlation only.
+/// It never reveals the secret: SHA-256 truncated to 4 bytes.
+fn credential_fingerprint(secret: &[u8]) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(secret);
+    protocol::hex::encode(&digest[..4])
+}
+
 /// RAII wrapper for a Win32 handle.
 pub(crate) struct OwnedHandle(HANDLE);
 
@@ -138,11 +157,25 @@ impl Agent {
             pid = agent.pid,
             "session agent spawned"
         );
-        info!(
-            key = protocol::hex::encode(&config.key),
-            ticket = protocol::hex::encode(&config.ticket),
-            "lab credentials (also piped to the agent)"
-        );
+        // The PSK and the ticket ARE the session credentials: logging them in
+        // cleartext turns the service log into a credential store that every
+        // local user can read (the log lives in a world-readable state
+        // directory). The legacy lab workflow needs them to be printed, so
+        // they are only emitted when the operator explicitly opts in; the
+        // default log line carries a non-reversible fingerprint instead.
+        if lab_credentials_logging_enabled() {
+            info!(
+                key = protocol::hex::encode(&config.key),
+                ticket = protocol::hex::encode(&config.ticket),
+                "lab credentials (also piped to the agent)"
+            );
+        } else {
+            info!(
+                key_fingerprint = credential_fingerprint(&config.key),
+                ticket_fingerprint = credential_fingerprint(&config.ticket),
+                "session agent credentials (also piped to the agent)"
+            );
+        }
         Ok(Some(agent))
     }
 

@@ -1320,7 +1320,10 @@ impl MfDecoder {
         let alloc_h = u32::try_from(packed & 0xFFFF_FFFF).expect("low 32 bits fit");
         // §18.78: hard ceiling on decoded geometry before any output buffer
         // is sized from it.
-        if width == 0 || alloc_h == 0 || width > crate::video::MAX_DECODE_DIM || alloc_h > crate::video::MAX_DECODE_DIM
+        if width == 0
+            || alloc_h == 0
+            || width > crate::video::MAX_DECODE_DIM
+            || alloc_h > crate::video::MAX_DECODE_DIM
         {
             return Err(CodecError::Malformed);
         }

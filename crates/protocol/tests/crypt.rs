@@ -16,28 +16,69 @@ fn secret() -> [u8; 32] {
 }
 
 fn pair() -> (StreamCrypt, StreamDecrypt) {
-    let keys = derive_session_keys(&ticket(), &secret()).unwrap();
+    let keys = derive_session_keys(&ticket(), &salt(), &secret()).unwrap();
     (StreamCrypt::new(&keys.c2s), StreamDecrypt::new(&keys.c2s))
+}
+
+/// Per-session salt used by the derivation (the server sends a fresh
+/// one on every handshake).
+fn salt() -> [u8; protocol::crypt::consts::SESSION_SALT_LENGTH] {
+    [0x11; protocol::crypt::consts::SESSION_SALT_LENGTH]
 }
 
 #[test]
 fn derive_is_deterministic() {
-    let a = derive_session_keys(&ticket(), &secret()).unwrap();
-    let b = derive_session_keys(&ticket(), &secret()).unwrap();
+    let a = derive_session_keys(&ticket(), &salt(), &secret()).unwrap();
+    let b = derive_session_keys(&ticket(), &salt(), &secret()).unwrap();
     assert_eq!(a, b);
+}
+
+/// Regression (§6.1): two sessions under the SAME ticket and PSK must
+/// derive DIFFERENT keys, so they never reuse an AES-GCM `(key, nonce)`
+/// pair. The per-session salt is what makes this true.
+#[test]
+fn two_sessions_with_the_same_psk_derive_different_keys() {
+    let ticket = ticket();
+    let secret = secret();
+    // Same ticket, same PSK, DIFFERENT per-session salts (the server
+    // generates a fresh one on every handshake).
+    let salt_a = [0x01u8; protocol::crypt::consts::SESSION_SALT_LENGTH];
+    let salt_b = [0x02u8; protocol::crypt::consts::SESSION_SALT_LENGTH];
+
+    let a = derive_session_keys(&ticket, &salt_a, &secret).unwrap();
+    let b = derive_session_keys(&ticket, &salt_b, &secret).unwrap();
+    assert_ne!(a.c2s, b.c2s, "session A and B must not share the c2s key");
+    assert_ne!(a.s2c, b.s2c, "session A and B must not share the s2c key");
+
+    // The same salt reproduces the same keys (a recovery resumes a session).
+    let a2 = derive_session_keys(&ticket, &salt_a, &secret).unwrap();
+    assert_eq!(a.c2s, a2.c2s, "the same salt must reproduce the same key");
+
+    // The datagram leg and the UDP token are salted the same way.
+    let da = protocol::crypt::derive_datagram_keys(&ticket, &salt_a, &secret).unwrap();
+    let db = protocol::crypt::derive_datagram_keys(&ticket, &salt_b, &secret).unwrap();
+    assert_ne!(da.c2s, db.c2s, "the datagram keys must differ per session");
+    let ta = protocol::crypt::derive_udp_token(&ticket, &salt_a, &secret).unwrap();
+    let tb = protocol::crypt::derive_udp_token(&ticket, &salt_b, &secret).unwrap();
+    assert_ne!(ta, tb, "the UDP session token must differ per session");
+
+    // A different ticket still separates too (the salt is not the only
+    // thing that binds).
+    let other_ticket = derive_session_keys(&[0x5A; 48], &salt_a, &secret).unwrap();
+    assert_ne!(a.c2s, other_ticket.c2s);
 }
 
 #[test]
 fn derive_keys_are_directional() {
-    let keys = derive_session_keys(&ticket(), &secret()).unwrap();
+    let keys = derive_session_keys(&ticket(), &salt(), &secret()).unwrap();
     assert_ne!(keys.c2s, keys.s2c);
 }
 
 #[test]
 fn derive_depends_on_ticket_and_secret() {
-    let base = derive_session_keys(&ticket(), &secret()).unwrap();
-    let other_ticket = derive_session_keys(&[0x5A; 48], &secret()).unwrap();
-    let other_secret = derive_session_keys(&ticket(), &[0xC3; 32]).unwrap();
+    let base = derive_session_keys(&ticket(), &salt(), &secret()).unwrap();
+    let other_ticket = derive_session_keys(&[0x5A; 48], &salt(), &secret()).unwrap();
+    let other_secret = derive_session_keys(&ticket(), &salt(), &[0xC3; 32]).unwrap();
     assert_ne!(base, other_ticket);
     assert_ne!(base, other_secret);
 }
@@ -102,7 +143,7 @@ fn tampered_len_fails_before_desync() {
 fn wrong_key_fails() {
     let (mut enc, _dec) = pair();
     let p = enc.encrypt(0, b"datos").unwrap();
-    let keys = derive_session_keys(&ticket(), &[0xFF; 32]).unwrap();
+    let keys = derive_session_keys(&ticket(), &salt(), &[0xFF; 32]).unwrap();
     let mut bad = StreamDecrypt::new(&keys.c2s);
     assert!(bad.decrypt(&p).is_err());
 }
@@ -138,10 +179,11 @@ fn session_keys_debug_does_not_leak() {
 
 #[test]
 fn udp_token_is_derived_deterministically() {
-    let t1 = protocol::crypt::derive_udp_token(&ticket(), &secret()).unwrap();
-    let t2 = protocol::crypt::derive_udp_token(&ticket(), &secret()).unwrap();
+    let t1 = protocol::crypt::derive_udp_token(&ticket(), &salt(), &secret()).unwrap();
+    let t2 = protocol::crypt::derive_udp_token(&ticket(), &salt(), &secret()).unwrap();
     let other = protocol::crypt::derive_udp_token(
         &[0x99; protocol::crypt::consts::TICKET_LENGTH],
+        &salt(),
         &secret(),
     )
     .unwrap();
@@ -154,7 +196,7 @@ fn udp_token_is_derived_deterministically() {
 fn stream_resumes_from_given_seq() {
     // Recovery (§4.3): crypts rebuilt after a TCP drop must continue from
     // the last known seq, never restart (nonce reuse is forbidden).
-    let keys = derive_session_keys(&ticket(), &secret()).unwrap();
+    let keys = derive_session_keys(&ticket(), &salt(), &secret()).unwrap();
     let mut tx = protocol::crypt::StreamCrypt::with_seq(&keys.c2s, 7);
     let mut rx = protocol::crypt::StreamDecrypt::with_seq(&keys.c2s, 7);
     assert_eq!(tx.seq(), 7);

@@ -294,6 +294,18 @@ impl VideoDecoder for JpegRectsDecoder {
                 let h = u16_at(&mut buf)? as usize;
                 let len = u32_at(&mut buf)? as usize;
                 let jpeg = take(&mut buf, len)?;
+                // §18.78: the *embedded* JPEG carries its own dimensions,
+                // and `turbojpeg::decompress` sizes its output buffer from
+                // them before any of them are checked against the wire
+                // rect. A crafted header (e.g. 65500x65500) made the
+                // decompressor reserve ~16 GiB for a 629-byte payload.
+                // Read the header first and reject a rect whose geometry
+                // does not match, so the oversized buffer is never sized.
+                let header =
+                    turbojpeg::read_header(jpeg).map_err(|e| CodecError::Backend(e.to_string()))?;
+                if header.width != w || header.height != h {
+                    return Err(CodecError::Malformed);
+                }
                 let rect = turbojpeg::decompress(jpeg, turbojpeg::PixelFormat::BGRA)
                     .map_err(|e| CodecError::Backend(e.to_string()))?;
                 if rect.width != w || rect.height != h {
@@ -423,6 +435,78 @@ mod tests {
             };
             assert!(dec.decode(&p).is_err(), "len {len} must fail");
         }
+    }
+
+    #[test]
+    fn decoder_rejects_rect_whose_jpeg_geometry_disagrees() {
+        // §18.78: the embedded JPEG carries its own dimensions, and the
+        // decompressor sizes its output buffer from them. A JPEG whose
+        // header declares a huge size must be rejected BEFORE that buffer
+        // is allocated, so the wire rect and the JPEG must be cross-checked
+        // first.
+        let mut enc = JpegRectsEncoder::new(64, 64, 80).unwrap();
+        let f = frame(64, 64, [1, 2, 3, 255]);
+        let vf = VideoFrame {
+            width: 64,
+            height: 64,
+            stride: 256,
+            data: &f,
+        };
+        let p = enc.encode(&vf).unwrap();
+        // Rewrite the JPEG's SOF0 height/width to 65500x65500, keeping
+        // the wire rect at its original 64x64.
+        let mut tampered = p.data.clone();
+        // Rect header layout: u16 x | u16 y | u16 w | u16 h | u32 len, so the
+        // JPEG length sits in the four bytes right before the JPEG payload.
+        let jpeg_start = HEADER_LEN + RECT_HEADER_LEN;
+        let jpeg_len = u32::from_le_bytes([
+            tampered[jpeg_start - 4],
+            tampered[jpeg_start - 3],
+            tampered[jpeg_start - 2],
+            tampered[jpeg_start - 1],
+        ]) as usize;
+        let jpeg = &mut tampered[jpeg_start..jpeg_start + jpeg_len];
+        let mut i = 0usize;
+        let mut patched = false;
+        while i + 1 < jpeg.len() {
+            if jpeg[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let marker = jpeg[i + 1];
+            if marker == 0xD8 || marker == 0xD9 || (0xD0..=0xD7).contains(&marker) {
+                i += 2;
+                continue;
+            }
+            let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+            if marker == 0xC0 || marker == 0xC1 || marker == 0xC2 {
+                jpeg[i + 5..i + 7].copy_from_slice(&65500u16.to_be_bytes());
+                jpeg[i + 7..i + 9].copy_from_slice(&65500u16.to_be_bytes());
+                patched = true;
+                break;
+            }
+            i += 2 + len;
+        }
+        assert!(patched, "SOF0 marker not found in the encoded JPEG");
+        let mut dec = JpegRectsDecoder::new();
+        let started = std::time::Instant::now();
+        assert!(
+            dec.decode(&EncodedPacket {
+                data: tampered,
+                keyframe: false
+            })
+            .is_err(),
+            "a JPEG whose declared geometry disagrees with the wire rect must be rejected"
+        );
+        // The rejection must happen BEFORE the decompressor sizes its output
+        // buffer. Without the header cross-check the decoder reserves ~16 GiB
+        // for the 65500x65500 header, which takes seconds and can abort the
+        // process on a memory-limited host; with the check it is immediate.
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "the oversized JPEG must be rejected before it is allocated, took {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

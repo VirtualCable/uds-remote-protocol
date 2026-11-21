@@ -15,9 +15,9 @@
 //! bitrate *within* the active preset (`set_bitrate`) and only jumps to
 //! another preset on large regime changes.
 
-use crate::{VideoCodecType, VideoDecoder, VideoEncoder};
 #[cfg(debug_assertions)]
 use crate::{RawDecoder, RawEncoder};
+use crate::{VideoCodecType, VideoDecoder, VideoEncoder};
 
 /// Tunable encoder parameters of a preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

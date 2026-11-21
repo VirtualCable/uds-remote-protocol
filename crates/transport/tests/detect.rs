@@ -55,7 +55,11 @@ async fn server_side(addr_tx: tokio::sync::oneshot::Sender<SocketAddr>, answer_p
     }
 
     let (udp, first) = pending.wait_first(&token).await.unwrap();
-    let keys = derive_datagram_keys(&ticket(), &secret()).unwrap();
+    // The datagram leg uses the SAME per-session salt as the stream (§6.1).
+    let salt = *stream
+        .session_salt()
+        .expect("the server handshake sets the session salt");
+    let keys = derive_datagram_keys(&ticket(), &salt, &secret()).unwrap();
     let mut leg = EncryptedDatagram::new(udp, &keys.s2c, &keys.c2s, &token);
 
     // Answer the detection probe(s) with NTP-style timestamps.
@@ -129,9 +133,10 @@ async fn wait_first_ignores_tokenless_datagrams() {
     let port = pending.local_addr().unwrap().port();
     let token = [0x5Au8; consts::TOKEN_LENGTH];
 
-    let attacker = UdpTransport::connect("127.0.0.1:0", format!("127.0.0.1:{port}").parse().unwrap())
-        .await
-        .unwrap();
+    let attacker =
+        UdpTransport::connect("127.0.0.1:0", format!("127.0.0.1:{port}").parse().unwrap())
+            .await
+            .unwrap();
     attacker.send_raw(b"unauthenticated junk").await.unwrap();
 
     let legit = UdpTransport::connect("127.0.0.1:0", format!("127.0.0.1:{port}").parse().unwrap())

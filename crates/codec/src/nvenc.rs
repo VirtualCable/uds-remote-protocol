@@ -330,8 +330,40 @@ unsafe impl Sync for NvencApi {}
 
 static API: OnceLock<Option<Arc<NvencApi>>> = OnceLock::new();
 
+/// Loads `nvEncodeAPI64.dll` with the OS loader's *restricted* search path.
+///
+/// `libloading::Library::new("nvEncodeAPI64.dll")` maps to
+/// `LoadLibraryExW(name, 0, 0)`, whose flag-less search order includes the
+/// current working directory and every `PATH` entry. A planted DLL in either
+/// would be loaded into the encoder process (the session agent, which holds
+/// host-side input-injection and clipboard privileges) and execute with its
+/// privileges. Restricting the search to the executable's own directory and
+/// the system directory — where the NVIDIA driver actually installs the DLL —
+/// removes the working directory and `PATH` from the search.
+///
+/// On non-Windows targets the flag is unavailable, so the call falls back to
+/// the platform loader.
+fn load_nvenc_library() -> std::result::Result<libloading::Library, libloading::Error> {
+    #[cfg(target_os = "windows")]
+    {
+        use libloading::os::windows::Library as OsLibrary;
+        // SAFETY: the flags only restrict *where* the loader looks; the
+        // library's own initialisation runs either way (same contract as
+        // `Library::new`).
+        let flags = libloading::os::windows::LOAD_LIBRARY_SEARCH_APPLICATION_DIR
+            | libloading::os::windows::LOAD_LIBRARY_SEARCH_SYSTEM32;
+        let os = unsafe { OsLibrary::load_with_flags("nvEncodeAPI64.dll", flags) }?;
+        Ok(libloading::Library::from(os))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // SAFETY: same contract as `Library::new`.
+        unsafe { libloading::Library::new("nvEncodeAPI64.dll") }
+    }
+}
+
 fn load_api() -> Option<Arc<NvencApi>> {
-    let lib = match unsafe { libloading::Library::new("nvEncodeAPI64.dll") } {
+    let lib = match load_nvenc_library() {
         Ok(l) => l,
         Err(e) => {
             tracing::debug!("nvEncodeAPI64.dll not loadable: {e}");

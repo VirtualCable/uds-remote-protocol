@@ -60,6 +60,11 @@ pub struct SessionView {
     cursor: Option<CursorSprite>,
     /// Whether the remote cursor is visible (server-driven, §10).
     cursor_visible: bool,
+    /// §18.78: local consent for the camera and the smartcard. The
+    /// operator's CLI flags (`--webcam`, `--smartcard`) are the consent;
+    /// a remote peer asking for them is not.
+    allow_webcam: bool,
+    allow_smartcard: bool,
 }
 
 struct Texture {
@@ -120,6 +125,19 @@ impl SessionView {
         events: flume::Receiver<ClientEvent>,
         displays: Displays,
     ) -> Self {
+        Self::with_consent(commands, events, displays, false, false)
+    }
+
+    /// Wires the pieces handed by `client::Session::new` and records the
+    /// operator's consent for the camera and the smartcard (§18.78).
+    #[must_use]
+    pub fn with_consent(
+        commands: CommandSender,
+        events: flume::Receiver<ClientEvent>,
+        displays: Displays,
+        allow_webcam: bool,
+        allow_smartcard: bool,
+    ) -> Self {
         // Local clipboard: event-driven watcher (channels crate); every new
         // local text is announced to the remote. The handle's echo
         // suppression keeps remote-applied text from bouncing back.
@@ -158,6 +176,8 @@ impl SessionView {
             altgr: crate::gui::altgr::AltGr::default(),
             cursor: None,
             cursor_visible: true,
+            allow_webcam,
+            allow_smartcard,
         }
     }
 
@@ -283,6 +303,41 @@ impl SessionView {
                     let _ = self
                         .commands
                         .try_send(ClientCommand::AnswerConflict { take_over: true });
+                }
+                ClientEvent::WebcamConsentRequired { width, height, fps } => {
+                    // §18.78: the operator's `--webcam` flag is the consent.
+                    // Without it the camera stays closed and the peer is
+                    // told the channel is unavailable.
+                    info!(width, height, fps, "webcam requested by the server");
+                    if self.allow_webcam {
+                        let _ = self.commands.try_send(ClientCommand::WebcamConsent(true));
+                        self.status = "webcam: streaming".to_string();
+                    } else {
+                        let _ = self.commands.try_send(ClientCommand::WebcamConsent(false));
+                        self.status = "webcam refused (not enabled locally)".to_string();
+                    }
+                }
+                ClientEvent::WebcamActive { active } => {
+                    self.status = if active {
+                        "webcam: streaming".to_string()
+                    } else {
+                        "webcam: stopped".to_string()
+                    };
+                }
+                ClientEvent::SmartcardConsentRequired => {
+                    // §18.78: same rule for the smartcard.
+                    info!("smartcard requested by the server");
+                    if self.allow_smartcard {
+                        let _ = self
+                            .commands
+                            .try_send(ClientCommand::SmartcardConsent(true));
+                        self.status = "smartcard: in use by the session".to_string();
+                    } else {
+                        let _ = self
+                            .commands
+                            .try_send(ClientCommand::SmartcardConsent(false));
+                        self.status = "smartcard refused (not enabled locally)".to_string();
+                    }
                 }
                 ClientEvent::StorageList { .. }
                 | ClientEvent::TransferDone { .. }

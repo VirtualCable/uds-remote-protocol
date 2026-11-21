@@ -168,11 +168,7 @@ fn bitrate_sweep_1080p() {
         "--- {n} frames {w}x{h}: default presets + bitrate sweep (CPU = % of one core @30fps) ---"
     );
     // Defaults as shipped in the catalog.
-    for name in [
-        "vp9-bandwidth-saver",
-        "vp9-balanced",
-        "vp9-low-latency",
-    ] {
+    for name in ["vp9-bandwidth-saver", "vp9-balanced", "vp9-low-latency"] {
         let preset = codec::CodecPreset::by_name(name).expect("preset");
         sweep(name, preset, &frames, w, h);
     }

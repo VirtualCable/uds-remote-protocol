@@ -19,14 +19,24 @@
 
 use anyhow::{Context, Result};
 use windows::Win32::Foundation::{FreeLibrary, HMODULE};
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::Win32::System::LibraryLoader::{
+    GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
 use windows::core::{BOOL, s, w};
 
 /// Sends one synthetic SAS (as a service, not as a user keystroke).
 pub fn send_sas() -> Result<()> {
     // SAFETY: `sas.dll` is a Microsoft system DLL present since Vista;
-    // the library reference is released before returning.
-    let sas: HMODULE = unsafe { LoadLibraryW(w!("sas.dll")) }.context("LoadLibraryW(sas.dll)")?;
+    // the library reference is released before returning. The restricted
+    // search flag below is what makes that assumption true: a bare-name
+    // `LoadLibraryW` would also search the *application directory* (the
+    // folder holding `udsrp-service.exe`), the current working directory
+    // and `PATH`, so a DLL planted next to the service binary would run
+    // with the service's SYSTEM privileges. `LOAD_LIBRARY_SEARCH_SYSTEM32`
+    // confines the search to the system directory, where Microsoft's own
+    // `sas.dll` lives.
+    let sas: HMODULE = unsafe { LoadLibraryExW(w!("sas.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+        .context("LoadLibraryExW(sas.dll)")?;
     let result = (|| {
         let addr =
             unsafe { GetProcAddress(sas, s!("SendSAS")) }.context("sas.dll!SendSAS missing")?;

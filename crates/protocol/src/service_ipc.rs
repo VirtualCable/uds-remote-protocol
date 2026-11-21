@@ -65,6 +65,8 @@ pub const CHANNELS_DEFAULT: u8 = CHANNEL_AUDIO | CHANNEL_CLIPBOARD;
 
 /// Session key length in bytes (matches `crypt`/`protocol`).
 pub const KEY_LEN: usize = 32;
+/// Length of the per-session salt carried in the handoff block (§6.1).
+pub const SESSION_SALT_LEN: usize = 32;
 /// Session ticket length in bytes (matches `protocol`).
 pub const TICKET_LEN: usize = 48;
 
@@ -76,10 +78,16 @@ pub const MAX_STRING_LEN: usize = 2048;
 /// (WSAPROTOCOL_INFO is ~400 bytes; bound generously).
 pub const MAX_SOCKET_INFO_LEN: usize = 4096;
 
+/// Number of length-prefixed string fields in the frame. The encoder and
+/// the decoder both derive their field count from this constant, so the
+/// two can never drift apart (the length arithmetic used to budget 9
+/// prefixes while 10 were written).
+const STRING_FIELDS: usize = 10;
+
 /// Minimum frame size: version + key + ticket + the u16 string lengths
 /// (all strings empty) + fixed resolution + flags + limits + the handoff
 /// flag.
-const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + 9 * 2 + 8 + 1 + 12 + 1 + 1;
+const HEADER_LEN: usize = 1 + KEY_LEN + TICKET_LEN + STRING_FIELDS * 2 + 8 + 1 + 12 + 1 + 1;
 
 /// Offset where the length-prefixed string fields start.
 const STRINGS_OFF: usize = 1 + KEY_LEN + TICKET_LEN;
@@ -94,6 +102,9 @@ pub struct HandoffInfo {
     pub send_seq: u64,
     /// Next expected incoming (client → server) stream seq.
     pub recv_seq: u64,
+    /// Per-session salt of the session (§6.1). The agent rebuilds the
+    /// stream from it, so it must be the same salt the service used.
+    pub session_salt: [u8; SESSION_SALT_LEN],
     /// Encoded peer Hello (`protocol::Hello::ENCODED_LEN` bytes).
     pub hello: Vec<u8>,
     /// Opaque duplicated-socket blob (`WSAPROTOCOL_INFO` on Windows).
@@ -215,7 +226,9 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
     out.push(AGENT_CONFIG_VERSION);
     out.extend_from_slice(&config.key);
     out.extend_from_slice(&config.ticket);
-    for s in [
+    // The field count is fixed by the array type: adding an eleventh
+    // field would no longer compile against `STRING_FIELDS`.
+    let strings: [&str; STRING_FIELDS] = [
         &config.bind,
         &config.output_name,
         &config.preset,
@@ -226,7 +239,8 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
         &config.mic_sink,
         &config.quality,
         &config.encoder,
-    ] {
+    ];
+    for s in strings {
         let len = u16::try_from(s.len()).expect("string fields are bounded well below u16::MAX");
         out.extend_from_slice(&len.to_le_bytes());
         out.extend_from_slice(s.as_bytes());
@@ -245,6 +259,7 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
             out.push(1);
             out.extend_from_slice(&h.send_seq.to_le_bytes());
             out.extend_from_slice(&h.recv_seq.to_le_bytes());
+            out.extend_from_slice(&h.session_salt);
             let hello_len = u16::try_from(h.hello.len()).expect("hello is a fixed-size struct");
             out.extend_from_slice(&hello_len.to_le_bytes());
             out.extend_from_slice(&h.hello);
@@ -273,8 +288,11 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
     ticket.copy_from_slice(&buf[1 + KEY_LEN..1 + KEY_LEN + TICKET_LEN]);
 
     let mut rest = &buf[STRINGS_OFF..];
-    let mut strings = ["", "", "", "", "", "", "", "", "", ""];
+    let mut strings = [""; STRING_FIELDS];
     for slot in &mut strings {
+        if rest.len() < 2 {
+            return Err(DecodeError::Truncated);
+        }
         let len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
         rest = &rest[2..];
         if len > MAX_STRING_LEN || rest.len() < len {
@@ -306,12 +324,15 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         }
         1 => {
             rest = &rest[1..];
-            if rest.len() < 16 + 2 {
+            if rest.len() < 16 + SESSION_SALT_LEN + 2 {
                 return Err(DecodeError::Truncated);
             }
             let send_seq = u64::from_le_bytes(rest[..8].try_into().expect("8-byte slice"));
             let recv_seq = u64::from_le_bytes(rest[8..16].try_into().expect("8-byte slice"));
             rest = &rest[16..];
+            let mut session_salt = [0u8; SESSION_SALT_LEN];
+            session_salt.copy_from_slice(&rest[..SESSION_SALT_LEN]);
+            rest = &rest[SESSION_SALT_LEN..];
             let hello_len = u16::from_le_bytes([rest[0], rest[1]]) as usize;
             rest = &rest[2..];
             if hello_len > MAX_STRING_LEN || rest.len() < hello_len + 4 {
@@ -332,6 +353,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
             Some(HandoffInfo {
                 send_seq,
                 recv_seq,
+                session_salt,
                 hello,
                 socket_info,
             })
@@ -416,6 +438,7 @@ mod tests {
             handoff: Some(HandoffInfo {
                 send_seq: 3,
                 recv_seq: 2,
+                session_salt: [0x33; SESSION_SALT_LEN],
                 hello: vec![0xAB; 64],
                 socket_info: vec![0xCD; 400],
             }),
@@ -438,6 +461,7 @@ mod tests {
             handoff: Some(HandoffInfo {
                 send_seq: 3,
                 recv_seq: 2,
+                session_salt: [0x33; SESSION_SALT_LEN],
                 hello: vec![0xAB; 64],
                 socket_info: vec![0xCD; 400],
             }),

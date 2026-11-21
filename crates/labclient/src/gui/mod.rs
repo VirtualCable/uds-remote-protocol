@@ -448,5 +448,10 @@ fn spawn_session(
             let _ = result_tx.send(result.map_err(|e| format!("{e:#}")));
         })
         .map_err(|e| format!("spawning the session thread: {e}"))?;
-    Ok((SessionView::new(commands, events_rx, displays), result_rx))
+    // §18.78: the operator's flags are the local consent for the camera
+    // and the smartcard; the remote peer asking for them is not.
+    Ok((
+        SessionView::with_consent(commands, events_rx, displays, flags.webcam, flags.smartcard),
+        result_rx,
+    ))
 }

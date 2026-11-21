@@ -12,3 +12,5 @@ opencode.jsonc
 .mcp.json
 .vscode/mcp.json
 .github/instructions/
+.audit/
+strix_runs/

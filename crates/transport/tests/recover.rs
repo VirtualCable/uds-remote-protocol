@@ -30,7 +30,7 @@ async fn echo_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<Com
     let listener = DirectListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = tokio::spawn(async move {
-        let mut stored: Option<transport::StreamSeqs> = None;
+        let mut stored: Option<transport::StoredSession> = None;
         let mut commands = Vec::new();
         for _ in 0..2 {
             let (raw, _) = listener.accept().await.unwrap();
@@ -45,7 +45,11 @@ async fn echo_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<Com
                     break;
                 }
             }
-            stored = Some(stream.seqs());
+            stored = Some(transport::StoredSession {
+                ticket: stream.peer_hello().map(|h| h.ticket).unwrap_or([0; 48]),
+                session_salt: stream.session_salt().copied().unwrap_or([0; 32]),
+                seqs: stream.seqs(),
+            });
         }
         commands
     });

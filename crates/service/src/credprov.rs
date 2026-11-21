@@ -335,7 +335,14 @@ impl Pipe {
             CreateNamedPipeW(
                 PCWSTR::from_raw(name.as_ptr()),
                 windows::Win32::Storage::FileSystem::PIPE_ACCESS_DUPLEX
-                    | windows::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED,
+                    | windows::Win32::Storage::FileSystem::FILE_FLAG_OVERLAPPED
+                    // The pipe name is fixed and predictable, so a local
+                    // user could create it first and become the server the
+                    // credential provider (LogonUI) connects to — reading the
+                    // autologon password that the service pushes. Requiring
+                    // this to be the FIRST instance makes the squat fail
+                    // loudly instead of silently stealing the credentials.
+                    | windows::Win32::Storage::FileSystem::FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                 1,
                 8192,

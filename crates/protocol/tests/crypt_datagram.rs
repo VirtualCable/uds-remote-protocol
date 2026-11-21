@@ -14,11 +14,17 @@ const TICKET: [u8; consts::TICKET_LENGTH] = [0x11; consts::TICKET_LENGTH];
 const SECRET: [u8; consts::KEY_LENGTH] = [0x22; consts::KEY_LENGTH];
 
 fn pair() -> (DatagramCrypt, DatagramDecrypt) {
-    let keys = derive_datagram_keys(&TICKET, &SECRET).unwrap();
+    let keys = derive_datagram_keys(&TICKET, &salt(), &SECRET).unwrap();
     (
         DatagramCrypt::new(&keys.c2s, &TOKEN),
         DatagramDecrypt::new(&keys.c2s, &TOKEN),
     )
+}
+
+/// Per-session salt used by the derivation (the server sends a fresh
+/// one on every handshake).
+fn salt() -> [u8; protocol::crypt::consts::SESSION_SALT_LENGTH] {
+    [0x11; protocol::crypt::consts::SESSION_SALT_LENGTH]
 }
 
 #[test]
@@ -45,7 +51,7 @@ fn wire_format_layout() {
 #[test]
 fn wrong_token_is_rejected() {
     let (mut tx, _rx) = pair();
-    let keys = derive_datagram_keys(&TICKET, &SECRET).unwrap();
+    let keys = derive_datagram_keys(&TICKET, &salt(), &SECRET).unwrap();
     let mut rx = DatagramDecrypt::new(&keys.c2s, &[0x5A; consts::TOKEN_LENGTH]);
     let dgram = tx.encrypt(1, b"data").unwrap();
     assert!(matches!(rx.decrypt(&dgram), Err(CryptError::BadToken)));
@@ -118,7 +124,7 @@ fn received_counts_only_accepted_datagrams() {
     // Replay does not count as received.
     assert!(rx.decrypt(&d1).is_err());
     // Foreign tokens do not count either.
-    let keys = derive_datagram_keys(&TICKET, &SECRET).unwrap();
+    let keys = derive_datagram_keys(&TICKET, &salt(), &SECRET).unwrap();
     let mut foreign = DatagramCrypt::new(&keys.c2s, &[0x5A; consts::TOKEN_LENGTH]);
     let f = foreign.encrypt(1, b"foreign").unwrap();
     assert!(rx.decrypt(&f).is_err());
@@ -141,7 +147,7 @@ fn late_arrival_discounts_loss_estimate() {
 #[test]
 fn wrong_key_fails() {
     let (mut tx, _rx) = pair();
-    let other = derive_datagram_keys(&[0x99; consts::TICKET_LENGTH], &SECRET).unwrap();
+    let other = derive_datagram_keys(&[0x99; consts::TICKET_LENGTH], &salt(), &SECRET).unwrap();
     let mut rx = DatagramDecrypt::new(&other.c2s, &TOKEN);
     let d = tx.encrypt(1, b"unreadable").unwrap();
     assert!(rx.decrypt(&d).is_err());

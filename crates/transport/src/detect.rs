@@ -42,7 +42,13 @@ pub async fn udp_offer<T: ReliableTransport>(
     secret: &[u8; consts::KEY_LENGTH],
 ) -> Result<(PendingUdpTransport, [u8; consts::TOKEN_LENGTH])> {
     let pending = UdpTransport::accept_first(udp_bind)?;
-    let token = derive_udp_token(ticket, secret)?;
+    // The datagram leg uses the SAME per-session salt as the stream (§6.1),
+    // so its keys and its token are unique per session.
+    let salt = stream
+        .session_salt()
+        .copied()
+        .ok_or_else(|| TransportError::UnexpectedMessage("no session salt".into()))?;
+    let token = derive_udp_token(ticket, &salt, secret)?;
     let offer = ControlMessage::UdpOffer {
         port: pending.local_addr()?.port(),
         token,
@@ -74,9 +80,16 @@ pub async fn udp_detect<T: ReliableTransport>(
         return Err(TransportError::UnexpectedMessage(format!("{msg:?}")));
     };
     debug_assert_eq!(ch, channel::CONTROL);
+    // The datagram leg uses the SAME per-session salt as the stream (§6.1),
+    // so its keys and its token are unique per session.
+    let salt = stream
+        .session_salt()
+        .copied()
+        .ok_or_else(|| TransportError::UnexpectedMessage("no session salt".into()))?;
     udp_probe(
         server_ip,
         ticket,
+        &salt,
         secret,
         port,
         token,
@@ -94,6 +107,7 @@ pub async fn udp_detect<T: ReliableTransport>(
 pub async fn udp_probe(
     server_ip: IpAddr,
     ticket: &[u8; consts::TICKET_LENGTH],
+    session_salt: &[u8; consts::SESSION_SALT_LENGTH],
     secret: &[u8; consts::KEY_LENGTH],
     port: u16,
     token: [u8; consts::TOKEN_LENGTH],
@@ -103,7 +117,7 @@ pub async fn udp_probe(
 ) -> Result<Option<UdpLeg<UdpTransport>>> {
     let mut buf = [0u8; 1024];
     let raw = UdpTransport::connect("0.0.0.0:0", SocketAddr::new(server_ip, port)).await?;
-    let keys = derive_datagram_keys(ticket, secret)?;
+    let keys = derive_datagram_keys(ticket, session_salt, secret)?;
     let mut dgram = EncryptedDatagram::new(raw, &keys.c2s, &keys.s2c, &token);
 
     for _ in 0..max_attempts {

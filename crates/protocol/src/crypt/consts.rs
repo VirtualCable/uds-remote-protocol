@@ -9,6 +9,12 @@
 pub const TICKET_LENGTH: usize = 48;
 /// Length of the shared secret and of each derived key, in bytes.
 pub const KEY_LENGTH: usize = 32;
+/// Length of the per-session salt, in bytes.
+///
+/// The salt is generated fresh by the server on every handshake and mixed
+/// into the HKDF salt, so two sessions under the same PSK never derive the
+/// same keys (and therefore never reuse an AES-GCM `(key, nonce)` pair).
+pub const SESSION_SALT_LENGTH: usize = 32;
 /// AES-256-GCM tag length, in bytes.
 pub const TAG_LENGTH: usize = 16;
 /// Cleartext header of a stream packet: `seq (8B BE) + len (2B BE)`.

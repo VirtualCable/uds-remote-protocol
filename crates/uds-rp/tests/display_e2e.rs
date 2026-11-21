@@ -17,14 +17,16 @@ use uds_rp::core::fragment::{self, Fragmenter, Reassembler};
 use uds_rp::crypt::{DatagramCrypt, DatagramDecrypt, derive_datagram_keys, derive_udp_token};
 use uds_rp::server::synthetic::SyntheticSource;
 
+/// Per-session salt (the server sends a fresh one per handshake).
+const SALT: [u8; 32] = [0x11; 32];
 const TICKET: [u8; 48] = [0x42; 48];
 const KEY: [u8; 32] = [0x07; 32];
 
 /// Server→client wire keys and the session token, as the real handshake
 /// derives them.
 fn wire() -> (DatagramCrypt, DatagramDecrypt) {
-    let keys = derive_datagram_keys(&TICKET, &KEY).expect("keys");
-    let token = derive_udp_token(&TICKET, &KEY).expect("token");
+    let keys = derive_datagram_keys(&TICKET, &SALT, &KEY).expect("keys");
+    let token = derive_udp_token(&TICKET, &SALT, &KEY).expect("token");
     (
         DatagramCrypt::new(&keys.s2c, &token),
         DatagramDecrypt::new(&keys.s2c, &token),

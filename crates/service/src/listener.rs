@@ -307,7 +307,7 @@ pub(crate) async fn complete_session(
         .send(protocol::channel::CONTROL, &ready.encode()?)
         .await?;
 
-    let (inner, hello, seqs) = stream.into_handoff();
+    let (inner, hello, seqs, session_salt) = stream.into_handoff();
     let socket = inner
         .into_stream()
         .into_std()
@@ -342,6 +342,7 @@ pub(crate) async fn complete_session(
             handoff: Some(protocol::service_ipc::HandoffInfo {
                 send_seq: seqs.send,
                 recv_seq: seqs.recv,
+                session_salt,
                 hello: hello.encode().to_vec(),
                 socket_info,
             }),
@@ -398,6 +399,7 @@ pub(crate) async fn complete_session(
                 handoff: Some(protocol::service_ipc::HandoffInfo {
                     send_seq: seqs.send,
                     recv_seq: seqs.recv,
+                    session_salt,
                     hello: hello.encode().to_vec(),
                     socket_info,
                 }),

@@ -34,7 +34,7 @@ mod udp;
 pub use datagram::{DatagramSink, DatagramSource, EncryptedDatagram};
 pub use detect::{UdpLeg, udp_detect, udp_offer, udp_probe};
 pub use error::{Result, TransportError};
-pub use stream::{EncryptedStream, RecoverOutcome, StreamSeqs};
+pub use stream::{EncryptedStream, RecoverOutcome, StoredSession, StreamSeqs};
 pub use tcp::{DirectConnector, DirectListener, TcpTransport};
 pub use traits::{Connector, DatagramTransport, ReliableTransport, Target};
 pub use udp::{PendingUdpTransport, UdpTransport};

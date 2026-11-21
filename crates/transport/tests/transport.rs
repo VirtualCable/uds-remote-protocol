@@ -13,6 +13,11 @@ use transport::{
 };
 
 /// Fixed test ticket.
+/// Per-session salt (the server sends a fresh one per handshake).
+fn test_salt() -> [u8; protocol::crypt::consts::SESSION_SALT_LENGTH] {
+    [0x11; protocol::crypt::consts::SESSION_SALT_LENGTH]
+}
+
 fn test_ticket() -> [u8; TICKET_LENGTH] {
     [0x42; TICKET_LENGTH]
 }
@@ -312,13 +317,17 @@ async fn handoff_roundtrip_resumes_the_server_side_stream() {
         .await
         .unwrap();
 
-    let (inner, hello, seqs) = server.await.unwrap();
+    let (inner, hello, seqs, session_salt) = server.await.unwrap();
     assert_eq!(hello.ticket, test_ticket());
 
     // The "session agent": rebuilds the server side from the handoff state
     // and continues the conversation transparently.
-    let keys = protocol::crypt::derive_session_keys(&test_ticket(), &test_key()).unwrap();
-    let mut agent = EncryptedStream::from_handoff(inner, &keys, hello, seqs);
+    // The agent rebuilds the stream with the SAME per-session salt the
+    // server used (§6.1) — that is what the handoff carries it for.
+    let keys =
+        protocol::crypt::derive_session_keys(&test_ticket(), &session_salt, &test_key()).unwrap();
+    let mut agent =
+        EncryptedStream::from_handoff_with_salt(inner, &keys, hello, seqs, session_salt);
 
     let mut buf = [0u8; 64];
     let (_, n) = client.recv_into(&mut buf).await.unwrap();

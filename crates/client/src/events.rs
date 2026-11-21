@@ -105,6 +105,28 @@ pub enum ClientEvent {
         /// XORs.
         xor_mask: Vec<u8>,
     },
+    /// The remote peer asked for the local camera (§18.78). The camera
+    /// stays closed until the consumer answers with
+    /// [`crate::ClientCommand::WebcamConsent`]; the peer is told the
+    /// channel is unavailable until then.
+    WebcamConsentRequired {
+        /// Width the peer wants to capture.
+        width: u32,
+        /// Height the peer wants to capture.
+        height: u32,
+        /// Frame rate the peer wants.
+        fps: u8,
+    },
+    /// The local camera was opened (or closed) by the client.
+    WebcamActive {
+        /// True while the camera is streaming.
+        active: bool,
+    },
+    /// The remote peer asked to use the user's smartcard (§18.78). The
+    /// card stays untouched until the consumer answers with
+    /// [`crate::ClientCommand::SmartcardConsent`]; until then the peer is
+    /// told the channel is unavailable.
+    SmartcardConsentRequired,
     /// Text pulled from the remote clipboard (M8); the consumer should
     /// apply it to the local clipboard.
     ClipboardData {
@@ -200,6 +222,7 @@ pub enum ClientEvent {
 // Manual Debug: bulky payloads (cursor pixels) stay out of the logs, as in
 // freerdp-integration's RdpMessage.
 impl std::fmt::Debug for ClientEvent {
+    #[allow(clippy::too_many_lines)] // one arm per event variant
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Connected { udp } => f.debug_struct("Connected").field("udp", udp).finish(),
@@ -282,6 +305,17 @@ impl std::fmt::Debug for ClientEvent {
                 .debug_struct("SecureDesktop")
                 .field("active", active)
                 .finish(),
+            Self::WebcamConsentRequired { width, height, fps } => f
+                .debug_struct("WebcamConsentRequired")
+                .field("width", width)
+                .field("height", height)
+                .field("fps", fps)
+                .finish(),
+            Self::WebcamActive { active } => f
+                .debug_struct("WebcamActive")
+                .field("active", active)
+                .finish(),
+            Self::SmartcardConsentRequired => f.debug_struct("SmartcardConsentRequired").finish(),
             Self::ConsoleConflict { user, state } => f
                 .debug_struct("ConsoleConflict")
                 .field("user", user)

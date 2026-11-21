@@ -105,6 +105,13 @@ pub struct MicClient {
 
 impl MicClient {
     /// Creates the client; capture starts on [`MicClient::enable`].
+    ///
+    /// Capture is permitted only when the consumer explicitly asked for a
+    /// microphone (`MicMode::Device` or `MicMode::Tone`). With the default
+    /// `MicMode::Off` the flag starts closed, so a remote peer announcing
+    /// audio-in support cannot open the local input device on its own; the
+    /// consumer can still grant or revoke it at runtime with
+    /// [`ClientCommand::SetMic`](crate::ClientCommand::SetMic).
     #[must_use]
     pub fn new(mode: MicMode, factory: Option<MicFactory>, clock_start: Instant) -> Self {
         Self {
@@ -113,7 +120,7 @@ impl MicClient {
             clock_start,
             rx: None,
             spec: None,
-            allowed: true,
+            allowed: mode != MicMode::Off,
         }
     }
 

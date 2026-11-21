@@ -27,6 +27,16 @@ pub enum ClientCommand {
     /// still requires the server's `AudioInConfig` announcement and a
     /// configured [`crate::mic::MicMode`].
     SetMic(bool),
+    /// Grants or revokes webcam capture consent (§18.78). The camera
+    /// stays closed until this command says otherwise: a remote peer's
+    /// `WebcamStart` alone never opens it. Revoking stops the capture
+    /// thread and releases the device.
+    SetWebcam(bool),
+    /// Answers a `WebcamConsentRequired` query (§18.78): the peer asked
+    /// for the camera and the consumer may now allow or refuse it. `true`
+    /// opens the camera, `false` keeps it closed (the peer is told the
+    /// channel is unavailable).
+    WebcamConsent(bool),
     /// The local clipboard changed (M8); the session announces the new
     /// content to the server, which pulls it on demand.
     ClipboardChanged(String),
@@ -78,6 +88,12 @@ pub enum ClientCommand {
     /// connect time from [`crate::ClientConfig::smartcard`], so toggling
     /// afterwards does not change what the server believes.
     SmartcardEnable(bool),
+    /// Grants or revokes the local consent to use the user's smartcard
+    /// (§18.78). The card is never touched before the consumer grants it:
+    /// a remote peer's smartcard requests are answered
+    /// `SCARD_E_NO_SERVICE` until then. Revoking stops the dispatcher and
+    /// releases the card for the rest of the session.
+    SmartcardConsent(bool),
     /// Asks the server to lock the remote session (§18.50): the GUI maps
     /// Ctrl+Alt+Shift+L to this because Win+L is always grabbed by the local OS.
     LockRemote,

@@ -249,9 +249,7 @@ impl Reassembler {
             // dropped so the receiver asks for a keyframe.
             let reservation = fragment_payload_max() * count as usize;
             while self.tracked_bytes + reservation > MAX_TRACKED_BYTES {
-                let Some((&oldest, _)) =
-                    self.partials.iter().min_by_key(|(_, p)| p.touched)
-                else {
+                let Some((&oldest, _)) = self.partials.iter().min_by_key(|(_, p)| p.touched) else {
                     break;
                 };
                 let evicted = self.partials.remove(&oldest).expect("key from iter");

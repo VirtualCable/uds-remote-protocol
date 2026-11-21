@@ -148,6 +148,39 @@ fn candidate_paths() -> Vec<PathBuf> {
     paths
 }
 
+/// Loads a library by bare name using the OS loader's *restricted* search
+/// path, never the default one.
+///
+/// `libloading::Library::new(name)` maps to `LoadLibraryExW(name, 0, 0)`,
+/// whose flag-less search order includes the current working directory and
+/// every `PATH` entry. Both are attacker-writable in common deployments (a
+/// client launched from a Downloads folder, a service whose `PATH` was
+/// extended), so a planted `openh264.dll` would run with our process's
+/// privileges. Restricting the search to the executable's own directory and
+/// the system directory removes the working directory and `PATH` from the
+/// search entirely.
+///
+/// On non-Windows targets the flag is unavailable, so the call falls back to
+/// the platform loader (there the equivalent risk is `LD_LIBRARY_PATH`).
+fn load_restricted(name: &str) -> std::result::Result<libloading::Library, libloading::Error> {
+    #[cfg(target_os = "windows")]
+    {
+        use libloading::os::windows::Library as OsLibrary;
+        // SAFETY: the flags only restrict *where* the loader looks; the
+        // library's own initialisation runs either way (same contract as
+        // `Library::new`).
+        let flags = libloading::os::windows::LOAD_LIBRARY_SEARCH_APPLICATION_DIR
+            | libloading::os::windows::LOAD_LIBRARY_SEARCH_SYSTEM32;
+        let os = unsafe { OsLibrary::load_with_flags(name, flags) }?;
+        Ok(libloading::Library::from(os))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // SAFETY: same contract as `Library::new`.
+        unsafe { libloading::Library::new(name) }
+    }
+}
+
 fn load_api() -> Option<Arc<OpenH264Api>> {
     let mut lib = None;
     for path in candidate_paths() {
@@ -164,9 +197,9 @@ fn load_api() -> Option<Arc<OpenH264Api>> {
     }
     if lib.is_none() {
         for &name in LIB_NAMES {
-            match unsafe { libloading::Library::new(name) } {
+            match load_restricted(name) {
                 Ok(l) => {
-                    tracing::info!("OpenH264 loaded from system path: {name}");
+                    tracing::info!("OpenH264 loaded from restricted system path: {name}");
                     lib = Some(l);
                     break;
                 }

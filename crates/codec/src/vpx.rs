@@ -489,7 +489,10 @@ impl VideoDecoder for VpxDecoder {
             // before any plane is materialized (the init-time cfg cap is
             // the primary defense, but a backend quirk must never turn
             // attacker-declared dimensions into host allocations).
-            if w == 0 || h == 0 || w > crate::video::MAX_DECODE_DIM || h > crate::video::MAX_DECODE_DIM
+            if w == 0
+                || h == 0
+                || w > crate::video::MAX_DECODE_DIM
+                || h > crate::video::MAX_DECODE_DIM
             {
                 return Err(CodecError::Malformed);
             }

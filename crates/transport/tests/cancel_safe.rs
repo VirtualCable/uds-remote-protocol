@@ -22,6 +22,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 use transport::{EncryptedStream, ReliableTransport, TransportError};
 
 /// Fixed test ticket.
+/// Per-session salt (the server sends a fresh one per handshake).
+fn test_salt() -> [u8; protocol::crypt::consts::SESSION_SALT_LENGTH] {
+    [0x11; protocol::crypt::consts::SESSION_SALT_LENGTH]
+}
+
 fn test_ticket() -> [u8; TICKET_LENGTH] {
     [0x42; TICKET_LENGTH]
 }
@@ -61,7 +66,8 @@ fn stream_pair() -> (
     EncryptedStream<DuplexTransport>,
 ) {
     let (a, b) = tokio::io::duplex(4096);
-    let keys = protocol::crypt::derive_session_keys(&test_ticket(), &test_key()).expect("keys");
+    let keys = protocol::crypt::derive_session_keys(&test_ticket(), &test_salt(), &test_key())
+        .expect("keys");
     let client = EncryptedStream::new(DuplexTransport(a), &keys.c2s, &keys.s2c);
     let server = EncryptedStream::new(DuplexTransport(b), &keys.s2c, &keys.c2s);
     (client, server)

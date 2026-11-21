@@ -28,10 +28,21 @@ pub const TAG_FRAME: u8 = 0;
 /// Input tag (agent → helper): payload is an encoded `InputMessage`.
 pub const TAG_INPUT: u8 = 1;
 
-/// Pipe DACL: SYSTEM and Administrators full access, Creator/Owner full
-/// access (the agent user). Nobody else can connect.
+/// Pipe DACL: SYSTEM and Administrators full access.
+///
+/// The legitimate clients of all three pipes are SYSTEM processes spawned
+/// by the service (the secure-desktop helper on the Winlogon desktop and
+/// the input injector on the Default desktop), so `SY` alone covers them.
+///
+/// The agent creates these pipes with the *interactive user's* token, so a
+/// `CO` (Creator Owner) ACE would resolve to that user — granting every
+/// other process of the session full access to a privileged pipe. That was
+/// exploitable: the pipe names are guessable (`\\.\pipe\UDSRP-<kind>-<sid>`
+/// with a small integer session id) and `nMaxInstances` is 1, so a local
+/// unprivileged process could connect first and take the single instance
+/// away from the SYSTEM client.
 #[cfg(all(windows, feature = "windows-capture"))]
-const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;CO)";
+const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
 
 /// Frames pipe name (helper → agent) for a console session id.
 #[must_use]
@@ -117,6 +128,12 @@ pub fn encode_frame(width: u32, height: u32, bgra: &[u8]) -> Vec<u8> {
 }
 
 /// Decodes a frame message payload; stride is width*4 by construction.
+///
+/// The geometry comes off the pipe, so the size arithmetic is CHECKED:
+/// `width * height * 4` overflows for large dimensions, and in a debug
+/// build that panics (killing the agent thread), while in a release build
+/// it wraps to a small value and the frame is accepted with a geometry
+/// that does not match the pixels at all.
 pub fn decode_frame(payload: &[u8]) -> Result<(u32, u32, &[u8])> {
     if payload.len() < 8 {
         bail!("frame payload too short");
@@ -124,7 +141,10 @@ pub fn decode_frame(payload: &[u8]) -> Result<(u32, u32, &[u8])> {
     let width = u32::from_le_bytes(payload[0..4].try_into().expect("4 bytes"));
     let height = u32::from_le_bytes(payload[4..8].try_into().expect("4 bytes"));
     let pixels = &payload[8..];
-    let expected = width as usize * height as usize * 4;
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| anyhow::anyhow!("frame geometry overflows: {width}x{height}"))?;
     anyhow::ensure!(
         pixels.len() == expected,
         "frame size mismatch: {expected} expected"
@@ -146,8 +166,8 @@ pub mod win {
     use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
     use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, OPEN_EXISTING,
-        PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, WriteFile,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_GENERIC_READ,
+        FILE_GENERIC_WRITE, OPEN_EXISTING, PIPE_ACCESS_INBOUND, PIPE_ACCESS_OUTBOUND, WriteFile,
     };
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
@@ -213,7 +233,7 @@ pub mod win {
             let handle = unsafe {
                 CreateNamedPipeW(
                     PCWSTR(wide.as_ptr()),
-                    access,
+                    access | FILE_FLAG_FIRST_PIPE_INSTANCE,
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                     1,
                     64 * 1024,
@@ -364,6 +384,31 @@ mod tests {
         let wire = 0u32.to_le_bytes();
         let mut cursor = std::io::Cursor::new(wire.to_vec());
         assert!(read_msg(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn frame_geometry_overflow_is_rejected() {
+        // Regression: `width * height * 4` overflowed, panicking in debug
+        // builds and wrapping in release builds (where the frame was then
+        // accepted with a geometry that did not match the pixels).
+        for (width, height) in [
+            (1u32 << 31, 1u32 << 31),
+            (u32::MAX, u32::MAX),
+            (1u32 << 31, 2),
+            (0x8000_0000, 0x8000_0000),
+        ] {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&width.to_le_bytes());
+            payload.extend_from_slice(&height.to_le_bytes());
+            assert!(
+                decode_frame(&payload).is_err(),
+                "geometry {width}x{height} must be rejected"
+            );
+        }
+        // A legitimate frame still decodes.
+        let pixels = vec![7u8; 2 * 3 * 4];
+        let payload = encode_frame(2, 3, &pixels);
+        assert_eq!(decode_frame(&payload).unwrap().0, 2);
     }
 
     #[test]

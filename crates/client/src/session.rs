@@ -247,11 +247,17 @@ impl Session {
         // for its `SessionReady` (or an early `UdpOffer` from a lab agent,
         // which doubles as the ready signal), answering conflict asks.
         let early_offer = self.pre_session(&mut stream).await?;
+        // The datagram leg derives its keys and its session token from the
+        // SAME per-session salt as the stream (§6.1).
+        let session_salt = *stream
+            .session_salt()
+            .ok_or_else(|| anyhow::anyhow!("no session salt from the server"))?;
         let leg = match early_offer {
             Some((port, token)) => {
                 udp_probe(
                     self.config.addr.ip(),
                     &self.config.ticket,
+                    &session_salt,
                     &self.config.key,
                     port,
                     token,
@@ -827,6 +833,30 @@ impl Session {
                 stream.send(channel::INPUT, &buf[..n]).await?;
             }
             Ok(ClientCommand::SetMic(on)) => core.mic.set_allowed(on),
+            Ok(ClientCommand::SetWebcam(on)) => {
+                // §18.78: local consent for the camera. Revoking stops the
+                // capture thread and releases the device.
+                core.cam.set_allowed(on);
+                let _ = emit(
+                    &core.events,
+                    ClientEvent::WebcamActive {
+                        active: on && core.cam.streaming(),
+                    },
+                );
+            }
+            Ok(ClientCommand::WebcamConsent(allow)) => {
+                // The consumer answered a `WebcamConsentRequired` query.
+                core.cam.set_allowed(allow);
+                if allow {
+                    core.cam.start();
+                }
+                let _ = emit(
+                    &core.events,
+                    ClientEvent::WebcamActive {
+                        active: allow && core.cam.streaming(),
+                    },
+                );
+            }
             Ok(ClientCommand::ClipboardChanged(text)) => {
                 // Local clipboard changed (M8): announce it; the server will
                 // pull the text if it wants it.
@@ -867,6 +897,11 @@ impl Session {
             }
             Ok(ClientCommand::StorageAbort { transfer_id }) => core.storage.abort(transfer_id),
             Ok(ClientCommand::SmartcardEnable(on)) => core.set_smartcard(on),
+            Ok(ClientCommand::SmartcardConsent(allow)) => {
+                // §18.78: the consumer decides whether the remote peer may
+                // use the user's card.
+                core.set_smartcard_consent(allow);
+            }
             Ok(ClientCommand::LockRemote) => {
                 info!("remote lock requested (Ctrl+Alt+Shift+L)");
                 stream
@@ -1201,10 +1236,7 @@ impl DecodeWorker {
         // reference decodes "fine" into garbage), so drop them until the
         // keyframe lands. Self-contained codecs carry no chain; they decode.
         if self.recovery_awaiting.load(Ordering::Relaxed)
-            && matches!(
-                codec_type,
-                VideoCodecType::Vp9 | VideoCodecType::H264
-            )
+            && matches!(codec_type, VideoCodecType::Vp9 | VideoCodecType::H264)
             && !codec::packet_is_keyframe(codec_type, &payload)
         {
             self.chain_dropped.fetch_add(1, Ordering::Relaxed);
@@ -1441,6 +1473,9 @@ struct Core {
     storage: crate::storage::StorageClient,
     /// Smartcard request dispatcher (§17); `None` while disabled.
     smartcard: Option<crate::smartcard::SmartcardService>,
+    /// §18.78: local consent for using the user's smartcard. Closed until
+    /// the consumer grants it with `ClientCommand::SmartcardConsent(true)`.
+    smartcard_consent: bool,
     /// Injected PC/SC backend, kept to restart the dispatcher on
     /// `ClientCommand::SmartcardEnable`.
     smartcard_backend:
@@ -1503,6 +1538,7 @@ impl Core {
             clip_out: Vec::new(),
             storage: crate::storage::StorageClient::new(),
             smartcard,
+            smartcard_consent: false,
             scard_tx,
             scard_rx,
             scard_out: Vec::new(),
@@ -1527,6 +1563,26 @@ impl Core {
                 self.smartcard = None;
             }
             _ => {}
+        }
+    }
+
+    /// §18.78: the smartcard is the user's identity device. A remote peer
+    /// asking for it is not consent — the consumer must grant it with
+    /// `ClientCommand::SmartcardConsent(true)` before any APDU reaches the
+    /// card. The gate is checked in `handle_packet`, in front of the
+    /// dispatcher.
+    fn set_smartcard_consent(&mut self, allow: bool) {
+        if self.smartcard_consent == allow {
+            return;
+        }
+        self.smartcard_consent = allow;
+        if allow {
+            info!("smartcard use granted by the consumer");
+        } else {
+            info!("smartcard use revoked by the consumer");
+            // Drop the dispatcher too: a revocation must stop the card
+            // being used even mid-session.
+            self.smartcard = None;
         }
     }
 
@@ -1648,9 +1704,18 @@ impl Core {
             // the server side.
             match protocol::SmartcardMessage::decode(packet) {
                 Ok(msg) if msg.is_request() => {
-                    if let Some(service) = &self.smartcard {
+                    // §18.78: the smartcard is the user's identity device.
+                    // A remote peer asking for it is not consent: without
+                    // the consumer's grant the card is never touched and
+                    // the request is answered as if no service existed.
+                    if let Some(service) = &self.smartcard
+                        && self.smartcard_consent
+                    {
                         service.enqueue(msg);
                     } else {
+                        if self.smartcard_consent {
+                            let _ = emit(&self.events, ClientEvent::SmartcardConsentRequired);
+                        }
                         self.scard_out.push(protocol::SmartcardMessage::Error {
                             request_id: msg.request_id(),
                             code: crate::integrations::smartcard::SCARD_E_NO_SERVICE,
@@ -1800,11 +1865,25 @@ impl Core {
             }
             Ok(ControlMessage::WebcamStart) => {
                 info!("webcam stream requested by server");
-                self.cam.start();
+                // §18.78: the camera is the user's device. A remote peer
+                // asking for the stream is not consent — the camera stays
+                // closed until the consumer answers
+                // `ClientCommand::WebcamConsent(true)`.
+                if self.cam.allowed() {
+                    self.cam.start();
+                    let _ = emit(&self.events, ClientEvent::WebcamActive { active: true });
+                } else {
+                    let (width, height, fps) = self.cam.requested_spec();
+                    let _ = emit(
+                        &self.events,
+                        ClientEvent::WebcamConsentRequired { width, height, fps },
+                    );
+                }
             }
             Ok(ControlMessage::WebcamStop) => {
                 info!("webcam stream stopped by server");
                 self.cam.stop();
+                let _ = emit(&self.events, ClientEvent::WebcamActive { active: false });
             }
             Ok(ControlMessage::WebcamRequestKeyframe) => {
                 // §18.57: the server lost webcam fragments; resync the VP9
