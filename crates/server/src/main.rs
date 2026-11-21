@@ -135,6 +135,10 @@ struct Args {
     /// attempt) or "software" (force libvpx). Explicit choices fall back to
     /// the chain with a warning. Only meaningful with `--preset ladder`.
     encoder: String,
+    /// Name of the global secure-desktop event to mirror (M9), from the
+    /// service's agent-config frame; empty disables the mirroring (dev
+    /// mode without a service).
+    secure_event: String,
     /// Hardening caps against untrusted clients (`[limits]`, §18.78).
     limits: server::config::LimitsConfig,
 }
@@ -178,6 +182,7 @@ fn parse_args() -> Result<Args> {
         handoff: None,
         quality: server::config::QualityConfig::default(),
         encoder: String::new(),
+        secure_event: String::new(),
         limits: server::config::LimitsConfig::default(),
     };
     let mut key_seen = false;
@@ -212,6 +217,7 @@ fn parse_args() -> Result<Args> {
             };
             args.preset = config.preset;
             args.encoder = config.encoder;
+            args.secure_event = config.secure_event;
             args.ladder = config.ladder;
             args.fps_adapt = config.fps_adapt;
             // Broker-originated tuning is untrusted input (§18.78): the
@@ -2571,7 +2577,9 @@ async fn serve_stream<T: ReliableTransport + 'static>(
     // this; the synthetic source never does.
     #[cfg(all(windows, feature = "windows-capture"))]
     let (_secure_watch, mut secure_rx) = if args.source == "dxgi" {
-        let (watch, rx) = server::secure_watch::SecureWatch::spawn();
+        let (watch, rx) = server::secure_watch::SecureWatch::spawn(
+            (!args.secure_event.is_empty()).then(|| args.secure_event.clone()),
+        );
         (Some(watch), Some(rx))
     } else {
         (None, None)
@@ -4570,6 +4578,7 @@ mod encoder_policy_tests {
             handoff: None,
             quality: server::config::QualityConfig::default(),
             encoder: String::new(),
+            secure_event: String::new(),
             limits: server::config::LimitsConfig::default(),
         }
     }

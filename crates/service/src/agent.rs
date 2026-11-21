@@ -17,6 +17,7 @@
 //! remote session and cleans up everything ephemeral.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -66,7 +67,29 @@ pub const SESSION_MUTEX: &str = r"Global\UDSRP-Session";
 /// Named event (manual-reset, global namespace) the session agent sets while
 /// a secure desktop owns the console (§18.41). The watch loop spawns the
 /// secure helper while set and kills it when cleared.
-pub(crate) const SECURE_EVENT: &str = r"Global\UDSRP-SecureDesktop";
+///
+/// The name carries a random suffix generated once per service run and
+/// handed to the agent over its (trusted) configuration pipe: a fixed,
+/// predictable name could be signalled by ANY local user (the object is in
+/// the global namespace and the console user legitimately needs
+/// `EVENT_MODIFY_STATE`), letting them forge the secure-desktop state and
+/// starve the helper of transitions.
+pub(crate) fn secure_event_name() -> &'static str {
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| {
+        let mut suffix = [0u8; 16];
+        if getrandom::fill(&mut suffix).is_err() {
+            // Practically unreachable; a weak name still beats no event,
+            // and the pipe DACL keeps the helper's input path safe.
+            return format!("{SECURE_EVENT_PREFIX}-fallback");
+        }
+        format!("{SECURE_EVENT_PREFIX}-{}", protocol::hex::encode(&suffix))
+    })
+}
+
+/// Prefix of the secure-desktop event name (the random suffix makes the
+/// full name unguessable; see [`secure_event_name`]).
+const SECURE_EVENT_PREFIX: &str = r"Global\UDSRP-SecureDesktop";
 
 /// Grace period after spawning before the mutex must be observable.
 const MUTEX_GRACE: Duration = Duration::from_secs(15);
@@ -756,7 +779,7 @@ pub(crate) fn ensure_secure_event() -> Option<OwnedHandle> {
         lpSecurityDescriptor: sec_desc.as_mut() as *mut _ as *mut core::ffi::c_void,
         bInheritHandle: BOOL(0),
     };
-    let name: Vec<u16> = SECURE_EVENT
+    let name: Vec<u16> = secure_event_name()
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();

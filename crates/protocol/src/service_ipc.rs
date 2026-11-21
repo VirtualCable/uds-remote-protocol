@@ -82,7 +82,7 @@ pub const MAX_SOCKET_INFO_LEN: usize = 4096;
 /// the decoder both derive their field count from this constant, so the
 /// two can never drift apart (the length arithmetic used to budget 9
 /// prefixes while 10 were written).
-const STRING_FIELDS: usize = 10;
+const STRING_FIELDS: usize = 11;
 
 /// Minimum frame size: version + key + ticket + the u16 string lengths
 /// (all strings empty) + fixed resolution + flags + limits + the handoff
@@ -150,6 +150,10 @@ pub struct AgentConfig {
     /// Store software MFT is never used — it measured clearly worse than
     /// our tuned libvpx. No/failing HW MFT falls back with a warning.
     pub encoder: String,
+    /// Name of the global secure-desktop event the agent mirrors (M9).
+    /// Random per service run (a fixed name is forgeable by any local
+    /// user); empty disables the mirroring (dev mode without a service).
+    pub secure_event: String,
     /// Server-fixed console resolution (§18.37); `(0, 0)` means the agent
     /// approaches the client's preferred mode instead.
     pub fixed_resolution: (u32, u32),
@@ -239,6 +243,7 @@ pub fn encode_agent_config(config: &AgentConfig) -> Vec<u8> {
         &config.mic_sink,
         &config.quality,
         &config.encoder,
+        &config.secure_event,
     ];
     for s in strings {
         let len = u16::try_from(s.len()).expect("string fields are bounded well below u16::MAX");
@@ -371,6 +376,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         mic_sink,
         quality,
         encoder,
+        secure_event,
     ] = strings;
     Ok(AgentConfig {
         key,
@@ -385,6 +391,7 @@ pub fn decode_agent_config(buf: &[u8]) -> Result<AgentConfig, DecodeError> {
         mic_sink: mic_sink.to_owned(),
         quality: quality.to_owned(),
         encoder: encoder.to_owned(),
+        secure_event: secure_event.to_owned(),
         fixed_resolution,
         allow_lock,
         wallpaper_off,
@@ -414,6 +421,7 @@ mod tests {
             mic_sink: String::new(),
             quality: "wc=0.2,wcpu=0.3,wbw=0.5,levels=1.0:30:1.0:80:8;0.5:30:0.75:75:8".to_owned(),
             encoder: "auto".to_owned(),
+            secure_event: r"Global\UDSRP-SecureDesktop-deadbeef".to_owned(),
             fixed_resolution: (1280, 720),
             allow_lock: true,
             wallpaper_off: false,

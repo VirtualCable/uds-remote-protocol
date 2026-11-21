@@ -332,6 +332,7 @@ pub(crate) async fn complete_session(
             mic_sink: standalone.mic_sink.clone(),
             quality: standalone.quality.clone(),
             encoder: standalone.encoder.clone(),
+            secure_event: crate::agent::secure_event_name().to_owned(),
             fixed_resolution: standalone.fixed_resolution.unwrap_or((0, 0)),
             allow_lock: standalone.allow_lock,
             wallpaper_off: standalone.wallpaper_off,
@@ -374,6 +375,7 @@ pub(crate) async fn complete_session(
                 quality: String::new(),
                 // The broker payload has no encoder policy yet; auto.
                 encoder: String::new(),
+                secure_event: crate::agent::secure_event_name().to_owned(),
                 // §18.37: a fixed display policy in the ticket wins over the
                 // client's preference; otherwise the agent approaches it.
                 fixed_resolution: grant

@@ -60,9 +60,6 @@ pub struct PqProvider {
     ticket_url: String,
     /// Actor token (authenticates the service against `actor/v3`).
     actor_token: String,
-    /// Ephemeral KEM keypair for decrypting the ticket response.
-    kem_public_key: [u8; KEM_PUBLIC_KEY_SIZE],
-    kem_private_key: [u8; KEM_PRIVATE_KEY_SIZE],
 }
 
 /// KEM-encrypted response envelope payload (`CryptoManager.encrypted_dict`).
@@ -96,23 +93,54 @@ struct BrokerRemote {
 impl PqProvider {
     /// Builds the provider. `ticket_url` is the full URL of the ticket
     /// endpoint; `actor_token` authenticates us against `actor/v3`.
+    ///
+    /// The endpoint MUST be `https`: the actor token is a long-lived
+    /// credential sent in every request body, and the response carries the
+    /// session PSK. Plain `http` is accepted only in debug builds (local
+    /// development); a release build rejects it, and any other scheme is
+    /// always rejected.
     pub fn new(ticket_url: &str, actor_token: &str, verify_ssl: bool) -> Result<Self> {
+        let url = reqwest::Url::parse(ticket_url).context("broker.url is not a valid URL")?;
+        match url.scheme() {
+            "https" => {}
+            "http" if cfg!(debug_assertions) => {
+                warn!(
+                    url = ticket_url,
+                    "broker over plain http (debug build only)"
+                );
+            }
+            scheme => {
+                bail!(
+                    "broker.url must use https (got {scheme}://); plain http is only accepted in debug builds"
+                );
+            }
+        }
+        if !verify_ssl {
+            // Loud, on purpose: disabling certificate validation exposes
+            // the long-lived actor token and the session PSK to anyone on
+            // the path, exactly like plain http would.
+            warn!(
+                "broker verify_ssl = false: TLS certificate validation is DISABLED; \
+                 the actor token and session keys are NOT protected from interception"
+            );
+        }
         let client = reqwest::Client::builder()
             .user_agent(concat!("uds-rp/", env!("CARGO_PKG_VERSION")))
             .danger_accept_invalid_certs(!verify_ssl)
+            // Never follow redirects: a 302 from the broker would replay the
+            // actor token (sent in the request body) to another origin,
+            // possibly a plain-http one.
+            .redirect(reqwest::redirect::Policy::none())
             // The broker may be buggy or wedged (§18.78): an unbounded wait
             // would stall the session handshake forever, so bound it.
             .timeout(std::time::Duration::from_secs(10))
             .connect_timeout(std::time::Duration::from_secs(5))
             .build()
             .context("building the broker HTTP client")?;
-        let (kem_private_key, kem_public_key) = kem_keypair();
         Ok(Self {
             client,
             ticket_url: ticket_url.trim_end_matches('/').to_string(),
             actor_token: actor_token.to_string(),
-            kem_public_key,
-            kem_private_key,
         })
     }
 
@@ -146,9 +174,11 @@ impl PqProvider {
             .unwrap_or(serde_json::Value::Null))
     }
 
-    /// Decrypts a KEM-encrypted ticket response with our private key.
+    /// Decrypts a KEM-encrypted ticket response with the ephemeral private
+    /// key of this request.
     fn decrypt_response(
         &self,
+        kem_private_key: &[u8; KEM_PRIVATE_KEY_SIZE],
         ticket: &str,
         encrypted: &EncryptedTicketResponse,
     ) -> Result<BrokerTicketResponse> {
@@ -157,7 +187,7 @@ impl PqProvider {
             .context("decoding the KEM ciphertext")?
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid KEM ciphertext size"))?;
-        let private_key = MlKem768PrivateKey::from(&self.kem_private_key);
+        let private_key = MlKem768PrivateKey::from(kem_private_key);
         let ciphertext = MlKem768Ciphertext::from(&kem_ciphertext);
         // Decapsulation always succeeds (implicit rejection); a tampered
         // ciphertext simply yields a wrong secret and the AES-GCM below
@@ -192,18 +222,22 @@ impl ConnectionProvider for PqProvider {
                 && ticket.bytes().all(|b| b.is_ascii_alphanumeric()),
             "not a broker ticket (standalone ticket in pq mode?)"
         );
+        // A fresh ML-KEM-768 keypair per request: the public key is only
+        // useful for this one exchange, and no long-lived private key ever
+        // sits in the provider's state.
+        let (kem_private_key, kem_public_key) = kem_keypair();
         let result = self
             .post(&serde_json::json!({
                 "token": self.actor_token,
                 "ticket": ticket,
                 "command": "start",
                 "ip": client_ip,
-                "kem_kyber_key": general_purpose::STANDARD.encode(self.kem_public_key),
+                "kem_kyber_key": general_purpose::STANDARD.encode(kem_public_key),
             }))
             .await?;
         let encrypted: EncryptedTicketResponse = serde_json::from_value(result)
             .context("broker response is not a KEM-encrypted payload")?;
-        let response = self.decrypt_response(&ticket, &encrypted)?;
+        let response = self.decrypt_response(&kem_private_key, &ticket, &encrypted)?;
 
         let key: [u8; 32] = protocol::hex::decode(&response.shared_secret)
             .context("invalid shared_secret in the broker response")?;
@@ -331,8 +365,25 @@ mod tests {
     }
 
     #[test]
+    fn rejects_a_plain_http_broker_url_in_release() {
+        // The actor token travels in every request body and the response
+        // carries the session PSK: plain http is only tolerated in debug
+        // builds (local development).
+        let result = PqProvider::new("http://broker.example.com/ticket", "tok", true);
+        if cfg!(debug_assertions) {
+            assert!(result.is_ok());
+        } else {
+            assert!(result.is_err());
+        }
+        // Other schemes are always rejected.
+        assert!(PqProvider::new("ftp://broker.example.com/ticket", "tok", true).is_err());
+        assert!(PqProvider::new("not a url", "tok", true).is_err());
+    }
+
+    #[test]
     fn decrypt_response_roundtrip() {
         let provider = provider();
+        let (private_key, public_key) = kem_keypair();
         let ticket = "a".repeat(protocol::TICKET_LENGTH);
         let plaintext = serde_json::json!({
             "remotes": [{"host": "127.0.0.1", "port": 0, "extra": {"version": 1}}],
@@ -340,12 +391,10 @@ mod tests {
             "shared_secret": "ab".repeat(32),
             "enable_udp": true,
         });
-        let encrypted = encrypt_response(
-            &provider.kem_public_key,
-            &ticket,
-            plaintext.to_string().as_bytes(),
-        );
-        let response = provider.decrypt_response(&ticket, &encrypted).unwrap();
+        let encrypted = encrypt_response(&public_key, &ticket, plaintext.to_string().as_bytes());
+        let response = provider
+            .decrypt_response(&private_key, &ticket, &encrypted)
+            .unwrap();
         assert_eq!(response.notify, "notify-ticket");
         assert_eq!(response.shared_secret, "ab".repeat(32));
         assert_eq!(response.remotes.len(), 1);
@@ -354,13 +403,18 @@ mod tests {
     #[test]
     fn decrypt_response_rejects_a_wrong_ticket_salt() {
         let provider = provider();
+        let (private_key, public_key) = kem_keypair();
         let ticket = "a".repeat(protocol::TICKET_LENGTH);
         let plaintext = br#"{"remotes": [], "notify": "", "shared_secret": ""}"#;
-        let encrypted = encrypt_response(&provider.kem_public_key, &ticket, plaintext);
+        let encrypted = encrypt_response(&public_key, &ticket, plaintext);
         // AAD-less GCM, but the key derives from the ticket: decrypting
         // with another ticket must fail authentication.
         let other = "b".repeat(protocol::TICKET_LENGTH);
-        assert!(provider.decrypt_response(&other, &encrypted).is_err());
+        assert!(
+            provider
+                .decrypt_response(&private_key, &other, &encrypted)
+                .is_err()
+        );
     }
 
     #[test]

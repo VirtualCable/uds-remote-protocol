@@ -19,10 +19,6 @@ use crate::secure_helper::secure_desktop_active;
 /// Poll cadence for the input-desktop watch.
 const POLL: Duration = Duration::from_millis(250);
 
-/// Global event mirrored to the service (same literal as
-/// `service::agent::SECURE_EVENT`; the crates do not depend on each other).
-const SECURE_EVENT: &str = r"Global\UDSRP-SecureDesktop";
-
 /// Running watch; dropping it stops the thread (bounded by [`POLL`]).
 pub struct SecureWatch {
     stop: Arc<AtomicBool>,
@@ -32,13 +28,19 @@ pub struct SecureWatch {
 impl SecureWatch {
     /// Spawns the watch thread. Transitions arrive as `bool` (true = secure
     /// desktop active) on the returned channel.
-    pub fn spawn() -> (Self, tokio::sync::mpsc::UnboundedReceiver<bool>) {
+    ///
+    /// `event_name` is the global secure-desktop event to mirror the state
+    /// to (its name is random per service run and arrives in the agent
+    /// config frame, so only the service and this agent know it). `None`
+    /// (or empty) disables the mirroring: detection still works locally,
+    /// just no helper is spawned (dev mode without a service).
+    pub fn spawn(event_name: Option<String>) -> (Self, tokio::sync::mpsc::UnboundedReceiver<bool>) {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let handle = std::thread::Builder::new()
             .name("secure-watch".into())
-            .spawn(move || watch_loop(tx, thread_stop));
+            .spawn(move || watch_loop(tx, thread_stop, event_name));
         let handle = match handle {
             Ok(h) => Some(h),
             Err(e) => {
@@ -59,8 +61,14 @@ impl Drop for SecureWatch {
     }
 }
 
-fn watch_loop(tx: tokio::sync::mpsc::UnboundedSender<bool>, stop: Arc<AtomicBool>) {
-    let event = open_secure_event();
+fn watch_loop(
+    tx: tokio::sync::mpsc::UnboundedSender<bool>,
+    stop: Arc<AtomicBool>,
+    event_name: Option<String>,
+) {
+    let event = event_name
+        .filter(|name| !name.is_empty())
+        .and_then(|name| open_secure_event(&name));
     let mut active = secure_desktop_active();
     let _ = tx.send(active);
     mirror_event(&event, active);
@@ -91,13 +99,13 @@ fn watch_loop(tx: tokio::sync::mpsc::UnboundedSender<bool>, stop: Arc<AtomicBool
     }
 }
 
-/// Opens the global event (created by the service) for set/reset. `None`
-/// outside orchestrated runs (dev server without a service): detection still
-/// works locally, just no helper is spawned.
-fn open_secure_event() -> Option<windows::Win32::Foundation::HANDLE> {
+/// Opens the global event (created by the service, random-suffixed name)
+/// for set/reset. `None` when the event does not exist (dev server without
+/// a service): detection still works locally, just no helper is spawned.
+fn open_secure_event(name: &str) -> Option<windows::Win32::Foundation::HANDLE> {
     use windows::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW};
     use windows::core::HSTRING;
-    let name = HSTRING::from(SECURE_EVENT);
+    let name = HSTRING::from(name);
     // SAFETY: `name` is null-terminated and outlives the call.
     match unsafe { OpenEventW(EVENT_MODIFY_STATE, false, &name) } {
         Ok(h) => Some(h),

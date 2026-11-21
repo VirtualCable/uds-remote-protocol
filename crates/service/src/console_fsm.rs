@@ -237,6 +237,7 @@ fn legacy_config() -> protocol::service_ipc::AgentConfig {
         mic_sink: String::new(),
         quality: String::new(),
         encoder: String::new(),
+        secure_event: crate::agent::secure_event_name().to_owned(),
         fixed_resolution: (0, 0),
         allow_lock: false,
         wallpaper_off: false,
