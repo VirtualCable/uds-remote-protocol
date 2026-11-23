@@ -629,8 +629,6 @@ pub struct BrokerConfig {
     /// Full URL of the ticket endpoint (e.g.
     /// `https://broker/uds/rest/actor/v3/ticket/connection`).
     pub url: String,
-    /// Actor token authenticating the service against `actor/v3`.
-    pub token: String,
     /// Verify the broker's TLS certificate (keep `true` in production).
     pub verify_ssl: bool,
 }
@@ -639,7 +637,6 @@ impl Default for BrokerConfig {
     fn default() -> Self {
         Self {
             url: String::new(),
-            token: String::new(),
             verify_ssl: true,
         }
     }
@@ -1033,7 +1030,6 @@ impl ServerConfig {
                 .as_ref()
                 .context("connection_method = \"pq\" requires a [broker] section")?;
             anyhow::ensure!(!broker.url.is_empty(), "broker.url must not be empty");
-            anyhow::ensure!(!broker.token.is_empty(), "broker.token must not be empty");
             bail!("connection_method = \"pq\" is only supported by the service");
         }
         anyhow::ensure!(
@@ -1421,6 +1417,23 @@ video_factor = 1.0
             ..QualityConfig::default()
         };
         assert!(q.validate().is_err(), "lo >= hi must fail");
+    }
+
+    #[test]
+    fn pq_does_not_require_a_static_broker_token() {
+        let config = ServerConfig {
+            connection_method: ConnectionMethod::Pq,
+            shared_key: KEY_HEX.to_string(),
+            broker: Some(BrokerConfig {
+                url: "https://broker.example.com/uds/rest/actor/v3/ticket/connection".to_string(),
+                ..BrokerConfig::default()
+            }),
+            ..ServerConfig::default()
+        };
+
+        let err = config.validated().expect_err("reference server rejects pq");
+
+        assert!(!format!("{err:#}").contains("broker.token"));
     }
 
     #[test]

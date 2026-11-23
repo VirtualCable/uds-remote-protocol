@@ -11,8 +11,8 @@
 //! `https://broker/uds/rest/actor/v3/ticket/connection`), which mirrors
 //! the tunnel ticket contract (plan §18.39):
 //!
-//! - Request: `{token, ticket, command, ip, kem_kyber_key?}` where `token`
-//!   is the actor token and `kem_kyber_key` our ephemeral ML-KEM-768 public
+//! - Request: `{ticket, command, ip, kem_kyber_key?}` where the ticket
+//!   authenticates the connection and `kem_kyber_key` is our ephemeral ML-KEM-768 public
 //!   key (base64). `command` is `start` (validate + consume the ticket) or
 //!   `stop` (session-ended notification, best effort).
 //! - `start` response: the actor REST envelope (`{"result": ..., "error"?
@@ -58,8 +58,6 @@ pub struct PqProvider {
     /// Full URL of the ticket endpoint (e.g.
     /// `https://broker/uds/rest/actor/v3/ticket/connection`).
     ticket_url: String,
-    /// Actor token (authenticates the service against `actor/v3`).
-    actor_token: String,
 }
 
 /// KEM-encrypted response envelope payload (`CryptoManager.encrypted_dict`).
@@ -92,14 +90,13 @@ struct BrokerRemote {
 
 impl PqProvider {
     /// Builds the provider. `ticket_url` is the full URL of the ticket
-    /// endpoint; `actor_token` authenticates us against `actor/v3`.
+    /// endpoint.
     ///
-    /// The endpoint MUST be `https`: the actor token is a long-lived
-    /// credential sent in every request body, and the response carries the
-    /// session PSK. Plain `http` is accepted only in debug builds (local
-    /// development); a release build rejects it, and any other scheme is
-    /// always rejected.
-    pub fn new(ticket_url: &str, actor_token: &str, verify_ssl: bool) -> Result<Self> {
+    /// The endpoint MUST be `https`: each request carries a bearer ticket
+    /// and the response carries the session PSK. Plain `http` is
+    /// accepted only in debug builds (local development); a release build
+    /// rejects it, and any other scheme is always rejected.
+    pub fn new(ticket_url: &str, verify_ssl: bool) -> Result<Self> {
         let url = reqwest::Url::parse(ticket_url).context("broker.url is not a valid URL")?;
         match url.scheme() {
             "https" => {}
@@ -117,18 +114,18 @@ impl PqProvider {
         }
         if !verify_ssl {
             // Loud, on purpose: disabling certificate validation exposes
-            // the long-lived actor token and the session PSK to anyone on
+            // the bearer ticket and the session PSK to anyone on
             // the path, exactly like plain http would.
             warn!(
                 "broker verify_ssl = false: TLS certificate validation is DISABLED; \
-                 the actor token and session keys are NOT protected from interception"
+                 the bearer ticket and session keys are NOT protected from interception"
             );
         }
         let client = reqwest::Client::builder()
             .user_agent(concat!("uds-rp/", env!("CARGO_PKG_VERSION")))
             .danger_accept_invalid_certs(!verify_ssl)
             // Never follow redirects: a 302 from the broker would replay the
-            // actor token (sent in the request body) to another origin,
+            // bearer ticket (sent in the request body) to another origin,
             // possibly a plain-http one.
             .redirect(reqwest::redirect::Policy::none())
             // The broker may be buggy or wedged (§18.78): an unbounded wait
@@ -140,7 +137,6 @@ impl PqProvider {
         Ok(Self {
             client,
             ticket_url: ticket_url.trim_end_matches('/').to_string(),
-            actor_token: actor_token.to_string(),
         })
     }
 
@@ -177,7 +173,6 @@ impl PqProvider {
     /// Decrypts a KEM-encrypted ticket response with the ephemeral private
     /// key of this request.
     fn decrypt_response(
-        &self,
         kem_private_key: &[u8; KEM_PRIVATE_KEY_SIZE],
         ticket: &str,
         encrypted: &EncryptedTicketResponse,
@@ -228,7 +223,6 @@ impl ConnectionProvider for PqProvider {
         let (kem_private_key, kem_public_key) = kem_keypair();
         let result = self
             .post(&serde_json::json!({
-                "token": self.actor_token,
                 "ticket": ticket,
                 "command": "start",
                 "ip": client_ip,
@@ -237,7 +231,7 @@ impl ConnectionProvider for PqProvider {
             .await?;
         let encrypted: EncryptedTicketResponse = serde_json::from_value(result)
             .context("broker response is not a KEM-encrypted payload")?;
-        let response = self.decrypt_response(&kem_private_key, &ticket, &encrypted)?;
+        let response = Self::decrypt_response(&kem_private_key, &ticket, &encrypted)?;
 
         let key: [u8; 32] = protocol::hex::decode(&response.shared_secret)
             .context("invalid shared_secret in the broker response")?;
@@ -262,7 +256,6 @@ impl ConnectionProvider for PqProvider {
         };
         let result = self
             .post(&serde_json::json!({
-                "token": self.actor_token,
                 "ticket": notify,
                 "command": "stop",
                 "ip": "",
@@ -348,15 +341,6 @@ mod tests {
         }
     }
 
-    fn provider() -> PqProvider {
-        PqProvider::new(
-            "https://broker.example.com/uds/rest/actor/v3/ticket/connection",
-            "tok",
-            false,
-        )
-        .unwrap()
-    }
-
     #[test]
     fn kem_keypair_has_the_expected_sizes() {
         let (private_key, public_key) = kem_keypair();
@@ -366,23 +350,22 @@ mod tests {
 
     #[test]
     fn rejects_a_plain_http_broker_url_in_release() {
-        // The actor token travels in every request body and the response
+        // The bearer ticket travels in every request body and the response
         // carries the session PSK: plain http is only tolerated in debug
         // builds (local development).
-        let result = PqProvider::new("http://broker.example.com/ticket", "tok", true);
+        let result = PqProvider::new("http://broker.example.com/ticket", true);
         if cfg!(debug_assertions) {
             assert!(result.is_ok());
         } else {
             assert!(result.is_err());
         }
         // Other schemes are always rejected.
-        assert!(PqProvider::new("ftp://broker.example.com/ticket", "tok", true).is_err());
-        assert!(PqProvider::new("not a url", "tok", true).is_err());
+        assert!(PqProvider::new("ftp://broker.example.com/ticket", true).is_err());
+        assert!(PqProvider::new("not a url", true).is_err());
     }
 
     #[test]
     fn decrypt_response_roundtrip() {
-        let provider = provider();
         let (private_key, public_key) = kem_keypair();
         let ticket = "a".repeat(protocol::TICKET_LENGTH);
         let plaintext = serde_json::json!({
@@ -392,9 +375,7 @@ mod tests {
             "enable_udp": true,
         });
         let encrypted = encrypt_response(&public_key, &ticket, plaintext.to_string().as_bytes());
-        let response = provider
-            .decrypt_response(&private_key, &ticket, &encrypted)
-            .unwrap();
+        let response = PqProvider::decrypt_response(&private_key, &ticket, &encrypted).unwrap();
         assert_eq!(response.notify, "notify-ticket");
         assert_eq!(response.shared_secret, "ab".repeat(32));
         assert_eq!(response.remotes.len(), 1);
@@ -402,7 +383,6 @@ mod tests {
 
     #[test]
     fn decrypt_response_rejects_a_wrong_ticket_salt() {
-        let provider = provider();
         let (private_key, public_key) = kem_keypair();
         let ticket = "a".repeat(protocol::TICKET_LENGTH);
         let plaintext = br#"{"remotes": [], "notify": "", "shared_secret": ""}"#;
@@ -410,11 +390,7 @@ mod tests {
         // AAD-less GCM, but the key derives from the ticket: decrypting
         // with another ticket must fail authentication.
         let other = "b".repeat(protocol::TICKET_LENGTH);
-        assert!(
-            provider
-                .decrypt_response(&private_key, &other, &encrypted)
-                .is_err()
-        );
+        assert!(PqProvider::decrypt_response(&private_key, &other, &encrypted).is_err());
     }
 
     #[test]

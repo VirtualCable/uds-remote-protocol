@@ -128,15 +128,14 @@ pub fn load() -> Option<Runtime> {
 /// Broker-backed mode from the `[broker]` section.
 fn load_pq(path: &std::path::Path, config: &server_config::ServerConfig) -> Option<PqRuntime> {
     let broker_config = match &config.broker {
-        Some(broker) if !broker.url.is_empty() && !broker.token.is_empty() => broker,
+        Some(broker) if !broker.url.is_empty() => broker,
         _ => {
-            warn!(path = %path.display(), "pq mode without a complete [broker] section (url, token); ignoring the config");
+            warn!(path = %path.display(), "pq mode without a complete [broker] section (url); ignoring the config");
             return None;
         }
     };
     let provider = match crate::broker::PqProvider::new(
         &broker_config.url,
-        &broker_config.token,
         broker_config.verify_ssl,
     ) {
         Ok(provider) => provider,

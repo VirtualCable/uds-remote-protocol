@@ -13,7 +13,7 @@
 //!   This is the reference/broker-less mode used in the lab.
 //! - **pq** ([`PqProvider`]): the service calls the UDS broker — the
 //!   `connection` kind of the `actor/v3` `ticket` action, authenticated
-//!   with the actor token — with the ticket the client presented in its
+//!   with the ticket itself — with the ticket the client presented in its
 //!   Hello, and gets back a [`SessionGrant`]: the per-session PSK (the
 //!   broker response's `shared_secret`), auto-logon credentials and
 //!   session parameters (`remotes[0].extra`). The payload schema is ours
