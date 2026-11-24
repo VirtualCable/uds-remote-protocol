@@ -503,6 +503,13 @@ const CLIENT_LIVENESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// duplication denied for a few seconds, so this must be generous.
 const RESIZE_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Session-resolution retry (§18.36): right after autologon the console can
+/// still be coming up and refuse the mode change. The initial apply is
+/// retried through the regular resize tick at this pace…
+const MODE_RETRY_DELAY: Duration = Duration::from_millis(500);
+/// …up to this many times before the session keeps the console's own mode.
+const MODE_APPLY_ATTEMPTS: u32 = 20;
+
 struct Legs {
     /// UDP send half, shared with the paced display-sender task (§12.6);
     /// `None` on the stream fallback.
@@ -2484,7 +2491,13 @@ async fn serve_stream<T: ReliableTransport + 'static>(
     // otherwise approach the client's HELLO preference without exceeding it.
     // Applied before capture starts so the first frames already carry the
     // final geometry; the guard restores the original mode on session end.
+    // Right after autologon the console can still be coming up and refuse
+    // the change — a refused session resolution is retried through the
+    // regular resize tick (never blocking the session on it).
     let mut display_mode = server::display_mode::DisplayModeGuard::new();
+    // Pending retry of the session resolution: (target mode, not-before).
+    let mut session_mode_retry: Option<((u32, u32), Instant)> = None;
+    let mut mode_attempts: u32 = 0;
     {
         let preferred = stream.peer_hello().map_or((0, 0), |h| {
             (u32::from(h.pref_width), u32::from(h.pref_height))
@@ -2493,8 +2506,21 @@ async fn serve_stream<T: ReliableTransport + 'static>(
             fixed: args.fixed_resolution,
             preferred,
         };
-        if display_mode.apply(&policy) {
-            info!(?args.fixed_resolution, ?preferred, "session resolution applied");
+        match display_mode.apply(&policy) {
+            server::display_mode::ApplyOutcome::Applied => {
+                info!(?args.fixed_resolution, ?preferred, "session resolution applied");
+            }
+            server::display_mode::ApplyOutcome::Unchanged => {}
+            server::display_mode::ApplyOutcome::Failed => {
+                if let Some(target) = display_mode.plan(&policy) {
+                    warn!(
+                        ?target,
+                        "session resolution refused; will retry on the resize tick"
+                    );
+                    mode_attempts += 1;
+                    session_mode_retry = Some((target, Instant::now() + MODE_RETRY_DELAY));
+                }
+            }
         }
     }
 
@@ -3152,7 +3178,7 @@ async fn serve_stream<T: ReliableTransport + 'static>(
                     resize_pending = None;
                 }
             }
-            _ = resize_tick.tick(), if ctl.resize_request.is_some() => {
+            _ = resize_tick.tick(), if ctl.resize_request.is_some() || session_mode_retry.is_some_and(|(_, at)| Instant::now() >= at) => {
                 // Mid-session resize (§18.37): re-apply the resolution
                 // policy with the client's new preference. The mode change
                 // invalidates the DXGI duplication — and on the Basic
@@ -3168,13 +3194,38 @@ async fn serve_stream<T: ReliableTransport + 'static>(
                 // not delivered a frame, new requests wait for later ticks
                 // (a window drag would otherwise stack mode changes on top
                 // of a duplication still in transition).
-                if let Some(request) = ctl.resize_request.take() {
+                //
+                // The same tick drives the session-resolution retry: the
+                // initial apply can be refused while the console is still
+                // coming up after autologon (§18.36). A fresh client
+                // request wins over — and cancels — a pending retry.
+                let fresh = ctl.resize_request.take();
+                if fresh.is_some() {
+                    mode_attempts = 0;
+                    session_mode_retry = None;
+                }
+                let request = fresh.or_else(|| {
+                    session_mode_retry
+                        .and_then(|(target, at)| (Instant::now() >= at).then_some(target))
+                });
+                if let Some(request) = request {
                     // Mode changes are impossible while a secure desktop owns
-                    // the console (§18.41): drop the request.
+                    // the console (§18.41): drop a client request; a session
+                    // retry is rescheduled instead — the resolution is still
+                    // owed when the secure desktop goes away.
                     if ctl.secure_input.is_some() {
-                        warn!(?request, "resize ignored while a secure desktop is active");
+                        if fresh.is_some() {
+                            warn!(?request, "resize ignored while a secure desktop is active");
+                        } else {
+                            session_mode_retry =
+                                Some((request, Instant::now() + MODE_RETRY_DELAY));
+                        }
                     } else if resize_pending.is_some() {
-                        ctl.resize_request = Some(request);
+                        if fresh.is_some() {
+                            ctl.resize_request = Some(request);
+                        }
+                        // A retry stays scheduled and simply fires again on a
+                        // later tick.
                     } else {
                         let policy = server::display_mode::ResolutionPolicy {
                             fixed: args.fixed_resolution,
@@ -3190,7 +3241,11 @@ async fn serve_stream<T: ReliableTransport + 'static>(
                             // the safety keyframe happened to fire. Force a
                             // keyframe and re-send the last captured frame.
                             None => {
-                                if let Some(last) = &last_frame {
+                                if fresh.is_none() {
+                                    // Retry settled: the target is already
+                                    // the current mode.
+                                    session_mode_retry = None;
+                                } else if let Some(last) = &last_frame {
                                     info!(
                                         ?request,
                                         "resize without mode change: courtesy keyframe refresh"
@@ -3211,11 +3266,43 @@ async fn serve_stream<T: ReliableTransport + 'static>(
                             }
                             Some(target) if bad_modes.contains(&target) => {
                                 warn!(?target, "resize targeted a blacklisted mode; ignored");
+                                if fresh.is_none() {
+                                    session_mode_retry = None;
+                                }
                             }
                             Some(_) => {
                                 stop_capture(&mut frame_rx, &mut frame_handle, &mut capture_stop);
-                                if display_mode.apply(&policy) {
-                                    resize_pending = Some(Instant::now());
+                                match display_mode.apply(&policy) {
+                                    server::display_mode::ApplyOutcome::Applied => {
+                                        session_mode_retry = None;
+                                        mode_attempts = 0;
+                                        resize_pending = Some(Instant::now());
+                                    }
+                                    server::display_mode::ApplyOutcome::Unchanged => {
+                                        if fresh.is_none() {
+                                            session_mode_retry = None;
+                                        }
+                                    }
+                                    server::display_mode::ApplyOutcome::Failed => {
+                                        // Only the session resolution is
+                                        // retried; a failed client resize is
+                                        // dropped (the client may ask again).
+                                        if fresh.is_none() {
+                                            if mode_attempts < MODE_APPLY_ATTEMPTS {
+                                                mode_attempts += 1;
+                                                session_mode_retry = Some((
+                                                    request,
+                                                    Instant::now() + MODE_RETRY_DELAY,
+                                                ));
+                                            } else {
+                                                warn!(
+                                                    ?request,
+                                                    "session resolution retry budget exhausted; keeping the console mode"
+                                                );
+                                                session_mode_retry = None;
+                                            }
+                                        }
+                                    }
                                 }
                                 start_capture(
                                     args,

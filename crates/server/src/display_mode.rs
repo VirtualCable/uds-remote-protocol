@@ -35,6 +35,19 @@ pub struct ResolutionPolicy {
 /// Only near-matching modes — a real fullscreen target — qualify.
 const ASPECT_TOLERANCE: f64 = 0.01;
 
+/// Result of one [`DisplayModeGuard::apply`] call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    /// The display mode changed; expect a capture re-initialization.
+    Applied,
+    /// Nothing to do: no target mode, or the target is already applied.
+    Unchanged,
+    /// A target mode existed but `ChangeDisplaySettingsExW` refused it
+    /// (e.g. the console is still coming up right after autologon); the
+    /// caller may retry later.
+    Failed,
+}
+
 /// Picks the target mode for `policy` from `modes` (candidate `(w, h)`
 /// pairs, already 32 bpp). Returns `None` when nothing should change.
 ///
@@ -87,8 +100,8 @@ mod stub {
         }
 
         /// Does nothing and reports no change.
-        pub fn apply(&mut self, _policy: &super::ResolutionPolicy) -> bool {
-            false
+        pub fn apply(&mut self, _policy: &super::ResolutionPolicy) -> super::ApplyOutcome {
+            super::ApplyOutcome::Unchanged
         }
 
         /// The stub never plans a mode change.
@@ -192,16 +205,17 @@ mod win {
             }
         }
 
-        /// Applies the policy to the primary display. Returns true when the
-        /// mode actually changed (the caller should expect a capture
-        /// re-initialization via DXGI access-lost).
-        pub fn apply(&mut self, policy: &ResolutionPolicy) -> bool {
+        /// Applies the policy to the primary display. See
+        /// [`super::ApplyOutcome`] for the result; a `Failed` outcome means
+        /// the mode set was refused and may be retried later (the console
+        /// can still be coming up right after autologon).
+        pub fn apply(&mut self, policy: &ResolutionPolicy) -> super::ApplyOutcome {
             let modes = supported_modes();
             let Some((w, h)) = super::pick_mode(policy, &modes) else {
-                return false;
+                return super::ApplyOutcome::Unchanged;
             };
             if self.applied == Some((w, h)) {
-                return false;
+                return super::ApplyOutcome::Unchanged;
             }
             // Save the original mode once, before the first change.
             if self.original.is_none() {
@@ -225,12 +239,12 @@ mod win {
             mode.dmBitsPerPel = 32;
             mode.dmFields = DEVMODE_FIELD_FLAGS(DM_PELSWIDTH.0 | DM_PELSHEIGHT.0 | DM_BITSPERPEL.0);
             if !set_mode(&mode) {
-                tracing::warn!(w, h, "display mode change failed; keeping current mode");
-                return false;
+                tracing::warn!(w, h, "display mode change refused; keeping current mode");
+                return super::ApplyOutcome::Failed;
             }
             tracing::info!(w, h, "console display mode applied");
             self.applied = Some((w, h));
-            true
+            super::ApplyOutcome::Applied
         }
 
         /// The currently applied mode, if any.
