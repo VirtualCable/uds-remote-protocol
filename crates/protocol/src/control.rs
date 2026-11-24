@@ -314,6 +314,13 @@ pub const SESSION_STAGE_EVICTING: u8 = 1;
 /// `SessionProgress` stage: waiting for the autologon to bring the console
 /// up (SAS + credential provider + shell startup).
 pub const SESSION_STAGE_AUTOLOGON: u8 = 2;
+/// `SessionProgress` stage: the agent is retrying the session-resolution
+/// change (the console refused it while still coming up after autologon).
+pub const SESSION_STAGE_DISPLAY: u8 = 3;
+/// `SessionProgress` stage: the wait is over; the client clears any
+/// progress notice. Sent when the display adjustment settles (applied or
+/// retry budget exhausted).
+pub const SESSION_STAGE_READY: u8 = 0;
 
 impl ControlMessage {
     /// Serializes the message (postcard).

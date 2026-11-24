@@ -2519,6 +2519,15 @@ async fn serve_stream<T: ReliableTransport + 'static>(
                     );
                     mode_attempts += 1;
                     session_mode_retry = Some((target, Instant::now() + MODE_RETRY_DELAY));
+                    // Heads-up (§18.53): the adjustment can take a few
+                    // seconds; the client shows the stage so the user does
+                    // not read the stretched desktop as a glitch.
+                    let notice = ControlMessage::SessionProgress {
+                        stage: protocol::SESSION_STAGE_DISPLAY,
+                    };
+                    if let Ok(encoded) = notice.encode() {
+                        let _ = stream.send(channel::CONTROL, &encoded).await;
+                    }
                 }
             }
         }
@@ -3314,6 +3323,18 @@ async fn serve_stream<T: ReliableTransport + 'static>(
                                 );
                             }
                         }
+                    }
+                    // A retry that settled (applied, already in place,
+                    // blacklisted or budget exhausted) clears the client's
+                    // progress notice (§18.53). A retry still scheduled —
+                    // or postponed by a secure desktop — keeps it.
+                    if fresh.is_none() && session_mode_retry.is_none()
+                        && let Ok(encoded) = (ControlMessage::SessionProgress {
+                            stage: protocol::SESSION_STAGE_READY,
+                        })
+                        .encode()
+                    {
+                        let _ = legs.send_control(&encoded).await;
                     }
                 }
             }

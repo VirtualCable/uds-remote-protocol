@@ -377,6 +377,9 @@ impl Session {
                         protocol::SESSION_STAGE_AUTOLOGON => {
                             "warming up the session (signing in)…".to_string()
                         }
+                        protocol::SESSION_STAGE_DISPLAY => {
+                            "adjusting the display resolution…".to_string()
+                        }
                         other => format!("server is preparing the session ({other})…"),
                     };
                     let _ = emit(&self.events, ClientEvent::Status(text));
@@ -1896,6 +1899,19 @@ impl Core {
                 // the lower frame rate and sanitized input.
                 info!(active, "secure desktop transition");
                 let _ = emit(&self.events, ClientEvent::SecureDesktop { active });
+            }
+            Ok(ControlMessage::SessionProgress { stage }) => {
+                // In-session progress notices (§18.53): the display-mode
+                // retry announces SESSION_STAGE_DISPLAY while it runs and
+                // SESSION_STAGE_READY when it settles.
+                let text = match stage {
+                    protocol::SESSION_STAGE_DISPLAY => {
+                        "adjusting the display resolution…".to_string()
+                    }
+                    protocol::SESSION_STAGE_READY => "session ready".to_string(),
+                    other => format!("server is preparing the session ({other})…"),
+                };
+                let _ = emit(&self.events, ClientEvent::Status(text));
             }
             _ => {}
         }
