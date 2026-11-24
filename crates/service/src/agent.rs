@@ -695,10 +695,22 @@ fn system_session_token(session_id: u32) -> Result<OwnedHandle> {
     Ok(OwnedHandle(dup_handle))
 }
 
-/// Opens (creating and appending to) the agent log file and makes the handle
-/// inheritable so the spawned agent can use it as stdout/stderr.
+/// Opens the agent log file for this session and makes the handle inheritable
+/// so the spawned agent can use it as stdout/stderr.
+///
+/// Every session starts a fresh file: the previous one moves to `agent.log.1`.
+/// A file left with a DACL that grants nothing, not even SYSTEM, would make
+/// every spawn fail with access denied, while a fresh file inherits the state
+/// directory's ACL.
 fn open_agent_log() -> Result<OwnedHandle> {
     let path = format!(r"{}\agent.log", crate::logging::STATE_DIR);
+    let previous = format!(r"{}\agent.log.1", crate::logging::STATE_DIR);
+    let _ = std::fs::remove_file(&previous);
+    // Renaming needs DELETE on the file itself, which a file with an empty DACL
+    // does not grant; deleting it only needs the directory's child-delete right.
+    if std::fs::rename(&path, &previous).is_err() {
+        let _ = std::fs::remove_file(&path);
+    }
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     // SAFETY: `wide` is a null-terminated path; no template handle.
     let handle = unsafe {
