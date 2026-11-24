@@ -73,13 +73,47 @@ pub async fn udp_detect<T: ReliableTransport>(
     max_attempts: u32,
     timeout: Duration,
 ) -> Result<Option<UdpLeg<UdpTransport>>> {
-    let mut buf = [0u8; 1024];
-    let (ch, n) = stream.recv_into(&mut buf).await?;
-    let msg = ControlMessage::decode(&buf[..n])?;
-    let ControlMessage::UdpOffer { port, token } = msg else {
-        return Err(TransportError::UnexpectedMessage(format!("{msg:?}")));
+    udp_detect_with_progress(
+        stream,
+        server_ip,
+        ticket,
+        secret,
+        clock,
+        max_attempts,
+        timeout,
+        UDP_OFFER_WAIT,
+        |_| {},
+    )
+    .await
+}
+
+/// How long the client waits for the server's `UdpOffer`. The server may spend
+/// a while bringing the console up (autologon, mode change) before it offers
+/// the datagram leg; the bound keeps a silent server from holding the client.
+pub const UDP_OFFER_WAIT: Duration = Duration::from_secs(60);
+
+/// [`udp_detect`] that also reports the server's `SessionProgress` stages sent
+/// while it waits for the UDP offer, instead of treating them as a protocol
+/// violation.
+#[allow(clippy::too_many_arguments)]
+pub async fn udp_detect_with_progress<T: ReliableTransport>(
+    stream: &mut EncryptedStream<T>,
+    server_ip: IpAddr,
+    ticket: &[u8; consts::TICKET_LENGTH],
+    secret: &[u8; consts::KEY_LENGTH],
+    clock: impl Fn() -> u64,
+    max_attempts: u32,
+    timeout: Duration,
+    offer_wait: Duration,
+    mut on_progress: impl FnMut(u8),
+) -> Result<Option<UdpLeg<UdpTransport>>> {
+    let offer = tokio::time::timeout(offer_wait, await_udp_offer(stream, &mut on_progress))
+        .await
+        .map_err(|_| TransportError::UnexpectedMessage("no UDP offer from the server".into()))??;
+    let (port, token) = match offer {
+        ControlMessage::UdpOffer { port, token } => (port, token),
+        other => return Err(TransportError::UnexpectedMessage(format!("{other:?}"))),
     };
-    debug_assert_eq!(ch, channel::CONTROL);
     // The datagram leg uses the SAME per-session salt as the stream (§6.1),
     // so its keys and its token are unique per session.
     let salt = stream
@@ -138,4 +172,24 @@ pub async fn udp_probe(
         }
     }
     Ok(None)
+}
+
+/// Reads control messages until the server's UDP offer, reporting progress
+/// stages on the way; anything else is a protocol violation.
+async fn await_udp_offer<T: ReliableTransport>(
+    stream: &mut EncryptedStream<T>,
+    on_progress: &mut impl FnMut(u8),
+) -> Result<ControlMessage> {
+    let mut buf = [0u8; 1024];
+    loop {
+        let (ch, n) = stream.recv_into(&mut buf).await?;
+        if ch != channel::CONTROL {
+            return Err(TransportError::UnexpectedMessage(format!("channel {ch:?}")));
+        }
+        match ControlMessage::decode(&buf[..n])? {
+            offer @ ControlMessage::UdpOffer { .. } => return Ok(offer),
+            ControlMessage::SessionProgress { stage } => on_progress(stage),
+            other => return Err(TransportError::UnexpectedMessage(format!("{other:?}"))),
+        }
+    }
 }
