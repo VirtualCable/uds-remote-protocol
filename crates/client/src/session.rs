@@ -368,19 +368,7 @@ impl Session {
                     }
                 }
                 Ok(ControlMessage::SessionProgress { stage }) => {
-                    let text = match stage {
-                        protocol::SESSION_STAGE_EVICTING => {
-                            "cleaning up the previous console session…".to_string()
-                        }
-                        protocol::SESSION_STAGE_AUTOLOGON => {
-                            "warming up the session (signing in)…".to_string()
-                        }
-                        protocol::SESSION_STAGE_DISPLAY => {
-                            "adjusting the display resolution…".to_string()
-                        }
-                        other => format!("server is preparing the session ({other})…"),
-                    };
-                    let _ = emit(&self.events, ClientEvent::Status(text));
+                    let _ = emit(&self.events, ClientEvent::Status(progress_text(stage)));
                 }
                 // Anything else is not part of the pre-session vocabulary.
                 _ => {}
@@ -1902,24 +1890,13 @@ impl Core {
                 // In-session progress notices (§18.53): the display-mode
                 // retry announces SESSION_STAGE_DISPLAY while it runs and
                 // SESSION_STAGE_READY when it settles.
-                let text = match stage {
-                    protocol::SESSION_STAGE_DISPLAY => {
-                        "adjusting the display resolution…".to_string()
-                    }
-                    protocol::SESSION_STAGE_READY => "session ready".to_string(),
-                    other => format!("server is preparing the session ({other})…"),
-                };
-                let _ = emit(&self.events, ClientEvent::Status(text));
+                let _ = emit(&self.events, ClientEvent::Status(progress_text(stage)));
             }
             _ => {}
         }
     }
 }
 
-/// Lab helper: appends reassembled H264 payloads to the file named by
-/// `UDSRP_DUMP_H264` (client side) so ffmpeg can validate what the decoder
-/// was actually fed (wire + reassembly path). Lab builds only; unset in
-/// production.
 /// Logs which leg carries the display: UDP when detection succeeded, TCP otherwise.
 fn log_display_leg(leg: Option<&UdpLeg<UdpTransport>>) {
     if let Some(leg) = leg {
@@ -1936,15 +1913,24 @@ fn status_reporter(events: &flume::Sender<ClientEvent>) -> impl FnMut(u8) + '_ {
     }
 }
 
-/// Status line for a server progress stage received before the session starts.
+/// Status line for a server progress stage (§18.53): the one mapping used
+/// by the pre-session wait, the in-session control loop and the UDP-offer
+/// progress callback. Unknown stages get a generic text so newer servers
+/// keep working with older clients.
 fn progress_text(stage: u8) -> String {
     match stage {
+        protocol::SESSION_STAGE_EVICTING => "cleaning up the previous console session…".to_string(),
+        protocol::SESSION_STAGE_AUTOLOGON => "warming up the session (signing in)…".to_string(),
         protocol::SESSION_STAGE_DISPLAY => "adjusting the display resolution…".to_string(),
         protocol::SESSION_STAGE_READY => "session ready".to_string(),
         other => format!("server is preparing the session ({other})…"),
     }
 }
 
+/// Lab helper: appends reassembled H264 payloads to the file named by
+/// `UDSRP_DUMP_H264` (client side) so ffmpeg can validate what the decoder
+/// was actually fed (wire + reassembly path). Lab builds only; unset in
+/// production.
 fn dump_h264_payload(payload: &[u8]) {
     use std::io::Write as _;
     use std::sync::{Mutex, OnceLock};
