@@ -25,8 +25,8 @@ use protocol::fragment::Reassembler;
 use protocol::{self, ControlMessage, CursorMessage, channel};
 use tracing::{debug, info, warn};
 use transport::{
-    Connector, DirectConnector, EncryptedStream, ReliableTransport, Target, UdpLeg, UdpTransport,
-    udp_detect, udp_probe,
+    Connector, DirectConnector, EncryptedStream, ReliableTransport, Target, UDP_OFFER_WAIT, UdpLeg,
+    UdpTransport, udp_detect_with_progress, udp_probe,
 };
 
 use crate::audio::{AudioClient, AudioSpec};
@@ -268,7 +268,7 @@ impl Session {
                 .await?
             }
             None => {
-                udp_detect(
+                udp_detect_with_progress(
                     &mut stream,
                     self.config.addr.ip(),
                     &self.config.ticket,
@@ -276,15 +276,13 @@ impl Session {
                     clock,
                     3,
                     Duration::from_millis(500),
+                    UDP_OFFER_WAIT,
+                    status_reporter(&self.events),
                 )
                 .await?
             }
         };
-        if let Some(leg) = &leg {
-            info!(rtt_micros = leg.initial_rtt_micros, "display leg: UDP");
-        } else {
-            warn!("UDP detection failed, display leg: TCP fallback");
-        }
+        log_display_leg(leg.as_ref());
         if !emit(&self.events, ClientEvent::Connected { udp: leg.is_some() }) {
             return Ok(());
         }
@@ -1922,6 +1920,31 @@ impl Core {
 /// `UDSRP_DUMP_H264` (client side) so ffmpeg can validate what the decoder
 /// was actually fed (wire + reassembly path). Lab builds only; unset in
 /// production.
+/// Logs which leg carries the display: UDP when detection succeeded, TCP otherwise.
+fn log_display_leg(leg: Option<&UdpLeg<UdpTransport>>) {
+    if let Some(leg) = leg {
+        info!(rtt_micros = leg.initial_rtt_micros, "display leg: UDP");
+    } else {
+        warn!("UDP detection failed, display leg: TCP fallback");
+    }
+}
+
+/// Forwards the server's progress stages to the GUI as status lines.
+fn status_reporter(events: &flume::Sender<ClientEvent>) -> impl FnMut(u8) + '_ {
+    move |stage| {
+        let _ = emit(events, ClientEvent::Status(progress_text(stage)));
+    }
+}
+
+/// Status line for a server progress stage received before the session starts.
+fn progress_text(stage: u8) -> String {
+    match stage {
+        protocol::SESSION_STAGE_DISPLAY => "adjusting the display resolution…".to_string(),
+        protocol::SESSION_STAGE_READY => "session ready".to_string(),
+        other => format!("server is preparing the session ({other})…"),
+    }
+}
+
 fn dump_h264_payload(payload: &[u8]) {
     use std::io::Write as _;
     use std::sync::{Mutex, OnceLock};

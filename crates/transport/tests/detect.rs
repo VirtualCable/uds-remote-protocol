@@ -11,10 +11,10 @@ use std::net::SocketAddr;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use protocol::crypt::{consts, derive_datagram_keys};
-use protocol::{Probe, ProbeAck, channel};
+use protocol::{ControlMessage, Probe, ProbeAck, SESSION_STAGE_DISPLAY, channel};
 use transport::{
     Connector, DirectConnector, DirectListener, EncryptedDatagram, EncryptedStream, Target,
-    udp_detect, udp_offer,
+    TransportError, udp_detect, udp_detect_with_progress, udp_offer,
 };
 
 fn ticket() -> [u8; consts::TICKET_LENGTH] {
@@ -36,7 +36,11 @@ fn micros() -> u64 {
     .unwrap()
 }
 
-async fn server_side(addr_tx: tokio::sync::oneshot::Sender<SocketAddr>, answer_probes: bool) {
+async fn server_side(
+    addr_tx: tokio::sync::oneshot::Sender<SocketAddr>,
+    answer_probes: bool,
+    progress_first: bool,
+) {
     let listener = DirectListener::bind("127.0.0.1:0").await.unwrap();
     addr_tx.send(listener.local_addr().unwrap()).unwrap();
 
@@ -44,6 +48,15 @@ async fn server_side(addr_tx: tokio::sync::oneshot::Sender<SocketAddr>, answer_p
     let mut stream = EncryptedStream::server_handshake(raw, &secret(), None)
         .await
         .unwrap();
+    if progress_first {
+        let stage = ControlMessage::SessionProgress {
+            stage: SESSION_STAGE_DISPLAY,
+        };
+        stream
+            .send(channel::CONTROL, &stage.encode().unwrap())
+            .await
+            .unwrap();
+    }
     let (pending, token) = udp_offer(&mut stream, "127.0.0.1:0", &ticket(), &secret())
         .await
         .unwrap();
@@ -94,7 +107,7 @@ async fn client_stream(addr: SocketAddr) -> EncryptedStream<Box<dyn transport::R
 #[tokio::test]
 async fn udp_detection_succeeds_end_to_end() {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(server_side(tx, true));
+    let server = tokio::spawn(server_side(tx, true, false));
     let addr = rx.await.unwrap();
 
     let mut stream = client_stream(addr).await;
@@ -156,7 +169,7 @@ async fn wait_first_ignores_tokenless_datagrams() {
 #[tokio::test]
 async fn udp_detection_falls_back_on_silence() {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(server_side(tx, false));
+    let server = tokio::spawn(server_side(tx, false, false));
     let addr = rx.await.unwrap();
 
     let mut stream = client_stream(addr).await;
@@ -173,5 +186,131 @@ async fn udp_detection_falls_back_on_silence() {
     .unwrap();
 
     assert!(leg.is_none(), "no ProbeAck -> lossy channels stay on TCP");
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn udp_detection_reports_progress_sent_before_the_offer() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(server_side(tx, true, true));
+    let addr = rx.await.unwrap();
+
+    let mut stream = client_stream(addr).await;
+    let stages = std::sync::Mutex::new(Vec::new());
+    let leg = udp_detect_with_progress(
+        &mut stream,
+        addr.ip(),
+        &ticket(),
+        &secret(),
+        micros,
+        3,
+        Duration::from_millis(300),
+        Duration::from_secs(60),
+        |stage| stages.lock().unwrap().push(stage),
+    )
+    .await
+    .unwrap()
+    .expect("UDP must be detected after the progress stage");
+
+    assert_eq!(*stages.lock().unwrap(), vec![SESSION_STAGE_DISPLAY]);
+    assert!(leg.initial_rtt_micros < 1_000_000);
+
+    // The server waits for one datagram to echo before it finishes.
+    let mut dgram = leg.dgram;
+    dgram.send(channel::CONTROL, b"ping").await.unwrap();
+    let mut buf = [0u8; 64];
+    let (_ch, n) = dgram.recv_into(&mut buf).await.unwrap();
+    assert_eq!(&buf[..n], b"ping");
+
+    server.await.unwrap();
+}
+
+async fn silent_server(addr_tx: tokio::sync::oneshot::Sender<SocketAddr>) {
+    let listener = DirectListener::bind("127.0.0.1:0").await.unwrap();
+    addr_tx.send(listener.local_addr().unwrap()).unwrap();
+
+    let (raw, _) = listener.accept().await.unwrap();
+    let _stream = EncryptedStream::server_handshake(raw, &secret(), None)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+}
+
+#[tokio::test]
+async fn udp_detection_gives_up_when_no_offer_arrives() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(silent_server(tx));
+    let addr = rx.await.unwrap();
+
+    let mut stream = client_stream(addr).await;
+    let result = udp_detect_with_progress(
+        &mut stream,
+        addr.ip(),
+        &ticket(),
+        &secret(),
+        micros,
+        3,
+        Duration::from_millis(300),
+        Duration::from_millis(200),
+        |_| {},
+    )
+    .await;
+
+    match result {
+        Err(TransportError::UnexpectedMessage(msg)) if msg.contains("no UDP offer") => {}
+        Err(e) => panic!("expected the offer timeout, got: {e}"),
+        Ok(_) => panic!("expected the offer timeout, got a UDP leg"),
+    }
+    server.await.unwrap();
+}
+
+async fn stray_channel_server(addr_tx: tokio::sync::oneshot::Sender<SocketAddr>) {
+    let listener = DirectListener::bind("127.0.0.1:0").await.unwrap();
+    addr_tx.send(listener.local_addr().unwrap()).unwrap();
+
+    let (raw, _) = listener.accept().await.unwrap();
+    let mut stream = EncryptedStream::server_handshake(raw, &secret(), None)
+        .await
+        .unwrap();
+    let stage = ControlMessage::SessionProgress {
+        stage: SESSION_STAGE_DISPLAY,
+    };
+    stream
+        .send(channel::INPUT, &stage.encode().unwrap())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+}
+
+#[tokio::test]
+async fn progress_on_another_channel_is_not_accepted() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(stray_channel_server(tx));
+    let addr = rx.await.unwrap();
+
+    let mut stream = client_stream(addr).await;
+    let stages = std::sync::Mutex::new(Vec::new());
+    let result = udp_detect_with_progress(
+        &mut stream,
+        addr.ip(),
+        &ticket(),
+        &secret(),
+        micros,
+        3,
+        Duration::from_millis(300),
+        Duration::from_secs(60),
+        |stage| stages.lock().unwrap().push(stage),
+    )
+    .await;
+
+    assert!(
+        stages.lock().unwrap().is_empty(),
+        "stage from a non-control channel was reported"
+    );
+    match result {
+        Err(TransportError::UnexpectedMessage(msg)) if msg.contains("channel") => {}
+        Err(e) => panic!("expected the channel error, got: {e}"),
+        Ok(_) => panic!("a non-control channel must not be accepted"),
+    }
     server.await.unwrap();
 }
